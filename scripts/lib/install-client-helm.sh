@@ -2505,7 +2505,7 @@ _mac_runner_set_args() {
   declare -F _mac_ct_runner_on >/dev/null 2>&1 || return 0
   _mac_ct_runner_on || return 0
   _TB_MAC_RUNNER_ARGS+=(--set "appleGpuRunner.enabled=true")
-  log "The Apple-GPU runner: on (this tracebloc CLI carries it)."
+  log "The tracebloc runner: on (this tracebloc CLI carries it)."
   # The runner trains on this Mac's GPU only over the job-data folder the install record
   # names (_mac_ct_job_data_record): cli-dev's runner refuses the GPU without it, and the
   # training runs on the CPU. A run that keeps none says why (backend#5976), in the copy

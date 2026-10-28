@@ -33,7 +33,7 @@
             "staging",
             "production"
           ],
-          "description": "LEGACY alias for TRACEBLOC_ENV (RFC-0076 settings-naming, S3) -- prefer TRACEBLOC_ENV in new values files. remove_by: 2026-12-31. Read only when TRACEBLOC_ENV is absent or empty; a blank CLIENT_ENV is also treated as unset (resolves to prod), same as it always has. Canonical values are `dev`, `stg`, `prod`; the documented aliases `development`/`staging`/`production` are accepted and normalized (matching client-runtime proxy_config.ENV_ALIASES). THE LIST IS CLOSED (enum above): anything else is rejected at install/upgrade time rather than passed through as a literal image tag. It was open until backend#1723's follow-up, and an out-of-vocabulary value did not degrade -- it silently reconfigured the edge: it became the tag for three control-plane images (no `:prd`/`:qa` tag is published), it missed `images.ingestor.channelTags` so the ingestor fell to the last-resort literal, it missed `serviceDbAccountsByEnv` so no service DB account was provisioned, AND it dropped the prod digest pin, which applies only where the env resolves to exactly `prod`. Load-bearing in four places, validated in none but tracebloc.clientEnv."
+          "description": "LEGACY alias for TRACEBLOC_ENV (RFC-0076 settings-naming, S3) -- prefer TRACEBLOC_ENV in new values files. remove_by: 2026-12-31. Read only when TRACEBLOC_ENV is absent or empty; a blank CLIENT_ENV is also treated as unset (resolves to prod), same as it always has. Canonical values are `dev`, `stg`, `prod`; the documented aliases `development`/`staging`/`production` are accepted and normalized (matching client-runtime proxy_config.ENV_ALIASES). THE LIST IS CLOSED (enum above): anything else is rejected at install/upgrade time rather than passed through as a literal image tag. It was open until backend#1723's follow-up, and an out-of-vocabulary value did not degrade -- it silently reconfigured the secure environment: it became the tag for three control-plane images (no `:prd`/`:qa` tag is published), it missed `images.ingestor.channelTags` so the ingestor fell to the last-resort literal, it missed `serviceDbAccountsByEnv` so no service DB account was provisioned, AND it dropped the prod digest pin, which applies only where the env resolves to exactly `prod`. Load-bearing in four places, validated in none but tracebloc.clientEnv."
         },
         "HTTP_PROXY_HOST": {
           "type": "string"
@@ -80,7 +80,7 @@
             "off",
             ""
           ],
-          "description": "Opt in to the node-derived training-job envelope (backend#664 Utilization Ladder L0): cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi, floor(allocatable*0.75)). WHEN OPTED IN, MEMORY is requests == limits and CPU is a request-only share weight with NO limit since backend#2418, so the job pod is Burstable - not Guaranteed QoS, as this description claimed for both dimensions until backend#2872. With the flag OFF (the default) jobs-manager uses its built-in literal on requests AND limits, so a CPU job pod is Guaranteed. THE CLASS FOLLOWS THE FLAG *AND* WHETHER THE POD REQUESTS A GPU: cpu-only + off -> Guaranteed, cpu-only + on -> Burstable, GPU -> BestEffort either way. A GPU job's envelope resolves to nvidia.com/gpu (and ephemeral-storage) only; neither is QoS-relevant, so the container sets no cpu/memory request or limit at all and the flag changes nothing on that cluster (backend#2871). Do not read 'Burstable' as the default, and do not turn this on expecting to escape Burstable on a GPU node. OFF by default and consulted ONLY when RESOURCE_REQUESTS and RESOURCE_LIMITS are both unset - an explicit envelope always wins, and the installer writes that pair unconditionally, so opting an installer-provisioned edge in means clearing both keys too. Turning it on caps the machine at ONE concurrent training job (any Guaranteed fraction >= 50% does), and on a multi-node cluster whose nodes are uncapped containers on one machine every node over-reports the whole machine, so the derivation's min-across-nodes does not protect you (backend#2167). The vocabulary is CLOSED and lowercase: jobs-manager itself lower-cases and strips, so 'True' would also work at runtime, but pinning lowercase here means a typo ('ture') is rejected at install time instead of silently leaving the flag off - the silent-off failure is precisely why backend#2250 exists. Narrowing the accepted set can never make the runtime do something this schema forbade; do not widen it to 'fix' the asymmetry."
+          "description": "Opt in to the node-derived training-job envelope (backend#664 Utilization Ladder L0): cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi, floor(allocatable*0.75)). WHEN OPTED IN, MEMORY is requests == limits and CPU is a request-only share weight with NO limit since backend#2418, so the job pod is Burstable - not Guaranteed QoS, as this description claimed for both dimensions until backend#2872. With the flag OFF (the default) jobs-manager uses its built-in literal on requests AND limits, so a CPU job pod is Guaranteed. THE CLASS FOLLOWS THE FLAG *AND* WHETHER THE POD REQUESTS A GPU: cpu-only + off -> Guaranteed, cpu-only + on -> Burstable, GPU -> BestEffort either way. A GPU job's envelope resolves to nvidia.com/gpu (and ephemeral-storage) only; neither is QoS-relevant, so the container sets no cpu/memory request or limit at all and the flag changes nothing on that cluster (backend#2871). Do not read 'Burstable' as the default, and do not turn this on expecting to escape Burstable on a GPU node. OFF by default and consulted ONLY when RESOURCE_REQUESTS and RESOURCE_LIMITS are both unset - an explicit envelope always wins, and the installer writes that pair unconditionally, so opting an installer-provisioned secure environment in means clearing both keys too. Turning it on caps the machine at ONE concurrent training job (any Guaranteed fraction >= 50% does), and on a multi-node cluster whose nodes are uncapped containers on one machine every node over-reports the whole machine, so the derivation's min-across-nodes does not protect you (backend#2167). The vocabulary is CLOSED and lowercase: jobs-manager itself lower-cases and strips, so 'True' would also work at runtime, but pinning lowercase here means a typo ('ture') is rejected at install time instead of silently leaving the flag off - the silent-off failure is precisely why backend#2250 exists. Narrowing the accepted set can never make the runtime do something this schema forbade; do not widen it to 'fix' the asymmetry."
         },
         "TRACEBLOC_DERIVE_JOB_ENVELOPE": {
           "type": "string",
@@ -137,12 +137,12 @@
         "TRACEBLOC_DDP": {
           "type": "string",
           "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
-          "description": "Per-edge OPERATOR switch: DistributedDataParallel across the GPUs a training pod is given. RFC-0067 D8 kill switch / rollback lever (backend#3149; runtime half client-runtime#480). jobs-manager reads it from its own container env and writes an explicit \"1\" or \"0\" onto every training pod it spawns. Truthy = 1 | true | yes (case-insensitive, whitespace-tolerant); everything else, including unset, is OFF. THE VOCABULARY IS CLOSED to those spellings plus 0 / false / no (and empty = unset): the runtime treats any unrecognised value as off, so without this a typo such as 'ture' or 'on' would silently disable the very thing the operator believed they had enabled."
+          "description": "Per-secure-environment OPERATOR switch: DistributedDataParallel across the GPUs a training pod is given. RFC-0067 D8 kill switch / rollback lever (backend#3149; runtime half client-runtime#480). jobs-manager reads it from its own container env and writes an explicit \"1\" or \"0\" onto every training pod it spawns. Truthy = 1 | true | yes (case-insensitive, whitespace-tolerant); everything else, including unset, is OFF. THE VOCABULARY IS CLOSED to those spellings plus 0 / false / no (and empty = unset): the runtime treats any unrecognised value as off, so without this a typo such as 'ture' or 'on' would silently disable the very thing the operator believed they had enabled."
         },
         "TRACEBLOC_AMP": {
           "type": "string",
           "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
-          "description": "Per-edge OPERATOR switch: automatic mixed precision (the engine still picks bf16-vs-fp16 from the device, RFC-0067 D4). RFC-0067 D8 kill switch / rollback lever (backend#3149; runtime half client-runtime#480). jobs-manager reads it from its own container env and writes an explicit \"1\" or \"0\" onto every training pod it spawns. Truthy = 1 | true | yes (case-insensitive, whitespace-tolerant); everything else, including unset, is OFF. THE VOCABULARY IS CLOSED to those spellings plus 0 / false / no (and empty = unset): the runtime treats any unrecognised value as off, so without this a typo such as 'ture' or 'on' would silently disable the very thing the operator believed they had enabled."
+          "description": "Per-secure-environment OPERATOR switch: automatic mixed precision (the engine still picks bf16-vs-fp16 from the device, RFC-0067 D4). RFC-0067 D8 kill switch / rollback lever (backend#3149; runtime half client-runtime#480). jobs-manager reads it from its own container env and writes an explicit \"1\" or \"0\" onto every training pod it spawns. Truthy = 1 | true | yes (case-insensitive, whitespace-tolerant); everything else, including unset, is OFF. THE VOCABULARY IS CLOSED to those spellings plus 0 / false / no (and empty = unset): the runtime treats any unrecognised value as off, so without this a typo such as 'ture' or 'on' would silently disable the very thing the operator believed they had enabled."
         },
         "MULTI_GPU_LEASE_SECONDS": {
           "type": "string",
@@ -167,7 +167,7 @@
         "EMIT_TOPOLOGY": {
           "type": "string",
           "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
-          "description": "Per-edge OPERATOR switch: the training pod records world_size + effective_batch in its cycle payload (backend#3160's columns; RFC-0067 D5/D9). Contract: tracebloc-engine#879 @ 383b0daa — default off, truthy 1|true|yes (case-insensitive, whitespace-stripped). ORDER MATTERS: the backend carrying #3160 must be deployed to the edge's environment first, or the emitted key destroys the cycle row (update_cycle_data deletes before it creates). Forwarded to the training pod by client-runtime's OPERATOR_TRAINING_SWITCHES (client-runtime#507), so the ordering rule is live: set this only after that backend is deployed. The vocabulary is closed for the same reason as TRACEBLOC_DDP: the engine reads anything unrecognised as off."
+          "description": "Per-secure-environment OPERATOR switch: the training pod records world_size + effective_batch in its cycle payload (backend#3160's columns; RFC-0067 D5/D9). Contract: tracebloc-engine#879 @ 383b0daa — default off, truthy 1|true|yes (case-insensitive, whitespace-stripped). ORDER MATTERS: the backend carrying #3160 must be deployed to the environment the secure environment runs in first, or the emitted key destroys the cycle row (update_cycle_data deletes before it creates). Forwarded to the training pod by client-runtime's OPERATOR_TRAINING_SWITCHES (client-runtime#507), so the ordering rule is live: set this only after that backend is deployed. The vocabulary is closed for the same reason as TRACEBLOC_DDP: the engine reads anything unrecognised as off."
         },
         "TRACEBLOC_EMIT_TOPOLOGY": {
           "type": "string",
@@ -177,7 +177,7 @@
         "EMIT_OOM_RESCUE": {
           "type": "string",
           "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
-          "description": "Per-edge OPERATOR switch: the training pod records oom_rescue_rung + oom_rescue_epoch in its cycle payload when a CUDA-OOM rescue fired (backend#2175's columns; the engine's _emit_oom_rescue_fields gate). Default off, truthy 1|true|yes; same ordering rule as EMIT_TOPOLOGY — backend with the columns first. Forwarded to the training pod by client-runtime's OPERATOR_TRAINING_SWITCHES (client-runtime#507), so the ordering rule is live: set this only after that backend is deployed. Closed vocabulary, same reason as TRACEBLOC_DDP."
+          "description": "Per-secure-environment OPERATOR switch: the training pod records oom_rescue_rung + oom_rescue_epoch in its cycle payload when a CUDA-OOM rescue fired (backend#2175's columns; the engine's _emit_oom_rescue_fields gate). Default off, truthy 1|true|yes; same ordering rule as EMIT_TOPOLOGY — backend with the columns first. Forwarded to the training pod by client-runtime's OPERATOR_TRAINING_SWITCHES (client-runtime#507), so the ordering rule is live: set this only after that backend is deployed. Closed vocabulary, same reason as TRACEBLOC_DDP."
         },
         "TRACEBLOC_EMIT_OOM_RESCUE": {
           "type": "string",
@@ -686,7 +686,7 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from perExperimentDbCredsByEnv keyed on the RESOLVED CLIENT_ENV. RFC-0003 D10 (backend#1181): mint a per-experiment MySQL user scoped to the experiment's own table(s), injected via a per-job Secret, instead of the shared edgeuser. Set true or false only to pin ONE edge against its fleet default."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from perExperimentDbCredsByEnv keyed on the RESOLVED CLIENT_ENV. RFC-0003 D10 (backend#1181): mint a per-experiment MySQL user scoped to the experiment's own table(s), injected via a per-job Secret, instead of the shared edgeuser. Set true or false only to pin ONE secure environment against its fleet default."
     },
     "perExperimentDbCredsByEnv": {
       "type": "object",
@@ -704,7 +704,7 @@
     },
     "narrowEdgeuserByEnv": {
       "type": "object",
-      "description": "Per-environment default for narrowEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). TRUE for dev, stg and prod: this is the last step of backend#1528's last stage, so a fleet opts in only once its posture is verified -- all three are (backend#947, the consumer migration off edgeuser verified live), so a fresh install comes up already retired. The baked default still declines on any edge whose posture is incomplete, and an explicit flip where any predecessor gate is off fails the render — see narrowEdgeuser.",
+      "description": "Per-environment default for narrowEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). TRUE for dev, stg and prod: this is the last step of backend#1528's last stage, so a fleet opts in only once its posture is verified -- all three are (backend#947, the consumer migration off edgeuser verified live), so a fresh install comes up already retired. The baked default still declines on any secure environment whose posture is incomplete, and an explicit flip where any predecessor gate is off fails the render — see narrowEdgeuser.",
       "additionalProperties": {
         "type": "boolean"
       }
@@ -714,11 +714,11 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from dropEdgeuserByEnv keyed on the resolved CLIENT_ENV. backend#5427 Part A: the terminal step past narrowEdgeuser — DROP USER 'edgeuser'@'%' and @'localhost' at every jobs-manager boot, so an inaccessible customer edge retires the default-credential account itself (we never reach those edges to run the DDL by hand). STRICTLY STRONGER THAN narrowEdgeuser AND GATED ON IT, enforced two ways: the BAKED default (dropEdgeuserByEnv) resolves on only where narrowEdgeuser also resolves on (tracebloc.dropEdgeuser returns empty otherwise), and an explicit dropEdgeuser:true override is honored by the helper but then REFUSED at render by tracebloc.assertDropEdgeuserIsSafe — and again by jobs-manager at startup — when narrowEdgeuser is not on. So the effect is the same whichever path you take: an edge is never dropped before it is narrowed. It therefore inherits narrowEdgeuser's full predecessor requirement (bootstrapDbReparent, serviceDbAccounts, perExperimentDbCreds all on), checked in the same assert. The DROP is IF EXISTS and idempotent: once the account is gone each subsequent boot is a no-op. Unlike narrow (reversible from the S0 SHOW GRANTS snapshot) this is NOT reversible — only flip it where the fleet's posture is verified and narrowEdgeuser has already soaked."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from dropEdgeuserByEnv keyed on the resolved CLIENT_ENV. backend#5427 Part A: the terminal step past narrowEdgeuser — DROP USER 'edgeuser'@'%' and @'localhost' at every jobs-manager boot, so an inaccessible customer secure environment retires the default-credential account itself (we never reach those secure environments to run the DDL by hand). STRICTLY STRONGER THAN narrowEdgeuser AND GATED ON IT, enforced two ways: the BAKED default (dropEdgeuserByEnv) resolves on only where narrowEdgeuser also resolves on (tracebloc.dropEdgeuser returns empty otherwise), and an explicit dropEdgeuser:true override is honored by the helper but then REFUSED at render by tracebloc.assertDropEdgeuserIsSafe — and again by jobs-manager at startup — when narrowEdgeuser is not on. So the effect is the same whichever path you take: a secure environment is never dropped before it is narrowed. It therefore inherits narrowEdgeuser's full predecessor requirement (bootstrapDbReparent, serviceDbAccounts, perExperimentDbCreds all on), checked in the same assert. The DROP is IF EXISTS and idempotent: once the account is gone each subsequent boot is a no-op. Unlike narrow (reversible from the S0 SHOW GRANTS snapshot) this is NOT reversible — only flip it where the fleet's posture is verified and narrowEdgeuser has already soaked."
     },
     "dropEdgeuserByEnv": {
       "type": "object",
-      "description": "Per-environment default for dropEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). TRUE for every environment — dev, stg, prod (backend#5427): narrowEdgeuser has been baked-on across all three for weeks, so edgeuser is already USAGE-only and unused and DROP is the clean finish; dev and stg were verified retired live (Part C telemetry) before prod, the final flip. The baked default declines on any edge whose posture is incomplete, and — because drop is gated on narrow — an explicit flip where narrowEdgeuser (or any of its predecessors) is off fails the render; see dropEdgeuser.",
+      "description": "Per-environment default for dropEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). TRUE for every environment — dev, stg, prod (backend#5427): narrowEdgeuser has been baked-on across all three for weeks, so edgeuser is already USAGE-only and unused and DROP is the clean finish; dev and stg were verified retired live (Part C telemetry) before prod, the final flip. The baked default declines on any secure environment whose posture is incomplete, and — because drop is gated on narrow — an explicit flip where narrowEdgeuser (or any of its predecessors) is off fails the render; see dropEdgeuser.",
       "additionalProperties": {
         "type": "boolean"
       }
@@ -732,7 +732,7 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from serviceDbAccountsByEnv keyed on the resolved CLIENT_ENV (backend#1752). Set true/false to force one answer on this edge regardless of environment. backend#1528 S1 (RFC-0003 D10 close-out): provision the dedicated MySQL service identities tb_meta (metadata DB) and tb_ingest (dataset DB) that replace the root-equivalent edgeuser. S2 has shipped, so wherever this is on the consumers authenticate as the dedicated identities; only an explicit override-off renders the shared-edgeuser path byte-for-byte. Flip per environment, dev first."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from serviceDbAccountsByEnv keyed on the resolved CLIENT_ENV (backend#1752). Set true/false to force one answer on this secure environment regardless of environment. backend#1528 S1 (RFC-0003 D10 close-out): provision the dedicated MySQL service identities tb_meta (metadata DB) and tb_ingest (dataset DB) that replace the root-equivalent edgeuser. S2 has shipped, so wherever this is on the consumers authenticate as the dedicated identities; only an explicit override-off renders the shared-edgeuser path byte-for-byte. Flip per environment, dev first."
     },
     "tbMetaPassword": {
       "type": "string",
@@ -747,7 +747,7 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from ingestRunTokenByEnv keyed on the resolved CLIENT_ENV (backend#2073), mirroring serviceDbAccounts. Set true/false to force one answer on this edge regardless of environment. When on, jobs-manager gives each ingestion Job its own per-run, ingest-scoped, 24h backend token minted through the backend's POST /ingest-token/ (client-runtime#868) instead of the edge's shared token; rendered as TRACEBLOC_INGEST_RUN_TOKEN \"true\"/\"false\". A 404 from the endpoint falls back to the shared token; any other mint failure fails the ingestion submit with 502. Forcing it on needs an ingestor that reads TRACEBLOC_INGESTOR_ID / BACKEND_TOKEN_SCHEME (data-ingestors#931): an older ingestor breaks under a bound token."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from ingestRunTokenByEnv keyed on the resolved CLIENT_ENV (backend#2073), mirroring serviceDbAccounts. Set true/false to force one answer on this secure environment regardless of environment. When on, jobs-manager gives each ingestion Job its own per-run, ingest-scoped, 24h backend token minted through the backend's POST /ingest-token/ (client-runtime#868) instead of the secure environment's shared token; rendered as TRACEBLOC_INGEST_RUN_TOKEN \"true\"/\"false\". A 404 from the endpoint falls back to the shared token; any other mint failure fails the ingestion submit with 502. Forcing it on needs an ingestor that reads TRACEBLOC_INGESTOR_ID / BACKEND_TOKEN_SCHEME (data-ingestors#931): an older ingestor breaks under a bound token."
     },
     "bootstrapDbReparent": {
       "type": [
@@ -765,7 +765,7 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from rotateMysqlRootByEnv keyed on the resolved CLIENT_ENV, mirroring serviceDbAccounts. backend#947 / backend#1528 Phase 0: chart-manage the mysql-client root password (generated Secret + MYSQL_ROOT_PASSWORD env) so a FRESH datadir is born rotated off the image's baked literal. Off everywhere by default. Only rotates a fresh datadir; an existing edge needs the one-time ALTER USER 'root' rollout DDL (reads the same Secret), or selfRotateMysqlRoot, which has mysqld run it at every start. Turning it on rolls the mysql pod."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from rotateMysqlRootByEnv keyed on the resolved CLIENT_ENV, mirroring serviceDbAccounts. backend#947 / backend#1528 Phase 0: chart-manage the mysql-client root password (generated Secret + MYSQL_ROOT_PASSWORD env) so a FRESH datadir is born rotated off the image's baked literal. Off everywhere by default. Only rotates a fresh datadir; an existing secure environment needs the one-time ALTER USER 'root' rollout DDL (reads the same Secret), or selfRotateMysqlRoot, which has mysqld run it at every start. Turning it on rolls the mysql pod."
     },
     "mysqlRootPassword": {
       "type": "string",
@@ -790,11 +790,11 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from selfRotateMysqlRootByEnv keyed on the resolved CLIENT_ENV. backend#5427: let mysqld rotate root itself. At every start on an EXISTING datadir it sets root's password to MYSQL_ROOT_PASSWORD in mysql-credentials (the same Secret and key every other root reader uses, client-dev#1852) through init_file, which runs before the server accepts connections and needs no authentication; a fresh datadir is left to the entrypoint. An existing un-rotated edge on a live cluster then resolves rotation ON, and the rotation guard's existing-datadir refusal no longer applies (its cluster-less refusal still does). The render refuses a root password that is not alphanumeric, or a bootstrapDbPassword pin that differs from it. Turning it on rolls the mysql pod once."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from selfRotateMysqlRootByEnv keyed on the resolved CLIENT_ENV. backend#5427: let mysqld rotate root itself. At every start on an EXISTING datadir it sets root's password to MYSQL_ROOT_PASSWORD in mysql-credentials (the same Secret and key every other root reader uses, client-dev#1852) through init_file, which runs before the server accepts connections and needs no authentication; a fresh datadir is left to the entrypoint. An existing un-rotated secure environment on a live cluster then resolves rotation ON, and the rotation guard's existing-datadir refusal no longer applies (its cluster-less refusal still does). The render refuses a root password that is not alphanumeric, or a bootstrapDbPassword pin that differs from it. Turning it on rolls the mysql pod once."
     },
     "selfRotateMysqlRootByEnv": {
       "type": "object",
-      "description": "Per-environment default for selfRotateMysqlRoot (backend#5427), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). True for dev, stg and prod: the rollout flipped one environment at a time, prod last. Set selfRotateMysqlRoot=false to hold one edge back.",
+      "description": "Per-environment default for selfRotateMysqlRoot (backend#5427), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). True for dev, stg and prod: the rollout flipped one environment at a time, prod last. Set selfRotateMysqlRoot=false to hold one secure environment back.",
       "additionalProperties": {
         "type": "boolean"
       }
@@ -854,11 +854,11 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. RFC-0003 D16 (backend#1204/#1205): stamp TRACEBLOC_PER_INGESTION_TABLES=1 into every ingestion Job. When null the effective value comes from perIngestionTablesByEnv keyed on the resolved CLIENT_ENV (backend#1834); a literal true/false forces this edge regardless of environment. File-bearing categories are refused under the flag until client-runtime#203 phase 2."
+      "description": "OPERATOR OVERRIDE, normally unset. RFC-0003 D16 (backend#1204/#1205): stamp TRACEBLOC_PER_INGESTION_TABLES=1 into every ingestion Job. When null the effective value comes from perIngestionTablesByEnv keyed on the resolved CLIENT_ENV (backend#1834); a literal true/false forces this secure environment regardless of environment. File-bearing categories are refused under the flag until client-runtime#203 phase 2."
     },
     "perIngestionTablesByEnv": {
       "type": "object",
-      "description": "Per-environment default for perIngestionTables (backend#1834), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). Mirrors ingestRunTokenByEnv. On for dev and stg since a run on a dev secure environment showed the whole D16 path (physical_table on the backend row, training reads ds_<hex>, tb data delete drops the table, the salt and the journal; backend#1834). Off for prod until tb data list names a ds_ table by its dataset (backend#7206). A secure environment whose ingestor resolves to images.ingestor.prodDigest (v0.8.2, before the data-ingestors v0.8.16 ds_ handle fix, backend#2895) resolves off whatever this map or the override says. An edge upgraded with plain --reuse-values from a chart without this key resolves off; --reset-then-reuse-values picks it up.",
+      "description": "Per-environment default for perIngestionTables (backend#1834), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). Mirrors ingestRunTokenByEnv. On for dev and stg since a run on a dev secure environment showed the whole D16 path (physical_table on the backend row, training reads ds_<hex>, tb data delete drops the table, the salt and the journal; backend#1834). Off for prod until tb data list names a ds_ table by its dataset (backend#7206). A secure environment whose ingestor resolves to images.ingestor.prodDigest (v0.8.2, before the data-ingestors v0.8.16 ds_ handle fix, backend#2895) resolves off whatever this map or the override says. A secure environment upgraded with plain --reuse-values from a chart without this key resolves off; --reset-then-reuse-values picks it up.",
       "additionalProperties": {
         "type": "boolean"
       }
@@ -888,7 +888,7 @@
             "boolean",
             "null"
           ],
-          "description": "PER-EDGE OVERRIDE, normally unset. When null the effective value comes from trainingResumeEnabledByEnv keyed on the resolved CLIENT_ENV; true or false always wins, so `false` opts one edge out."
+          "description": "PER-SECURE-ENVIRONMENT OVERRIDE, normally unset. When null the effective value comes from trainingResumeEnabledByEnv keyed on the resolved CLIENT_ENV; true or false always wins, so `false` opts one secure environment out."
         },
         "existingClaim": {
           "type": "string",
@@ -1326,7 +1326,7 @@
             },
             "channelTags": {
               "type": "object",
-              "description": "Per-environment floating tags, keyed on the resolved CLIENT_ENV, used when `tag` is empty. `dev`/`stg` track the UNSIGNED internal channels published from the matching data-ingestors branch; `prod` stays a semver float because no :prod tag is published. backend#1360. KEYS ARE CLOSED (`additionalProperties: false`): the lookup is on the RESOLVED env, so only `dev`/`stg`/`prod` can ever match. Before this, `channelTags.staging: \"0.8.2\"` on a staging edge validated fine and was then ignored -- CLIENT_ENV=staging normalizes to `stg` and read `channelTags.stg` -- so the same word was normalized one key over and meaningless here. Write the canonical key even when you wrote the alias in CLIENT_ENV.",
+              "description": "Per-environment floating tags, keyed on the resolved CLIENT_ENV, used when `tag` is empty. `dev`/`stg` track the UNSIGNED internal channels published from the matching data-ingestors branch; `prod` stays a semver float because no :prod tag is published. backend#1360. KEYS ARE CLOSED (`additionalProperties: false`): the lookup is on the RESOLVED env, so only `dev`/`stg`/`prod` can ever match. Before this, `channelTags.staging: \"0.8.2\"` on a staging secure environment validated fine and was then ignored -- CLIENT_ENV=staging normalizes to `stg` and read `channelTags.stg` -- so the same word was normalized one key over and meaningless here. Write the canonical key even when you wrote the alias in CLIENT_ENV.",
               "additionalProperties": false,
               "properties": {
                 "dev": {
@@ -1358,12 +1358,12 @@
             "prodDigest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",
-              "description": "Prod reproducibility pin (sha256:<64 hex>), applied when `prodPin` resolves true (i.e. CLIENT_ENV resolves to prod). A CHART DEFAULT by design: `helm upgrade --reset-then-reuse-values` (the fleet auto-upgrade) adopts new chart defaults but re-applies stored user-supplied values, so only a default can update an installed edge (backend#1245). Must be a multi-arch index (#186); regenerate with scripts/resolve-ingestor-digest.sh --write and bump Chart.yaml."
+              "description": "Prod reproducibility pin (sha256:<64 hex>), applied when `prodPin` resolves true (i.e. CLIENT_ENV resolves to prod). A CHART DEFAULT by design: `helm upgrade --reset-then-reuse-values` (the fleet auto-upgrade) adopts new chart defaults but re-applies stored user-supplied values, so only a default can update an installed secure environment (backend#1245). Must be a multi-arch index (#186); regenerate with scripts/resolve-ingestor-digest.sh --write and bump Chart.yaml."
             },
             "prodDigestServiceDb": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",
-              "description": "Prod pin for edges whose `serviceDbAccounts` resolves on (every fresh install) — they get DB_USER, so they can run a current ingestor (backend#5099). Applied instead of `prodDigest` when `prodPin` resolves true and service DB accounts are on; empty = use `prodDigest` for every prod edge. Must be a multi-arch index (#186); resolve with scripts/resolve-ingestor-digest.sh and bump Chart.yaml."
+              "description": "Prod pin for secure environments whose `serviceDbAccounts` resolves on (every fresh install) — they get DB_USER, so they can run a current ingestor (backend#5099). Applied instead of `prodDigest` when `prodPin` resolves true and service DB accounts are on; empty = use `prodDigest` for every prod secure environment. Must be a multi-arch index (#186); resolve with scripts/resolve-ingestor-digest.sh and bump Chart.yaml."
             },
             "pinnedImageLabels": {
               "type": "object",
@@ -1388,7 +1388,7 @@
             },
             "prodPin": {
               "type": "boolean",
-              "description": "Whether `prodDigest` applies on this edge. Default true = pin on prod only; dev/staging carry env.CLIENT_ENV=dev|stg and keep floating on `tag`. Set false on a canary prod edge to float it while the rest of the fleet stays pinned."
+              "description": "Whether `prodDigest` applies on this secure environment. Default true = pin on prod only; dev/staging carry env.CLIENT_ENV=dev|stg and keep floating on `tag`. Set false on a canary prod secure environment to float it while the rest of the fleet stays pinned."
             },
             "ackDrift": {
               "type": "object",
@@ -1417,7 +1417,7 @@
             "digest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",
-              "description": "Optional explicit per-edge pin (sha256:<64 hex>). Empty (default) = let prodPin/CLIENT_ENV decide. When set it wins over `prodDigest` and over `prodPin: false` in ANY environment, and every ingestion Job runs this exact image with imagePullPolicy=IfNotPresent (reproducibility). Must be a multi-arch index (#186). Surfaces as INGESTOR_IMAGE_DIGEST."
+              "description": "Optional explicit per-secure-environment pin (sha256:<64 hex>). Empty (default) = let prodPin/CLIENT_ENV decide. When set it wins over `prodDigest` and over `prodPin: false` in ANY environment, and every ingestion Job runs this exact image with imagePullPolicy=IfNotPresent (reproducibility). Must be a multi-arch index (#186). Surfaces as INGESTOR_IMAGE_DIGEST."
             }
           }
         },
@@ -1429,7 +1429,7 @@
               "not": {
                 "const": "latest"
               },
-              "description": "Image tag for mysql-client. Empty falls back to the literal `prod` in EVERY environment -- NOT to env.CLIENT_ENV, which is what this said until backend#1723's follow-up. The template is `.Values.images.mysqlClient.tag | default \"prod\"`, and dev/stg/prod edges all render `mysql-client:prod`. The doc was not merely imprecise, it was an instruction to break the edge: tracebloc/mysql-client publishes 8.0, 8.4, four 8.4-<sha> builds, latest and prod -- there is no `dev` or `stg` tag -- so a reader who believed it and set an env-derived tag would pull a nonexistent image AND disarm the mysql-format-guard, since tracebloc.mysqlEngineMajor maps an unrecognized tag to \"unknown\" and the guard stands down. Must not be \"latest\"."
+              "description": "Image tag for mysql-client. Empty falls back to the literal `prod` in EVERY environment -- NOT to env.CLIENT_ENV, which is what this said until backend#1723's follow-up. The template is `.Values.images.mysqlClient.tag | default \"prod\"`, and dev/stg/prod secure environments all render `mysql-client:prod`. The doc was not merely imprecise, it was an instruction to break the secure environment: tracebloc/mysql-client publishes 8.0, 8.4, four 8.4-<sha> builds, latest and prod -- there is no `dev` or `stg` tag -- so a reader who believed it and set an env-derived tag would pull a nonexistent image AND disarm the mysql-format-guard, since tracebloc.mysqlEngineMajor maps an unrecognized tag to \"unknown\" and the guard stands down. Must not be \"latest\"."
             },
             "digest": {
               "type": "string",
@@ -1442,7 +1442,7 @@
             "digestRegistry": {
               "type": "string",
               "pattern": "^([A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._-]+)*)?$",
-              "description": "The registry `digest` was resolved on -- a bare host (optional :port and /path), spelled exactly as images.traceblocRegistry or global.imageRegistry would be. Identical contract to images.jobsManager.digestRegistry: the pin is rendered ONLY when this equals the registry the release pulls from, and is IGNORED otherwise, in which case the Deployment renders `repository:tag` -- which both ghcr.io and the retained, frozen Docker Hub namespace serve. EMPTY with a non-empty `digest` is the legacy rule (deemed resolved on docker.io), so this is set explicitly to ghcr.io at D1 step 6 (backend#3397): left empty, the pin would be ignored at the ghcr.io default and every edge would silently fall back to the floating tag."
+              "description": "The registry `digest` was resolved on -- a bare host (optional :port and /path), spelled exactly as images.traceblocRegistry or global.imageRegistry would be. Identical contract to images.jobsManager.digestRegistry: the pin is rendered ONLY when this equals the registry the release pulls from, and is IGNORED otherwise, in which case the Deployment renders `repository:tag` -- which both ghcr.io and the retained, frozen Docker Hub namespace serve. EMPTY with a non-empty `digest` is the legacy rule (deemed resolved on docker.io), so this is set explicitly to ghcr.io at D1 step 6 (backend#3397): left empty, the pin would be ignored at the ghcr.io default and every secure environment would silently fall back to the floating tag."
             }
           }
         },
@@ -1470,7 +1470,7 @@
         "training": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Digest-pinned training images (RFC-1246 P2; backend#3156 for RFC-0067 D8). `digests` is task -> {cpu, gpu} -> canonical sha256 digest, rendered onto jobs-manager as TRAINING_IMAGE_DIGESTS (toJson); `pinned` gates it (\"\" = auto: prod only; true/false override), rendered as TRAINING_IMAGE_PINNED; `capabilities` is the engine's own io.tracebloc.engine.capabilities label read off the PINNED images by the resolver that writes the digests -- never hand-typed -- rendered as TRAINING_ENGINE_CAPABILITIES; `digestRegistry` is the registry the map was resolved on, and the map and capabilities render only when it equals the registry the edge pulls training images from. `parents` is the shared torch parent the pinned images of an arch build FROM, read off their io.tracebloc.engine.torch-parent label by the same resolver; it renders the installer's prepull manifest (ConfigMap <release>-training-prepull) only where the map renders. `engineCommit` is the tracebloc-engine source commit every pinned image was built from, read off their org.opencontainers.image.revision label by the same resolver; it is a record for whoever reads the values file (the release train's changelog), not rendered. `macosBundle` is the macOS engine bundle of the same pinned release, for a Mac's Apple GPU runner; it renders ConfigMap tracebloc-apple-gpu-bundle and jobs-manager's TRACEBLOC_APPLE_GPU_BUNDLE_DIGEST only where the map renders. The chart refuses `capabilities`, `parents`, `engineCommit` or `macosBundle` with an empty `digests`.",
+          "description": "Digest-pinned training images (RFC-1246 P2; backend#3156 for RFC-0067 D8). `digests` is task -> {cpu, gpu} -> canonical sha256 digest, rendered onto jobs-manager as TRAINING_IMAGE_DIGESTS (toJson); `pinned` gates it (\"\" = auto: prod only; true/false override), rendered as TRAINING_IMAGE_PINNED; `capabilities` is the engine's own io.tracebloc.engine.capabilities label read off the PINNED images by the resolver that writes the digests -- never hand-typed -- rendered as TRAINING_ENGINE_CAPABILITIES; `digestRegistry` is the registry the map was resolved on, and the map and capabilities render only when it equals the registry the secure environment pulls training images from. `parents` is the shared torch parent the pinned images of an arch build FROM, read off their io.tracebloc.engine.torch-parent label by the same resolver; it renders the installer's prepull manifest (ConfigMap <release>-training-prepull) only where the map renders. `engineCommit` is the tracebloc-engine source commit every pinned image was built from, read off their org.opencontainers.image.revision label by the same resolver; it is a record for whoever reads the values file (the release train's changelog), not rendered. `macosBundle` is the macOS engine bundle of the same pinned release, for a Mac's Apple GPU runner; it renders ConfigMap tracebloc-apple-gpu-bundle and jobs-manager's TRACEBLOC_APPLE_GPU_BUNDLE_DIGEST only where the map renders. The chart refuses `capabilities`, `parents`, `engineCommit` or `macosBundle` with an empty `digests`.",
           "properties": {
             "pinned": {
               "enum": [
@@ -1485,7 +1485,7 @@
             "digestRegistry": {
               "type": "string",
               "pattern": "^([A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._-]+)*)?$",
-              "description": "The registry `digests` was resolved on -- a bare host (optional :port and /path), spelled exactly as images.traceblocRegistry or global.imageRegistry would be. Written by scripts/resolve-training-digests.sh beside the map. The map (and `capabilities`) are rendered ONLY when this equals the registry the edge pulls training images from (JOB_IMAGE_HOST: global.imageRegistry, else images.traceblocRegistry, else the chart default); on any other registry neither renders and training pods float on :<CLIENT_ENV>. Empty is honoured nowhere. A mirror that holds the exact digests opts in by setting this to its own host."
+              "description": "The registry `digests` was resolved on -- a bare host (optional :port and /path), spelled exactly as images.traceblocRegistry or global.imageRegistry would be. Written by scripts/resolve-training-digests.sh beside the map. The map (and `capabilities`) are rendered ONLY when this equals the registry the secure environment pulls training images from (JOB_IMAGE_HOST: global.imageRegistry, else images.traceblocRegistry, else the chart default); on any other registry neither renders and training pods float on :<CLIENT_ENV>. Empty is honoured nowhere. A mirror that holds the exact digests opts in by setting this to its own host."
             },
             "digests": {
               "type": "object",
@@ -1516,7 +1516,7 @@
                 "digest",
                 "location"
               ],
-              "description": "The macOS engine bundle the pinned engine release names, for the Apple GPU runner on a Mac (RFC-0185 D2, D6; tracebloc-engine#1701). Two values bound by one signed OCI manifest: `digest` is the sha256 of the bundle's .tar.gz (the manifest's one layer), and `location` is the manifest by digest. Rendered ONLY where the digest map renders (tracebloc.trainingPins): a floating edge runs whatever its tag points at, so a bundle read off the pinned set says nothing about it. Where it renders, the chart writes ConfigMap tracebloc-apple-gpu-bundle (keys `digest`, `location`), which the runner reads and fetches, and jobs-manager's TRACEBLOC_APPLE_GPU_BUNDLE_DIGEST, which it compares with the runner node's tracebloc.io/bundle-digest annotation before it sends a GPU job there. Absent: neither renders, and every job runs on the CPU. Refused by the template when `digests` is empty.",
+              "description": "The macOS engine bundle the pinned engine release names, for the Apple GPU runner on a Mac (RFC-0185 D2, D6; tracebloc-engine#1701). Two values bound by one signed OCI manifest: `digest` is the sha256 of the bundle's .tar.gz (the manifest's one layer), and `location` is the manifest by digest. Rendered ONLY where the digest map renders (tracebloc.trainingPins): a floating secure environment runs whatever its tag points at, so a bundle read off the pinned set says nothing about it. Where it renders, the chart writes ConfigMap tracebloc-apple-gpu-bundle (keys `digest`, `location`), which the runner reads and fetches, and jobs-manager's TRACEBLOC_APPLE_GPU_BUNDLE_DIGEST, which it compares with the runner node's tracebloc.io/bundle-digest annotation before it sends a GPU job there. Absent: neither renders, and every job runs on the CPU. Refused by the template when `digests` is empty.",
               "properties": {
                 "digest": {
                   "type": "string",
@@ -1552,7 +1552,7 @@
                   "repository": {
                     "type": "string",
                     "pattern": "^[a-z0-9]+([_-]+[a-z0-9]+)*(/[a-z0-9]+([._-]+[a-z0-9]+)*)*$",
-                    "description": "The parent's repository WITHOUT a registry (the first component carries no dot, so a host cannot be written here): the chart prefixes the registry the edge pulls training images from, as it does for the training images themselves."
+                    "description": "The parent's repository WITHOUT a registry (the first component carries no dot, so a host cannot be written here): the chart prefixes the registry the secure environment pulls training images from, as it does for the training images themselves."
                   },
                   "digest": {
                     "type": "string",
@@ -1592,7 +1592,7 @@
               "pattern": "^(sha256:[a-f0-9]{64})?$"
             }
           },
-          "description": "The control-plane digests a PROD edge runs (RFC-0143 D1, the chart is the lockfile; client-dev#1175), keyed by the published image name tracebloc/<name>. Empty in git: every value ships \"\". A published chart release carries the digests its release recorded, stamped into a copy of values.yaml before helm package (scripts/stamp-control-plane-digests.sh, from the release's control-plane-digests.json). Honoured only when the resolved CLIENT_ENV is prod, the image's own images.<image>.digest is empty, and prodDigestsRegistry equals the registry this release pulls from; otherwise the map is not read and the image floats. requests-proxy has no entry: it follows the jobs-manager pin. An empty value floats that image. The key set is closed: scripts/tests/control-plane-prod-digests.sh holds it equal to the chart's control-plane images."
+          "description": "The control-plane digests a PROD secure environment runs (RFC-0143 D1, the chart is the lockfile; client-dev#1175), keyed by the published image name tracebloc/<name>. Empty in git: every value ships \"\". A published chart release carries the digests its release recorded, stamped into a copy of values.yaml before helm package (scripts/stamp-control-plane-digests.sh, from the release's control-plane-digests.json). Honoured only when the resolved CLIENT_ENV is prod, the image's own images.<image>.digest is empty, and prodDigestsRegistry equals the registry this release pulls from; otherwise the map is not read and the image floats. requests-proxy has no entry: it follows the jobs-manager pin. An empty value floats that image. The key set is closed: scripts/tests/control-plane-prod-digests.sh holds it equal to the chart's control-plane images."
         },
         "prodDigestsRegistry": {
           "type": "string",
@@ -1861,7 +1861,7 @@
         },
         "deferWhileTraining": {
           "type": "object",
-          "description": "Defer an upgrade while the edge trains: an upgrade replaces the jobs-manager pod, which starts the next training cycle late. See values.yaml.",
+          "description": "Defer an upgrade while the secure environment trains: an upgrade replaces the jobs-manager pod, which starts the next training cycle late. See values.yaml.",
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -1872,7 +1872,7 @@
               "type": "integer",
               "minimum": 1,
               "default": 24,
-              "description": "Deferrals in a row after which the job goes ahead although the edge is still training."
+              "description": "Deferrals in a row after which the job goes ahead although the secure environment is still training."
             },
             "finishedWithin": {
               "type": "string",
@@ -1995,7 +1995,7 @@
         "schedule": {
           "type": "string",
           "minLength": 1,
-          "description": "Cron expression. Keep the tick rate compatible with the anonymous pull-rate limit of the registry this release pulls from: the 100/6h figure below is DOCKER HUB's, so it binds only where global.imageRegistry / images.traceblocRegistry point at docker.io — on the ghcr.io default it is the worst case rather than the constraint. Since #569 each tick HEADs THREE manifests (jobs-manager, pods-monitor, resource-monitor), not two — at the default 15m that is 12/hr, i.e. 72 per 6h against Docker Hub's 100. Widen the schedule on docker.io edges that share an egress IP with other Docker Hub consumers; a digest pin removes that image's HEAD from every tick."
+          "description": "Cron expression. Keep the tick rate compatible with the anonymous pull-rate limit of the registry this release pulls from: the 100/6h figure below is DOCKER HUB's, so it binds only where global.imageRegistry / images.traceblocRegistry point at docker.io — on the ghcr.io default it is the worst case rather than the constraint. Since #569 each tick HEADs THREE manifests (jobs-manager, pods-monitor, resource-monitor), not two — at the default 15m that is 12/hr, i.e. 72 per 6h against Docker Hub's 100. Widen the schedule on docker.io secure environments that share an egress IP with other Docker Hub consumers; a digest pin removes that image's HEAD from every tick."
         },
         "rolloutTimeout": {
           "type": "string",
@@ -2015,7 +2015,7 @@
         },
         "deferWhileTraining": {
           "type": "object",
-          "description": "Defer re-imaging jobs-manager or requests-proxy while the edge trains, as autoUpgrade.deferWhileTraining does. See values.yaml.",
+          "description": "Defer re-imaging jobs-manager or requests-proxy while the secure environment trains, as autoUpgrade.deferWhileTraining does. See values.yaml.",
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -2026,7 +2026,7 @@
               "type": "integer",
               "minimum": 1,
               "default": 96,
-              "description": "Deferrals in a row after which the job goes ahead although the edge is still training."
+              "description": "Deferrals in a row after which the job goes ahead although the secure environment is still training."
             },
             "finishedWithin": {
               "type": "string",
@@ -2210,21 +2210,21 @@
     },
     "ingestRunTokenByEnv": {
       "type": "object",
-      "description": "Per-environment default for the per-run ingest token (backend#2073), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). Mirrors serviceDbAccountsByEnv. dev is true: the :dev ingestor channel carries data-ingestors#931 and the dev API serves /ingest-token/ (backend#5223). stg is false until data-ingestors staging carries data-ingestors#931 (the :stg channel publishes from it) AND backend staging has the /ingest-token/ endpoint. prod is false until images.ingestor.prodDigest moves past a release containing data-ingestors#931 (it pins v0.8.2, which predates it). An edge upgraded with plain --reuse-values from a chart without this key has no fleet default to read, so it keeps the shared token it already had, and the render does not fail; --reset-then-reuse-values picks this map up.",
+      "description": "Per-environment default for the per-run ingest token (backend#2073), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). Mirrors serviceDbAccountsByEnv. dev is true: the :dev ingestor channel carries data-ingestors#931 and the dev API serves /ingest-token/ (backend#5223). stg is false until data-ingestors staging carries data-ingestors#931 (the :stg channel publishes from it) AND backend staging has the /ingest-token/ endpoint. prod is false until images.ingestor.prodDigest moves past a release containing data-ingestors#931 (it pins v0.8.2, which predates it). A secure environment upgraded with plain --reuse-values from a chart without this key has no fleet default to read, so it keeps the shared token it already had, and the render does not fail; --reset-then-reuse-values picks this map up.",
       "additionalProperties": {
         "type": "boolean"
       }
     },
     "bootstrapDbReparentByEnv": {
       "type": "object",
-      "description": "Per-environment default for the backend#1528 S3 bootstrap re-parent (edgeuser -> root for the account-minting DDL), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). Mirrors serviceDbAccountsByEnv. This is the LAST, edgeuser-retiring step. Baked ON for dev, stg and prod, but on the baked path it re-parents ONLY a fresh or already-rotated edge (see rotateMysqlRoot / backend#947) so an existing un-rotated edge is left alone rather than wedged; an accessible existing edge is rotated by the explicit override plus the one-time ALTER USER 'root'.",
+      "description": "Per-environment default for the backend#1528 S3 bootstrap re-parent (edgeuser -> root for the account-minting DDL), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). Mirrors serviceDbAccountsByEnv. This is the LAST, edgeuser-retiring step. Baked ON for dev, stg and prod, but on the baked path it re-parents ONLY a fresh or already-rotated secure environment (see rotateMysqlRoot / backend#947) so an existing un-rotated secure environment is left alone rather than wedged; an accessible existing secure environment is rotated by the explicit override plus the one-time ALTER USER 'root'.",
       "additionalProperties": {
         "type": "boolean"
       }
     },
     "rotateMysqlRootByEnv": {
       "type": "object",
-      "description": "Per-environment default for the backend#947 mysql-client root-password rotation, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). Baked ON for dev, stg and prod, but the baked default rotates ONLY a fresh datadir on a live cluster (born rotated) or an already-rotated edge (preserved); an existing un-rotated / blind edge falls back to its current password rather than wedging (tracebloc.bakedRootRotationOn, backend#947); with selfRotateMysqlRoot on, an existing un-rotated edge on a live cluster is rotated too (backend#5427). An accessible existing edge is rotated by the explicit override plus the one-time ALTER USER 'root' DDL.",
+      "description": "Per-environment default for the backend#947 mysql-client root-password rotation, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). Baked ON for dev, stg and prod, but the baked default rotates ONLY a fresh datadir on a live cluster (born rotated) or an already-rotated secure environment (preserved); an existing un-rotated / blind secure environment falls back to its current password rather than wedging (tracebloc.bakedRootRotationOn, backend#947); with selfRotateMysqlRoot on, an existing un-rotated secure environment on a live cluster is rotated too (backend#5427). An accessible existing secure environment is rotated by the explicit override plus the one-time ALTER USER 'root' DDL.",
       "additionalProperties": {
         "type": "boolean"
       }
@@ -2244,7 +2244,7 @@
         "classAContainers",
         "classANodeAgentContainers"
       ],
-      "description": "Edge telemetry Collector (RFC-BACKEND-1872 D6/D7, backend#1906). An OpenTelemetry Collector DaemonSet reading Class A container stdout and forwarding to the backend's ingest endpoint. Ships DISABLED: its exporter authenticates with a Secret jobs-manager writes (backend#2274), and enabling it first spools to every node's disk with nothing to deliver. `type` allows null so `--reuse-values` from a release predating this block validates.",
+      "description": "Secure-environment telemetry Collector (RFC-BACKEND-1872 D6/D7, backend#1906). An OpenTelemetry Collector DaemonSet reading Class A container stdout and forwarding to the backend's ingest endpoint. Ships DISABLED: its exporter authenticates with a Secret jobs-manager writes (backend#2274), and enabling it first spools to every node's disk with nothing to deliver. `type` allows null so `--reuse-values` from a release predating this block validates.",
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -2316,7 +2316,7 @@
             "Token",
             "Bearer"
           ],
-          "description": "`Token` for the edge's DRF user token, which the ingest endpoint accepts via TokenAuthentication. `Bearer` is the ClientAccessToken type and 401s silently — a CLOSED set so a typo cannot pick a third."
+          "description": "`Token` for the secure environment's DRF user token, which the ingest endpoint accepts via TokenAuthentication. `Bearer` is the ClientAccessToken type and 401s silently — a CLOSED set so a typo cannot pick a third."
         },
         "buffer": {
           "type": "object",

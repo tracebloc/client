@@ -294,7 +294,7 @@ roleRef:
 {{- if include "tracebloc.runnerDbCredsGrant" . }}
 {{- /* The grant is safe only beside its admission policy below, so a cluster without the API refuses the grant rather than getting it unguarded. */}}
 {{- if not (.Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy") }}
-{{- fail "The Mac GPU runner's database-credentials grant needs a cluster that serves admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy: Kubernetes 1.30 or later. The grant is on because appleGpuRunner.enabled, images.training.macosBundle and per-experiment database credentials (perExperimentDbCreds) are all set; upgrade the cluster, or turn one of them off. With helm template, pass --api-versions admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy for a 1.30+ cluster." }}
+{{- fail "The tracebloc runner's database-credentials grant needs a cluster that serves admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy: Kubernetes 1.30 or later. The grant is on because appleGpuRunner.enabled, images.training.macosBundle and per-experiment database credentials (perExperimentDbCreds) are all set; upgrade the cluster, or turn one of them off. With helm template, pass --api-versions admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy for a 1.30+ cluster." }}
 {{- end }}
 ---
 {{/*

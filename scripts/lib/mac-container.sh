@@ -2083,48 +2083,48 @@ _mac_ct_ensure_runner() {
   local cpu="GPU training falls back to the CPU. It's safe to re-run this installer."
   TRACEBLOC_MAC_GPU_RUNNER_READY=""
   if ! _mac_ct_runner_on; then
-    [[ "${OS:-}" != "Darwin" ]] || log "The Apple-GPU runner: $(_mac_ct_runner_off_why), so no runner login item."
+    [[ "${OS:-}" != "Darwin" ]] || log "The tracebloc runner: $(_mac_ct_runner_off_why), so no runner login item."
     # On the macOS node step a said GPU training is set up here (detect_gpu), so a CLI
     # that does not carry the runner is said, not only logged.
     if _mac_ct_runner_host; then
-      warn "The Apple-GPU runner: $(_mac_ct_runner_off_why), so it is not set up. ${cpu}"
+      warn "The tracebloc runner: $(_mac_ct_runner_off_why), so it is not set up. ${cpu}"
     fi
     return 0
   fi
   if [[ -n "${TRACEBLOC_SKIP_AUTOSTART:-}" || -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then
-    warn "The Apple-GPU runner's login item skipped (TRACEBLOC_SKIP_AUTOSTART/TRACEBLOC_NO_AUTOSTART set): ${cpu}"
+    warn "The tracebloc runner's login item skipped (TRACEBLOC_SKIP_AUTOSTART/TRACEBLOC_NO_AUTOSTART set): ${cpu}"
     return 0
   fi
-  [[ -n "$ns" ]] || { warn "The Apple-GPU runner: this run has no namespace for it. ${cpu}"; return 0; }
-  home="$(_mac_ct_agent_home)" || { warn "The Apple-GPU runner: ${home} ${cpu}"; return 0; }
-  runner_log="$(_mac_ct_runner_log)" || { warn "The Apple-GPU runner: cannot tell where its login item logs. ${cpu}"; return 0; }
-  kcfg="$(_mac_ct_runner_kubeconfig "$ns")" || { warn "The Apple-GPU runner: ${kcfg}. ${cpu}"; return 0; }
+  [[ -n "$ns" ]] || { warn "The tracebloc runner: this run has no namespace for it. ${cpu}"; return 0; }
+  home="$(_mac_ct_agent_home)" || { warn "The tracebloc runner: ${home} ${cpu}"; return 0; }
+  runner_log="$(_mac_ct_runner_log)" || { warn "The tracebloc runner: cannot tell where its login item logs. ${cpu}"; return 0; }
+  kcfg="$(_mac_ct_runner_kubeconfig "$ns")" || { warn "The tracebloc runner: ${kcfg}. ${cpu}"; return 0; }
   # A plist string holds these only escaped, and the writer prints values as they are.
   case "${bin}${home}${runner_log}${kcfg}${ns}" in
-    *[\&\<\>]*) warn "The Apple-GPU runner: '${bin}', '${home}', '${runner_log}' or '${kcfg}' holds &, < or >, which its login item's plist cannot hold as it is. ${cpu}"; return 0 ;;
+    *[\&\<\>]*) warn "The tracebloc runner: '${bin}', '${home}', '${runner_log}' or '${kcfg}' holds &, < or >, which its login item's plist cannot hold as it is. ${cpu}"; return 0 ;;
   esac
   bundles="$(_mac_ct_runner_bundles_dir "$home")"
   if _mac_ct_runner_bundles_listed "$bundles"; then listed=1; fi
-  bad="$(_mac_ct_runner_bundles "$bundles")" || { warn "The Apple-GPU runner: ${bad}. ${cpu}"; return 0; }
+  bad="$(_mac_ct_runner_bundles "$bundles")" || { warn "The tracebloc runner: ${bad}. ${cpu}"; return 0; }
   dir="${TRACEBLOC_LAUNCHAGENTS_DIR:-${home}/Library/LaunchAgents}"
   plist="${dir}/${TB_MAC_CT_RUNNER_LABEL}.plist"
   want="$(_mac_ct_runner_plist "$bin" "$home" "$runner_log" "$kcfg" "$ns")"
   if [[ -e "$plist" ]]; then
-    have="$(cat "$plist")" || { warn "The Apple-GPU runner: ${plist} cannot be read, so this run cannot tell what its login item runs. ${cpu}"; return 0; }
+    have="$(cat "$plist")" || { warn "The tracebloc runner: ${plist} cannot be read, so this run cannot tell what its login item runs. ${cpu}"; return 0; }
   fi
   _mac_ct_runner_loaded || loaded=$?
   if [[ "$loaded" -eq 2 ]]; then
-    warn "The Apple-GPU runner: launchctl could not say whether ${TB_MAC_CT_RUNNER_LABEL} is loaded, so this run leaves it as it is. ${cpu}"
+    warn "The tracebloc runner: launchctl could not say whether ${TB_MAC_CT_RUNNER_LABEL} is loaded, so this run leaves it as it is. ${cpu}"
     return 0
   fi
   if [[ "$loaded" -eq 0 && "$have" == "$want" && "$listed" -eq 1 ]]; then
     tb_record_write launch-agent "$TB_MAC_CT_RUNNER_LABEL" "$plist"
-    log "The Apple-GPU runner: its login item ${TB_MAC_CT_RUNNER_LABEL} is loaded; its token was issued again."
+    log "The tracebloc runner: its login item ${TB_MAC_CT_RUNNER_LABEL} is loaded; its token was issued again."
     _mac_ct_runner_gpu_ready
     return 0
   fi
   if [[ "$loaded" -eq 0 ]] && ! _bounded 30 launchctl bootout "gui/$(id -u)/${TB_MAC_CT_RUNNER_LABEL}" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1; then
-    warn "The Apple-GPU runner: could not unload ${TB_MAC_CT_RUNNER_LABEL} to rewrite it. Run launchctl bootout gui/$(id -u)/${TB_MAC_CT_RUNNER_LABEL}, then re-run. Until then ${cpu}"
+    warn "The tracebloc runner: could not unload ${TB_MAC_CT_RUNNER_LABEL} to rewrite it. Run launchctl bootout gui/$(id -u)/${TB_MAC_CT_RUNNER_LABEL}, then re-run. Until then ${cpu}"
     return 0
   fi
   # Recorded once the old item is gone and before the new one loads: the runner reads the
@@ -2132,19 +2132,19 @@ _mac_ct_ensure_runner() {
   tb_record_write engine-bundles "$TB_MAC_CT_RUNNER_LABEL" "$bundles"
   # launchd fails the job (EX_CONFIG) when its log's folder is missing.
   if ! mkdir -p "$dir" "${runner_log%/*}"; then
-    warn "The Apple-GPU runner: could not create ${dir} or ${runner_log%/*}. ${cpu}"; return 0
+    warn "The tracebloc runner: could not create ${dir} or ${runner_log%/*}. ${cpu}"; return 0
   fi
   if ! { printf '%s\n' "$want" > "${plist}.tmp" && mv "${plist}.tmp" "$plist"; }; then
-    rm -f "${plist}.tmp"; warn "The Apple-GPU runner: could not write ${plist}. ${cpu}"; return 0
+    rm -f "${plist}.tmp"; warn "The tracebloc runner: could not write ${plist}. ${cpu}"; return 0
   fi
   # Recorded before it loads: a run cut off here leaves an artefact delete knows.
   tb_record_write launch-agent "$TB_MAC_CT_RUNNER_LABEL" "$plist"
   why=0
   _bounded 30 launchctl bootstrap "gui/$(id -u)" "$plist" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || why=$?
   if [[ "$why" -ne 0 ]]; then
-    warn "The Apple-GPU runner: launchd did not load ${plist} (exit ${why}). ${cpu}"; return 0
+    warn "The tracebloc runner: launchd did not load ${plist} (exit ${why}). ${cpu}"; return 0
   fi
-  log "The Apple-GPU runner: its login item ${TB_MAC_CT_RUNNER_LABEL} is loaded and runs ${bin} runner."
+  log "The tracebloc runner: its login item ${TB_MAC_CT_RUNNER_LABEL} is loaded and runs ${bin} runner."
   _mac_ct_runner_gpu_ready
 }
 
