@@ -2739,6 +2739,83 @@ function Find-HostCli {
   return $null
 }
 
+# The retired PowerShell core (removed with client-dev#2133) kept its tools in
+# %ProgramFiles%\tracebloc\bin and put that folder on the MACHINE PATH. Nothing
+# since removes the entry: `tracebloc delete` cleans the user-scope CLI folder and
+# its user PATH entry only, so a machine that ever ran the old core keeps a system
+# PATH entry naming a folder that is gone (client-dev#2846). Clear-RetiredToolPath
+# removes exactly that entry, and only while the folder is gone: a folder still
+# there is left alone with its entry. The Machine PATH is an administrator's to
+# write. Elevated, the entry goes; not, one hint says so and the install goes on.
+# Nothing here can stop an install.
+#
+# The Machine PATH is read and written through its registry value, not
+# [Environment]::Get/SetEnvironmentVariable(..., 'Machine'): Windows ships it as
+# REG_EXPAND_SZ, and that pair returns it expanded and writes it back as REG_SZ,
+# baking every %VAR% entry into its value (backend#2916, the retired core's
+# lesson). Seams for the suite: Get-MachinePath and Set-MachinePath.
+$MachineEnvironmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+function Get-MachinePath {
+  $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($MachineEnvironmentKey, $false)
+  if ($null -eq $key) { return $null }
+  try { return $key.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+  finally { $key.Close() }
+}
+function Set-MachinePath {
+  param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+  $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($MachineEnvironmentKey, $true)
+  if ($null -eq $key) { throw "HKLM\$MachineEnvironmentKey could not be opened for writing" }
+  try { $key.SetValue('Path', $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString) }
+  finally { $key.Close() }
+  # Tell Explorer the environment changed, so windows opened from it see the new
+  # PATH: WM_SETTINGCHANGE "Environment", SMTO_ABORTIFHUNG, 1 s per window. Best
+  # effort: the registry already holds the value.
+  try {
+    if (-not ('TbInstallWsl.EnvironmentBroadcast' -as [type])) {
+      Add-Type -Namespace TbInstallWsl -Name EnvironmentBroadcast -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+    }
+    $result = [UIntPtr]::Zero
+    $null = [TbInstallWsl.EnvironmentBroadcast]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 1000, [ref]$result)
+  } catch { }
+}
+
+# PATHVALUE without every entry that names DIR: compared whole, case-insensitively,
+# with %VARS% expanded and a trailing separator ignored -- never as a substring, so
+# a longer folder that starts with DIR is kept. Every other entry is kept as it was,
+# in its order. Pure, so the suite drives it directly.
+function Remove-PathEntry {
+  param([AllowNull()][AllowEmptyString()][string]$PathValue, [Parameter(Mandatory)][string]$Dir)
+  if (-not $PathValue) { return $PathValue }
+  $target = $Dir.Trim().TrimEnd('\', '/')
+  $kept = @($PathValue -split ';' | Where-Object {
+    [Environment]::ExpandEnvironmentVariables($_).Trim().TrimEnd('\', '/') -ine $target
+  })
+  return ($kept -join ';')
+}
+
+function Clear-RetiredToolPath {
+  if (-not $env:ProgramFiles) { return }
+  # Spelled as the retired core spelled it ("$env:ProgramFiles\tracebloc\bin").
+  $dir = $env:ProgramFiles.TrimEnd('\') + '\tracebloc\bin'
+  try {
+    if (Test-Path -LiteralPath $dir) { return }
+    $raw = Get-MachinePath
+    $new = Remove-PathEntry -PathValue $raw -Dir $dir
+    if ($new -ceq $raw) { return }
+    if (-not (Test-BootstrapElevated)) {
+      Hint "The system PATH still lists $dir, left by an older tracebloc installer; that folder is gone. An administrator can remove the entry: System Properties > Environment Variables > System variables > Path."
+      return
+    }
+    Set-MachinePath -Value $new
+    Ok "Removed $dir, left by an older tracebloc installer, from the system PATH."
+  } catch {
+    Warn "Could not remove $dir, left by an older tracebloc installer, from the system PATH ($($_.Exception.Message)). An administrator can remove it: System Properties > Environment Variables > System variables > Path."
+  }
+}
+
 # Installs the tracebloc CLI for the user running this bootstrap: the CLI's own
 # installer in a child Windows PowerShell (its `exit` closes nothing here), started
 # by Start-TraceblocCliInstaller and given 10 minutes. For this user only: the
@@ -3319,6 +3396,7 @@ function Invoke-WslCore {
   $credential = Get-HostPresetCredential
   try {
     $cli = Install-HostCli -Optional:($null -ne $credential)
+    Clear-RetiredToolPath
     # Install-HostCli keeps an older CLI when its update fails: one below the
     # floor stops here, before the distro is touched (backend#4959).
     if ($cli) { Assert-HostCliFloor -Cli $cli -CoreDir $CoreDir }

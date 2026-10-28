@@ -467,13 +467,7 @@ function Resolve-Cosign {
   $bin   = Join-Path $TmpDir "cosign.exe"
   $sums  = Join-Path $TmpDir "cosign_checksums.txt"
 
-  # Set expectations BEFORE the big fetch: this is the bootstrap's one large
-  # download, and during v1.9.7-rc.1 FR a healthy install got killed as
-  # "frozen" in exactly this window (#468).
-  Info "cosign not found -- downloading pinned cosign $CosignVersion (~17 MB) to verify the manifest."
-  Info "This is the bootstrap's one big download; a few minutes on a slow network is normal."
-  $sw = [System.Diagnostics.Stopwatch]::StartNew()
-  if (-not (Get-OptionalWithTicks "$base/$asset" $bin))       { return $null }
+  # The checksums first (a few KB): they vouch for a handed-down cosign too.
   if (-not (Get-Optional "$base/cosign_checksums.txt" $sums)) { return $null }
 
   # cosign_checksums.txt lines: "<sha256>␠␠<asset>". Take the one for our asset.
@@ -483,6 +477,29 @@ function Resolve-Cosign {
     if ($parts.Count -ge 2 -and $parts[-1] -eq $asset) { $want = $parts[0].ToLower(); break }
   }
   if (-not $want) { return $null }
+
+  # The website shim (tracebloc.io/i.ps1) has usually just fetched and digest-checked
+  # this same pinned build to verify THIS script, into its own temp folder, which
+  # is not on PATH. TRACEBLOC_COSIGN hands that path down so it is not downloaded a
+  # second time (~180 MB, client-dev#2848). It is used only when it IS the pinned
+  # build -- the same checksum a fresh download must match -- so any other file
+  # there costs one warning and the download below, never trust.
+  $handed = $env:TRACEBLOC_COSIGN
+  if ($handed) {
+    if ((Test-Path -LiteralPath $handed -PathType Leaf) -and ((Get-Sha256 $handed) -eq $want)) {
+      return $handed
+    }
+    Warn "TRACEBLOC_COSIGN ($handed) is not cosign $CosignVersion for Windows -- downloading it instead."
+  }
+
+  # Set expectations BEFORE the big fetch: this is the bootstrap's one large
+  # download, and during v1.9.7-rc.1 FR a healthy install got killed as
+  # "frozen" in exactly this window (#468). The size is cosign-windows-amd64.exe's
+  # at the pin: 186,998,456 bytes (client-dev#2848; it said ~17 MB).
+  Info "cosign not found -- downloading pinned cosign $CosignVersion (~180 MB) to verify the manifest."
+  Info "This is the bootstrap's one big download; a few minutes on a slow network is normal."
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  if (-not (Get-OptionalWithTicks "$base/$asset" $bin)) { return $null }
   if ((Get-Sha256 $bin) -ne $want) {
     Err "Bootstrapped cosign failed its own checksum -- not using it."
     return $null
@@ -858,10 +875,34 @@ function Invoke-Bootstrap {
     $wsl = Join-Path $tmpDir "install-wsl.ps1"
     Info "Running tracebloc WSL setup..."
     & powershell.exe -ExecutionPolicy Bypass -File $wsl -CoreDir $tmpDir
-    Complete-Bootstrap -Code $LASTEXITCODE
+    $childExit = $LASTEXITCODE
   } finally {
-    Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+    # Before the hold, not after it (client-dev#2847): Complete-Bootstrap waits up
+    # to a minute for a key, and a window closed in that minute ends this process
+    # without running a `finally` still waiting below it.
+    Remove-InstallerTemp -Path $tmpDir | Out-Null
   }
+  Complete-Bootstrap -Code $childExit
+}
+
+# Remove this run's temp folder (~180 MB with a bootstrapped cosign.exe), and SAY
+# so when it cannot be removed (client-dev#2847). One Remove-Item used to do this,
+# silently: on Windows a file just written or run is often still held for a moment
+# (Defender scanning a fresh .exe, the image of a process that only just exited),
+# and Windows PowerShell 5.1's -Recurse deletes children asynchronously, so the
+# folder itself can still read "not empty" when it is removed. Either left
+# %TEMP%\tracebloc-installer-* behind with nothing said. So: retry a few times a
+# second apart, and if it is still there, one warning naming the folder.
+function Remove-InstallerTemp {
+  param([Parameter(Mandatory)][string]$Path, [int]$Tries = 5, [int]$DelayMs = 1000)
+  for ($i = 1; $i -le $Tries; $i++) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    if ($i -lt $Tries) { Start-Sleep -Milliseconds $DelayMs }
+  }
+  Warn "The installer's temporary folder could not be removed (a file in it is still in use): $Path -- it is safe to delete it yourself."
+  return $false
 }
 
 # =============================================================================

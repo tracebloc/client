@@ -96,13 +96,22 @@ _rollout_ready() {
 # True when jobs-manager's recent logs show the backend rejected its credentials
 # (it authenticates on startup and crash-loops). `jm` is the Deployment the gate
 # READ; empty is read here, and unresolvable means no logs, so false.
+#
+# Its api and pods-monitor containers log "Authentication failed: HTTP <code>: <body>"
+# for EVERY answer of 400 or more, but client-runtime's auth.login retries 429 and
+# 5xx and logs in on a later try (auth.py, `login`): a backend roll or the per-IP
+# login limit is not a rejection, and reading it as one told a healthy install its
+# credentials were wrong and skipped the example use case (client-dev#2821). So
+# only a 4xx other than 429 counts, or the backend's wrong-password body
+# ("Unable to log in with provided credentials", which older runtimes logged with no
+# code).
 _jobs_manager_rejected() {
   local ns="$1" jm="${2:-}" jm_logs=""
   [[ -n "$jm" ]] || jm="$(_client_workload_name "$ns" jobs-manager 5s)" || jm=""
   if [[ -n "$jm" ]]; then
     jm_logs="$(kubectl logs -n "$ns" "deployment/${jm}" --all-containers --tail=50 --request-timeout=5s 2>/dev/null || true)"
   fi
-  grep -qiE 'authentication failed|unable to log in' <<<"$jm_logs"
+  grep -qiE 'unable to log in|authentication failed: http 4(0[0-9]|1[0-9]|2[0-8]|[3-9][0-9])([^0-9]|$)' <<<"$jm_logs"
 }
 
 # Classify why the client isn't Ready, for an accurate message. Echoes a state.
@@ -372,8 +381,14 @@ _prepull_training_parent() {
   if [[ "$rc" -ne 0 || "$manifest" != *"kind: Job"* ]]; then
     _prepull_skip "ConfigMap ${name} carries no Job manifest that could be read (kubectl exit ${rc})"; return 0
   fi
-  image="$(printf '%s\n' "$manifest" | sed -n 's/^[[:space:]]*image:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p')"
-  image="${image%%$'\n'*}"
+  # The parent's image: the one of the container named prepull. The pod's first
+  # container pulls the CLI's stage image (training-prepull-configmap.yaml), and the
+  # line below names the 4 GiB download, not that one. The quotes and blanks around
+  # the reference go by keeping only the characters a reference is made of.
+  image="$(printf '%s\n' "$manifest" | awk '
+    /^[[:space:]]*-[[:space:]]*name:[[:space:]]*prepull[[:space:]]*$/ { f = 1; next }
+    f && /^[[:space:]]*-[[:space:]]*name:/ { f = 0 }
+    f && !done && /^[[:space:]]*image:/ { sub(/^[[:space:]]*image:[[:space:]]*/, ""); gsub(/[^A-Za-z0-9._:\/@-]/, ""); print; done = 1 }')"
   rc=0
   out="$(printf '%s\n' "$manifest" | _bounded "$TB_PREPULL_CALL_S" kubectl apply -n "$ns" --request-timeout="${TB_PREPULL_CALL_S}s" -f - 2>>"${LOG_FILE:-/dev/null}")" || rc=$?
   if [[ "$rc" -ne 0 ]]; then _prepull_skip "the Job in ConfigMap ${name} could not be applied (kubectl exit ${rc}; its error is above in the log)"; return 0; fi

@@ -902,7 +902,7 @@ ensure_cosign() {
   local bin="$TMPDIR/cosign"
   local sums="$TMPDIR/cosign_checksums.txt"
 
-  fetch_optional "$base/$asset"               "$bin"  || return 1
+  # The checksums first (a few KB): they vouch for a handed-down cosign too.
   fetch_optional "$base/cosign_checksums.txt" "$sums" || return 1
 
   local want got sums_line
@@ -920,6 +920,25 @@ ensure_cosign() {
   sums_line="${sums_line%%$'\n'*}"                    # …the first one
   want="${sums_line%% *}"                             # …its digest field
   [[ -n "$want" ]] || return 1
+
+  # The website shim (tracebloc.io/i.sh) has usually just fetched and digest-checked
+  # this same pinned build to verify THIS script, into its own temp dir, which is
+  # not on PATH. TRACEBLOC_COSIGN hands that path down so it is not downloaded a
+  # second time (~110 MB, client-dev#2848). It is used only when it IS the pinned
+  # build for this OS/arch -- the same checksum a fresh download must match -- so
+  # any other file there costs one warning and the download below, never trust.
+  if [[ -n "${TRACEBLOC_COSIGN:-}" ]]; then
+    if [[ -f "$TRACEBLOC_COSIGN" && -x "$TRACEBLOC_COSIGN" ]] \
+       && got="$(_sha256_of "$TRACEBLOC_COSIGN")" && [[ "$got" == "$want" ]]; then
+      COSIGN_BIN="$TRACEBLOC_COSIGN"
+      return 0
+    fi
+    _tb_boot_hold
+    echo "[WARN]  TRACEBLOC_COSIGN ($TRACEBLOC_COSIGN) is not cosign ${COSIGN_VERSION} for ${os}/${arch} -- downloading it instead." >&2
+    _tb_boot_resume
+  fi
+
+  fetch_optional "$base/$asset" "$bin" || return 1
   got="$(_sha256_of "$bin")" || return 1
   if [[ "$want" != "$got" ]]; then
     _tb_boot_hold

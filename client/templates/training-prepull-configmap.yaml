@@ -47,6 +47,24 @@
   deadline that bounds a slow pull, and a TTL that removes the Job after it
   finishes. The image stays in the node's store.
 
+  THE CLI'S STAGE IMAGE GOES FIRST (cli-dev#1814). `tracebloc data ingest` copies
+  the data through a short-lived stage pod, image alpine:3.20 at the digest the
+  CLI pins (cli-dev internal/push/pod.go DefaultStagePodImage), and gives that pod
+  60 s to become Ready (StagePodReadyTimeout). On a fresh GPU host its 3.6 MB pull
+  shares the link with this Job's 4 GiB parent and the GPU probe's image (k3s pulls
+  in parallel: serializeImagePulls false), and the first ingest after an install
+  timed out in ContainerCreating. So the pod's FIRST container is that image: the
+  kubelet starts a pod's containers one at a time, each after its own pull, so the
+  stage image is on the node within seconds of the apply and before the parent's
+  pull begins. A container, not an init container: an init container that cannot
+  pull holds the parent back for good, while a container that cannot pull only
+  leaves the Job to its deadline after the parent is in. The digest is the CLI's
+  (alpine:3.20's index digest), and containerd reads the CLI's
+  `alpine:3.20@<digest>` and this `docker.io/library/alpine@<digest>` as the one
+  image, so the stage pod finds it present; change the two together. Left out under global.imageRegistry: there the CLI cannot pull from
+  Docker Hub either, its stage image is the operator's to set, and a pull of the
+  Hub one would only fail.
+
   ITS INSTANCE LABEL FOLLOWS tracebloc.fullname, unlike the chart's own
   resources. The Job is not a Helm release object: the installer applies it, so
   the label is not Helm's bookkeeping. The release name inside a ConfigMap blob is
@@ -66,6 +84,7 @@
        finished Job readable for an hour. */}}
 {{- $deadline := 3600 }}
 {{- $ttl := 3600 }}
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -105,6 +124,26 @@ data:
             seccompProfile:
               type: RuntimeDefault
           containers:
+            {{- /* alpine:3.20 at the digest the CLI pins for its stage pod (cli-dev
+                   internal/push/pod.go DefaultStagePodImage): see THE CLI'S STAGE IMAGE. */}}
+            {{- if not (dig "imageRegistry" "" (.Values.global | default dict)) }}
+            - name: stage-image
+              image: {{ include "tracebloc.image" (dict "registry" "docker.io" "repository" "library/alpine" "digest" "sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc") | quote }}
+              imagePullPolicy: IfNotPresent
+              command: ["true"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "32Mi"
+                limits:
+                  cpu: "100m"
+                  memory: "32Mi"
+            {{- end }}
             - name: prepull
               image: {{ include "tracebloc.image" (dict "repository" $parent.repository "digest" (include "tracebloc.trainingParentPin" .) "registry" (include "tracebloc.tbRegistry" .)) | quote }}
               imagePullPolicy: IfNotPresent
