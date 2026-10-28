@@ -2063,6 +2063,10 @@ install_cleanup() {
   if [[ -n "${TB_ERR_CODE:-}" ]]; then
     log "FAILED at ${TRACEBLOC_ERR_LOC} — exit ${TB_ERR_CODE} — command: ${TB_ERR_CMD}"
   fi
+  # A run that ends before its outcome (TRACEBLOC_CLIENT_STATE) stops the macOS node it started.
+  if [[ $exit_code -ne 0 && -z "${TRACEBLOC_CLIENT_STATE:-}" ]] && declare -F _mac_ct_stop_run_node >/dev/null 2>&1; then
+    _mac_ct_stop_run_node
+  fi
   if [[ $exit_code -eq 2 ]]; then
     echo ""
     hint "Re-run required. Complete the step above, then run the script again."
@@ -2676,8 +2680,9 @@ _tb_record_substrate_in() {
 # ── Install record ──────────────────────────────────────────────────────────
 #  What this install created, for an uninstall to remove exactly that. Written
 #  as the install goes: tb_record_write KIND ID PATH [FLAG=true|false] records
-#  one artefact the moment it exists, and tb_record_write alone refreshes the
-#  other fields. FLAG is one boolean member the schema declares for an artefact
+#  one artefact the moment it exists, tb_record_drop KIND ID PATH takes one out
+#  once it is gone, and tb_record_write alone refreshes the other fields. FLAG is
+#  one boolean member the schema declares for an artefact
 #  (TB_ARTEFACT_FLAGS: created_by_prepare_host, on a group). The writer reads its
 #  previous output back: an artefact an earlier run recorded is kept
 #  (_tb_record_artefacts, any layout), and so is a field this run has not decided
@@ -2928,17 +2933,25 @@ tb_record_write() {
     # names last.
     local key line kept="" rest=""
     key="{\"kind\": $(_tb_json "$1"), \"id\": $(_tb_json "${2:-}"), \"path\": $(_tb_json "${3:-}"), "
-    case "$arts" in
-      *"$key"*)
-        case " ${TB_RECORD_LAST_IN_USE} " in
-          *" $1 "*)
-            while IFS= read -r line; do
-              if [[ "$line" == "$key"* ]]; then kept="${kept:+${kept}$'\n'}${line}"; else rest="${rest:+${rest}$'\n'}${line}"; fi
-            done <<<"$arts"
-            arts="${rest:+${rest}$'\n'}${kept}" ;;
-        esac ;;
-      *) arts="${arts:+${arts}$'\n'}${key}${flag}\"created_at\": \"${now}\"}" ;;
-    esac
+    if [[ -n "${_tb_record_dropping:-}" ]]; then
+      # tb_record_drop: every line under the key goes, and nothing is added.
+      while IFS= read -r line; do
+        [[ "$line" == "$key"* ]] || rest="${rest:+${rest}$'\n'}${line}"
+      done <<<"$arts"
+      arts="$rest"
+    else
+      case "$arts" in
+        *"$key"*)
+          case " ${TB_RECORD_LAST_IN_USE} " in
+            *" $1 "*)
+              while IFS= read -r line; do
+                if [[ "$line" == "$key"* ]]; then kept="${kept:+${kept}$'\n'}${line}"; else rest="${rest:+${rest}$'\n'}${line}"; fi
+              done <<<"$arts"
+              arts="${rest:+${rest}$'\n'}${kept}" ;;
+          esac ;;
+        *) arts="${arts:+${arts}$'\n'}${key}${flag}\"created_at\": \"${now}\"}" ;;
+      esac
+    fi
   fi
   local substrate
   substrate="$(_tb_json "$TRACEBLOC_SUBSTRATE_RESOLVED")"
@@ -2973,6 +2986,14 @@ tb_record_write() {
   fi
   _tb_record_user_copy "$rec"
   return 0
+}
+
+# tb_record_drop KIND ID PATH -- the artefact tb_record_write recorded under KIND ID
+# PATH is gone: its line leaves both copies, through tb_record_write's own read, key
+# and write (the local reaches it, as bash scopes it into its callees).
+tb_record_drop() {
+  local _tb_record_dropping=1
+  tb_record_write "$1" "${2:-}" "${3:-}"
 }
 
 # The record's text: SUBSTRATE ($1) and ROOT_COPY ($5) as JSON literals, the

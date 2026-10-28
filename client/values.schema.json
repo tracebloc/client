@@ -534,6 +534,21 @@
         }
       }
     },
+    "selinux": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "confine": {
+          "type": "boolean",
+          "description": "Run every pod that mounts a release PVC at selinux.level, and the hostPath node agents as spc_t. The installer sets it when native k3s runs with --selinux."
+        },
+        "level": {
+          "type": "string",
+          "pattern": "^s0:c[0-9]{1,4},c[0-9]{1,4}$",
+          "description": "The one MCS level those pods share, so the kubelet's relabel of a shared volume never locks one of them out."
+        }
+      }
+    },
     "namespace": {
       "type": "object",
       "description": "Optional chart-managed Namespace resource with Pod Security Admission labels",
@@ -843,7 +858,7 @@
     },
     "perIngestionTablesByEnv": {
       "type": "object",
-      "description": "Per-environment default for perIngestionTables (backend#1834), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). Mirrors ingestRunTokenByEnv. A fleet turns on once a dev-edge run of its ingestor has shown the whole D16 path (physical_table on the backend row, training reads ds_<hex>, tb data delete drops the table, the salt and the journal); an ingestor before data-ingestors v0.8.16 reports --name instead of the ds_ handle (backend#2895). An edge upgraded with plain --reuse-values from a chart without this key resolves off; --reset-then-reuse-values picks it up.",
+      "description": "Per-environment default for perIngestionTables (backend#1834), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). Mirrors ingestRunTokenByEnv. On for dev, stg and prod since a dev-edge run showed the whole D16 path (physical_table on the backend row, training reads ds_<hex>, tb data delete drops the table, the salt and the journal; backend#1834). An edge whose ingestor resolves to images.ingestor.prodDigest (v0.8.2, before the data-ingestors v0.8.16 ds_ handle fix, backend#2895) resolves off whatever this map or the override says. An edge upgraded with plain --reuse-values from a chart without this key resolves off; --reset-then-reuse-values picks it up.",
       "additionalProperties": {
         "type": "boolean"
       }

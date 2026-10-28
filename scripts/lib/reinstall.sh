@@ -1,50 +1,48 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  reinstall.sh — native k3s is never set up on a machine that runs tracebloc on
-#  k3d (RFC-0175 D10). This installer no longer moves such a machine: it stops
-#  before anything is installed, written or started, says why in plain words, and
-#  names the way off: a tracebloc CLI release that can still delete it. Over an
-#  install record a degraded 'tracebloc delete' left behind, a yes on the terminal
-#  sets the record aside and goes on (_reinstall_offer_way_out).
+#  k3d (RFC-0175 D10). k3d is no longer supported, and this installer never moves
+#  such a machine: it stops before anything is installed, written or started, says
+#  why in plain words, and names the way off (_reinstall_refuse). Nothing is asked.
 #
-#  What says k3d is tracebloc's own data, never Docker or k3d: the install
-#  record's substrate (with no substrate field, an artefact only k3d records),
-#  else, on a machine whose install is older than the record, the kubeconfig
-#  context k3d writes (_reinstall_k3d_said). main() calls
+#  What says k3d is tracebloc's own data first: the install record's substrate
+#  (with no substrate field, an artefact only k3d records), else, on a machine
+#  whose install is older than the record, the kubeconfig context k3d writes. With
+#  neither, Docker's containers of k3d's cluster, which outlive a record and a
+#  context deleted by hand (_reinstall_k3d_said). main() calls
 #  refuse_k3d_machine right after the substrate refusals, before the prepare-host
 #  dispatch and before validate_config. prepare-host then asks the same of the
 #  user it sets the machine up for (refuse_k3d_for_user), before step a writes.
 # =============================================================================
 
-# A tracebloc CLI release that can still delete such a setup with `tracebloc delete`:
-# facts.env's RETIRED_OFFBOARD_CLI, stamped here by scripts/check-facts.sh.
-TB_RETIRED_OFFBOARD_CLI="0.11.35"
-
 # _reinstall_k3d_said -- whether tracebloc's own data says this machine runs on k3d.
 # 0: it does; 1: it does not; 2: it cannot tell. TB_REINSTALL_SAID says what said
 # so, or what could not be read; for 2, TB_REINSTALL_REMEDY says how to make it
-# answer. It reads files only, in this order, and the first that exists decides:
+# answer. For 0, TB_REINSTALL_RECORD is the record that said so (empty when the
+# kubeconfig did) and TB_REINSTALL_CTX the context k3d wrote for its cluster.
+# It reads files in this order, and the first that exists decides:
 #   1. the install record (tb_record_path): its substrate (_reinstall_record_says);
 #   2. on Linux, the record's root copy, when this process reaches it without a
 #      password (tb_substrate_resolve reads the two in the same order);
 #   3. with no record at all: each kubeconfig file ($KUBECONFIG, else
 #      ~/.kube/config) and its context k3d-<CLUSTER_NAME>, which k3d writes for
 #      the cluster an install from before the record created.
+# When none of them says so, Docker answers (_reinstall_k3d_live).
 _reinstall_k3d_said() {
   local rec dst text="" f ctx kc rc
-  TB_REINSTALL_SAID=""; TB_REINSTALL_REMEDY=""
+  TB_REINSTALL_SAID=""; TB_REINSTALL_REMEDY=""; TB_REINSTALL_RECORD=""; TB_REINSTALL_CTX=""
   rec="$(tb_record_path)"
   if [[ -e "$rec" ]]; then
     text="$(cat "$rec" 2>/dev/null)" || text=""
     _reinstall_record_says "the install record ${rec}" "$text" \
-      "Check it is the file this installer wrote, or move it aside, then re-run."
+      "Check it is the file this installer wrote, or move it aside, then re-run." "$rec"
     return
   fi
   if [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] && dst="$(_tb_record_root_copy_path)" \
       && _tb_record_root_access && _tb_record_root_run test -e "$dst" 2>/dev/null; then
     text="$(_tb_record_root_run cat "$dst" 2>/dev/null)" || text=""
     _reinstall_record_says "the install record's root copy ${dst}" "$text" \
-      "Check it is the file this installer wrote ('sudo cat ${dst}'), or move it aside, then re-run."
+      "Check it is the file this installer wrote ('sudo cat ${dst}'), or move it aside, then re-run." "$dst"
     return
   fi
   ctx="k3d-${CLUSTER_NAME:-}"
@@ -55,6 +53,7 @@ _reinstall_k3d_said() {
     rc=0; _reinstall_kubeconfig_has "$ctx" "$f" || rc=$?
     case "$rc" in
       0) TB_REINSTALL_SAID="it has no install record (its install is older than the record), and your kubeconfig ${f} has the context '${ctx}', which k3d writes for a cluster named '${CLUSTER_NAME:-}'"
+         TB_REINSTALL_CTX="$ctx"
          return 0 ;;
       1) ;;
       *) TB_REINSTALL_SAID="there is no install record, and your kubeconfig ${f} cannot be read"
@@ -62,14 +61,40 @@ _reinstall_k3d_said() {
          return 2 ;;
     esac
   done
-  return 1
+  IFS=$' \t\n'   # the loop's IFS is this function's local; the probe gets the default
+  _reinstall_k3d_live "${CLUSTER_NAME:-}"
 }
 
-# _reinstall_record_says WHO TEXT REMEDY -- _reinstall_k3d_said's answer for the record
-# WHO whose text is TEXT: 0 when its substrate is k3d, 1 for any other substrate, 2
-# when it cannot tell (an empty TEXT is a record that could not be read). A substrate
-# the record names decides over its artefacts; a record with no substrate field
-# says k3d when it lists an artefact only k3d records (_reinstall_k3d_artefact).
+# _reinstall_k3d_live NAME -- _reinstall_k3d_said's answer from Docker, which keeps
+# the containers k3d labels with its cluster NAME after the record and the context
+# are deleted by hand: 0 when it lists one, 1 when it lists none or there is no
+# docker command, 2 when it fails or does not answer within the bound while k3d is
+# installed (which may have made one). Sets what _reinstall_k3d_said sets.
+_reinstall_k3d_live() {
+  local out first="" rc=0
+  [[ -n "$1" ]] || return 1
+  has docker || return 1
+  out="$(_bounded 15 docker ps -a --filter "label=k3d.cluster=$1" --format '{{.Names}}' 2>/dev/null)" || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    IFS= read -r first <<<"$out" || true
+    [[ -n "$first" ]] || return 1
+    TB_REINSTALL_SAID="Docker has the containers of the k3d cluster '${1}' (${first})"
+    TB_REINSTALL_CTX="k3d-${1}"
+    return 0
+  fi
+  has k3d || return 1
+  TB_REINSTALL_SAID="k3d is installed here, and Docker did not answer whether it has the containers of the k3d cluster '${1}'"
+  TB_REINSTALL_REMEDY="Start Docker and check that 'docker ps' works for you, then re-run."
+  return 2
+}
+
+# _reinstall_record_says WHO TEXT REMEDY FILE -- _reinstall_k3d_said's answer for the
+# record WHO, the file FILE, whose text is TEXT: 0 when its substrate is k3d, 1 for
+# any other substrate, 2 when it cannot tell (an empty TEXT is a record that could
+# not be read). A substrate the record names decides over its artefacts; a record
+# with no substrate field says k3d when it lists an artefact only k3d records
+# (_reinstall_k3d_artefact). The context is k3d's for the record's cluster, else
+# CLUSTER_NAME's.
 _reinstall_record_says() {
   local sub name kind
   if sub="$(printf '%s' "$2" | _tb_record_substrate_in)"; then
@@ -83,7 +108,9 @@ _reinstall_record_says() {
     return 2
   fi
   name="$(_tb_record_prior cluster_name "$2")"; name="${name#\"}"; name="${name%\"}"
-  [[ -z "$name" || "$name" == null ]] || TB_REINSTALL_SAID+=" (cluster '${name}')"
+  [[ "$name" != null ]] || name=""
+  [[ -z "$name" ]] || TB_REINSTALL_SAID+=" (cluster '${name}')"
+  TB_REINSTALL_RECORD="$4"; TB_REINSTALL_CTX="k3d-${name:-${CLUSTER_NAME:-}}"
   return 0
 }
 
@@ -156,13 +183,13 @@ _reinstall_exists_as() {
 # as its owner is refused as cannot tell (_reinstall_unread_as).
 _reinstall_k3d_said_for() {
   local u="$1" h="$2" rec dst kc ctx text rc=0
-  TB_REINSTALL_SAID=""; TB_REINSTALL_REMEDY=""
+  TB_REINSTALL_SAID=""; TB_REINSTALL_REMEDY=""; TB_REINSTALL_RECORD=""; TB_REINSTALL_CTX=""
   rec="${h}${TB_RECORD_USER_PATH#\~}"
   _reinstall_exists_as "$u" "$rec" || rc=$?
   case "$rc" in
     0) text="$(tb_root_as "$u" cat "$rec" 2>/dev/null)" || text=""
        _reinstall_record_says "${u}'s install record ${rec}" "$text" \
-         "Check it is the file this installer wrote, or move it aside, then re-run prepare-host."
+         "Check it is the file this installer wrote, or move it aside, then re-run prepare-host." "$rec"
        return ;;
     2) _reinstall_unread_as "$u" "${u}'s install record ${rec}"; return 2 ;;
   esac
@@ -171,7 +198,7 @@ _reinstall_k3d_said_for() {
   case "$rc" in
     0) text="$(tb_root_n cat "$dst" 2>/dev/null)" || text=""
        _reinstall_record_says "the install record's root copy ${dst}" "$text" \
-         "Check it is the file this installer wrote, or move it aside, then re-run prepare-host."
+         "Check it is the file this installer wrote, or move it aside, then re-run prepare-host." "$dst"
        return ;;
     2) _reinstall_unread_as root "the install record's root copy ${dst}"; return 2 ;;
   esac
@@ -185,6 +212,7 @@ _reinstall_k3d_said_for() {
   if text="$(tb_root_as "$u" cat "$kc" 2>/dev/null)"; then _reinstall_context_in "$ctx" <<<"$text" || rc=$?; else rc=2; fi
   case "$rc" in
     0) TB_REINSTALL_SAID="${u} has no install record (their install is older than the record), and their kubeconfig ${kc} has the context '${ctx}', which k3d writes for a cluster named '${CLUSTER_NAME:-}'"
+       TB_REINSTALL_CTX="$ctx"
        return 0 ;;
     1) return 1 ;;
   esac
@@ -215,14 +243,7 @@ refuse_k3d_machine() {
   TB_EXIT_REFUSED=1
   _native_k3s_refuse_host
   _reinstall_k3d_said || rc=$?
-  _reinstall_refuse "$rc" open && return 0
-  # The way out lives here, never in _reinstall_refuse: prepare-host's refusal shares
-  # that, and the way out runs sudo outside tb_root (prepare-host-root-guard.py).
-  if _reinstall_offer_way_out; then
-    TB_EXIT_REFUSED=""
-    return 0
-  fi
-  error "Nothing was changed."
+  _reinstall_refuse "$rc"
 }
 
 # refuse_k3d_for_user USER HOME -- prepare-host's refusal: stop by name when the
@@ -236,10 +257,11 @@ refuse_k3d_for_user() {
   _reinstall_refuse "$rc"
 }
 
-# _reinstall_refuse RC [open] -- the refusal for the answer RC of _reinstall_k3d_said
-# or _reinstall_k3d_said_for: 1 returns 0, 2 refuses as cannot tell, 0 refuses with the
-# way off k3d. With open, that last returns 3 after the way off, and the caller ends
-# the refusal (refuse_k3d_machine's way out).
+# _reinstall_refuse RC -- the refusal for the answer RC of _reinstall_k3d_said or
+# _reinstall_k3d_said_for: 1 returns 0, 2 refuses as cannot tell, 0 refuses with the
+# way off k3d. The way off is the Windows refusal's (install-wsl.ps1,
+# Assert-NoRetiredInstall): 'tracebloc delete', then the record that said k3d and the
+# context's entries a delete can leave behind.
 _reinstall_refuse() {
   local engine="native k3s"
   # A Mac names its one runtime, as tb_substrate_resolve's refusal there does; a build
@@ -256,107 +278,6 @@ _reinstall_refuse() {
   warn "This machine runs tracebloc on k3d: ${TB_REINSTALL_SAID}."
   hint "This installer no longer sets up k3d, and it never sets up ${engine} beside it."
   hint "Moving this machine to ${engine} is a reinstall: its secure environment and its data are deleted, its datasets must be ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc."
-  hint "To move it, delete that secure environment with 'tracebloc delete', then run this installer again."
-  hint "If 'tracebloc delete' refuses, tracebloc CLI ${TB_RETIRED_OFFBOARD_CLI} can still delete it."
-  # install-cli.sh's URL; a bootstrap that did not fetch install-cli.sh names the release only.
-  [[ -z "${TRACEBLOC_CLI_INSTALL_URL:-}" ]] \
-    || hint "Install that CLI with:  curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh -s -- --version v${TB_RETIRED_OFFBOARD_CLI}"
-  [[ "${2:-}" != open ]] || return 3
+  hint "To move it, delete that secure environment with 'tracebloc delete'. Then delete ${TB_REINSTALL_RECORD:+${TB_REINSTALL_RECORD} and }the ${TB_REINSTALL_CTX} entries from your kubeconfig if they are still there, and run this installer again."
   error "Nothing was changed."
-}
-
-# _reinstall_stamp -- the UTC time a record set aside is named for.
-_reinstall_stamp() { date -u +%Y%m%dT%H%M%SZ; }
-
-# _reinstall_root_copy -- the path of the install record's root copy when this run
-# reaches it and it exists (Linux); fails otherwise.
-_reinstall_root_copy() {
-  local dst
-  [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] || return 1
-  dst="$(_tb_record_root_copy_path)" && _tb_record_root_access && _tb_record_root_run test -e "$dst" 2>/dev/null || return 1
-  printf '%s' "$dst"
-}
-
-# _reinstall_live_context RECORD-TEXT -- 0 when a kubeconfig has k3d's context for the
-# cluster the record names or for CLUSTER_NAME, setting TB_REINSTALL_LIVE_CTX and
-# TB_REINSTALL_LIVE_FILE; 1 when none does; 2 when none does and a kubeconfig that
-# exists could not be read (TB_REINSTALL_LIVE_FILE names it). Reads every file in
-# $KUBECONFIG and ~/.kube/config.
-_reinstall_live_context() {
-  local f name names files rc unread=""
-  name="$(_tb_record_prior cluster_name "$1")"; name="${name#\"}"; name="${name%\"}"
-  [[ "$name" != null ]] || name=""
-  names="${name}:${CLUSTER_NAME:-}"
-  files="${KUBECONFIG:+${KUBECONFIG}:}${HOME:-}/.kube/config"
-  local IFS=:
-  for f in $files; do
-    [[ -n "$f" && -e "$f" ]] || continue
-    for name in $names; do
-      [[ -n "$name" ]] || continue
-      rc=0; _reinstall_kubeconfig_has "k3d-${name}" "$f" || rc=$?
-      case "$rc" in
-        0) TB_REINSTALL_LIVE_CTX="k3d-${name}"; TB_REINSTALL_LIVE_FILE="$f"; return 0 ;;
-        1) ;;
-        *) [[ -n "$unread" ]] || unread="$f"; break ;;
-      esac
-    done
-  done
-  [[ -z "$unread" ]] || { TB_REINSTALL_LIVE_FILE="$unread"; return 2; }
-  return 1
-}
-
-# _reinstall_offer_way_out -- the way past a refusal over an install record whose
-# 'tracebloc delete' could not finish, so the record stayed. On a terminal, one
-# question: only an explicit yes moves the record (and on Linux its root copy) to
-# <record>.k3d-retired-<UTC time>, never deleting it, lists what the record says k3d
-# left behind, and returns 0. Any other answer, and a run with no terminal, return 1
-# (the latter after naming the mv commands). With no record to set aside, it says nothing.
-# While a kubeconfig has k3d's context, or cannot be read, the cluster may still exist: no way out is offered.
-_reinstall_offer_way_out() {
-  local rec root stamp ans="" text="" line kind id path listed="" rc
-  rec="$(tb_record_path)"; [[ -e "$rec" ]] || rec=""
-  root="$(_reinstall_root_copy)" || root=""
-  [[ -n "${rec}${root}" ]] || return 1
-  if [[ -n "$rec" ]]; then text="$(cat "$rec" 2>/dev/null)" || text=""
-  else text="$(_tb_record_root_run cat "$root" 2>/dev/null)" || text=""; fi
-  rc=0; _reinstall_live_context "$text" || rc=$?
-  case "$rc" in
-    0) hint "The k3d cluster '${TB_REINSTALL_LIVE_CTX#k3d-}' may still exist: your kubeconfig ${TB_REINSTALL_LIVE_FILE} has the context '${TB_REINSTALL_LIVE_CTX}'. Run 'tracebloc delete' and let it finish, then run this installer again."
-       return 1 ;;
-    1) ;;
-    *) hint "Your kubeconfig ${TB_REINSTALL_LIVE_FILE} cannot be read, so the k3d cluster may still exist. Make it readable for you, or point KUBECONFIG away from it, then run this installer again."
-       return 1 ;;
-  esac
-  stamp="$(_reinstall_stamp)"
-  if ! { declare -F _prompt_tty >/dev/null 2>&1 && _prompt_tty; }; then
-    hint "If 'tracebloc delete' ran and could not finish, set the install record aside yourself, then run this installer again:"
-    [[ -z "$rec" ]] || hint "  mv ${rec} ${rec}.k3d-retired-${stamp}"
-    [[ -z "$root" ]] || hint "  sudo mv ${root} ${root}.k3d-retired-${stamp}"
-    return 1
-  fi
-  printf '\n  Set the old install record aside and go on? Answer yes only if '"'"'tracebloc delete'"'"' ran and could not finish. [y/N] '
-  IFS= read -r ans <"${TRACEBLOC_TTY:-/dev/tty}" || ans=""
-  echo ""
-  ans="$(printf '%s' "${ans//[[:space:]]/}" | tr '[:upper:]' '[:lower:]')"
-  [[ "$ans" == y || "$ans" == yes ]] || return 1
-  if [[ -n "$root" ]]; then
-    _tb_record_root_run mv -- "$root" "${root}.k3d-retired-${stamp}" \
-      || error "Couldn't set the install record's root copy ${root} aside. Nothing was changed."
-    hint "Set aside, not deleted: ${root} -> ${root}.k3d-retired-${stamp}"
-  fi
-  if [[ -n "$rec" ]]; then
-    mv -- "$rec" "${rec}.k3d-retired-${stamp}" \
-      || error "Couldn't set the install record ${rec} aside."
-    hint "Set aside, not deleted: ${rec} -> ${rec}.k3d-retired-${stamp}"
-  fi
-  while IFS='|' read -r kind id path; do
-    [[ -n "$kind" ]] || continue
-    if [[ -z "$listed" ]]; then
-      hint "The old install record lists what k3d left behind. Delete these yourself:"
-      listed=1
-    fi
-    hint "  - ${kind} '${id}'${path:+ at ${path}}"
-  done < <(printf '%s\n' "$text" | _tb_record_artefacts 2>/dev/null \
-    | sed -nE 's/^[{]"kind": "([^"]*)", "id": "([^"]*)", "path": (null|"([^"]*)"),.*/\1|\2|\4/p')
-  return 0
 }

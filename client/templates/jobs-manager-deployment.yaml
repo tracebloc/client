@@ -43,6 +43,9 @@ spec:
       automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
+        {{- with include "tracebloc.seLinuxLevel" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
         # No fsGroup here (deliberately). On hostPath kubelet ignores it
         # (kubernetes/kubernetes#138411) — the init below does the work. On CSI an fsGroup
         # relabel would only add GID 1000 to jobs-manager's OWN processes, yet it would flip
@@ -553,6 +556,12 @@ spec:
           value: {{ include "tracebloc.clientDataPvc" . | quote }}
         - name: TRACEBLOC_CLIENT_LOGS_PVC
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
+        {{- if (default dict .Values.selinux).confine }}
+        # The level every pod this starts on those claims must take: see selinux in values.yaml.
+        - name: TRACEBLOC_SELINUX_LEVEL
+          {{- $_ := required "selinux.level is required when selinux.confine is on" .Values.selinux.level }}
+          value: {{ .Values.selinux.level | quote }}
+        {{- end }}
         {{- if (include "tracebloc.trainingResumeEnabled" .) }}
         # client-runtime#882: arms the durable resume volume and the stop-kind
         # signal in jobs-manager. New setting, canonical name only (RFC-0076 S6).
@@ -1049,6 +1058,11 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
+        # Reported in the heartbeat's version inventory as `storage_mode`
+        # (tracebloc.storageMode). Derived from the storage values alone, so
+        # neither container's passthrough renders a copy.
+        - name: TRACEBLOC_STORAGE_MODE
+          value: {{ include "tracebloc.storageMode" . | quote }}
         {{- if (default dict .Values.localApi).enabled }}
         # The local API (values.yaml `localApi`): on, the port it listens on in
         # this pod, and the 127.0.0.1 port its Host check expects. `localApi` is
@@ -1138,7 +1152,7 @@ spec:
              on for a fleet whose ingestor cannot use it, or off for one the chart
              turned on. pods-monitor's list is left alone: it never renders or
              reads the var. */}}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "TRACEBLOC_RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "TRACEBLOC_RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "TRACEBLOC_RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "TRACEBLOC_GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "TRACEBLOC_GPU_LIMITS") (ne $key "INFERENCE_RESOURCE_REQUESTS") (ne $key "TRACEBLOC_INFERENCE_RESOURCE_REQUESTS") (ne $key "INFERENCE_RESOURCE_LIMITS") (ne $key "TRACEBLOC_INFERENCE_RESOURCE_LIMITS") (ne $key "INFERENCE_GPU_REQUESTS") (ne $key "TRACEBLOC_INFERENCE_GPU_REQUESTS") (ne $key "INFERENCE_GPU_LIMITS") (ne $key "TRACEBLOC_INFERENCE_GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "TRACEBLOC_RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "TRACEBLOC_SINGLE_NODE") (ne $key "NODE_NAME") (ne $key "TRACEBLOC_NODE_NAME") (ne $key "CLIENT_ID") (ne $key "TRACEBLOC_CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "TRACEBLOC_IMAGE_PULL_SECRET_NAME") (ne $key "RELEASE_NAME") (ne $key "TRACEBLOC_RELEASE_NAME") (ne $key "RELEASE_SECRET_NAME") (ne $key "TRACEBLOC_RELEASE_SECRET_NAME") (ne $key "MYSQL_MIGRATION_JOB_IMAGE") (ne $key "TRACEBLOC_MYSQL_MIGRATION_JOB_IMAGE") (ne $key "MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "TRACEBLOC_MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "MYSQL_MIGRATION_HELM_IMAGE") (ne $key "TRACEBLOC_MYSQL_MIGRATION_HELM_IMAGE") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "TRACEBLOC_RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_INGEST_RUN_TOKEN") (ne $key "TRACEBLOC_LOCAL_API_ENABLED") (ne $key "TRACEBLOC_LOCAL_API_PORT") (ne $key "TRACEBLOC_LOCAL_API_PUBLIC_PORT") (not (has $key $proxyKeys)) $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "TRACEBLOC_RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "TRACEBLOC_RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "TRACEBLOC_RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "TRACEBLOC_GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "TRACEBLOC_GPU_LIMITS") (ne $key "INFERENCE_RESOURCE_REQUESTS") (ne $key "TRACEBLOC_INFERENCE_RESOURCE_REQUESTS") (ne $key "INFERENCE_RESOURCE_LIMITS") (ne $key "TRACEBLOC_INFERENCE_RESOURCE_LIMITS") (ne $key "INFERENCE_GPU_REQUESTS") (ne $key "TRACEBLOC_INFERENCE_GPU_REQUESTS") (ne $key "INFERENCE_GPU_LIMITS") (ne $key "TRACEBLOC_INFERENCE_GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "TRACEBLOC_RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "TRACEBLOC_SINGLE_NODE") (ne $key "NODE_NAME") (ne $key "TRACEBLOC_NODE_NAME") (ne $key "CLIENT_ID") (ne $key "TRACEBLOC_CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "TRACEBLOC_IMAGE_PULL_SECRET_NAME") (ne $key "RELEASE_NAME") (ne $key "TRACEBLOC_RELEASE_NAME") (ne $key "RELEASE_SECRET_NAME") (ne $key "TRACEBLOC_RELEASE_SECRET_NAME") (ne $key "MYSQL_MIGRATION_JOB_IMAGE") (ne $key "TRACEBLOC_MYSQL_MIGRATION_JOB_IMAGE") (ne $key "MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "TRACEBLOC_MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "MYSQL_MIGRATION_HELM_IMAGE") (ne $key "TRACEBLOC_MYSQL_MIGRATION_HELM_IMAGE") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "TRACEBLOC_RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_INGEST_RUN_TOKEN") (ne $key "TRACEBLOC_LOCAL_API_ENABLED") (ne $key "TRACEBLOC_LOCAL_API_PORT") (ne $key "TRACEBLOC_LOCAL_API_PUBLIC_PORT") (ne $key "TRACEBLOC_STORAGE_MODE") (not (has $key $proxyKeys)) $value }}
         {{- include "tracebloc.envPassthroughEntry" (dict "key" $key "value" $value "env" $.Values.env) | nindent 8 }}
         {{- end }}
         {{- end }}
@@ -1247,7 +1261,7 @@ spec:
         - name: TRACEBLOC_SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "TRACEBLOC_RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "TRACEBLOC_RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "TRACEBLOC_RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "TRACEBLOC_GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "TRACEBLOC_GPU_LIMITS") (ne $key "INFERENCE_RESOURCE_REQUESTS") (ne $key "TRACEBLOC_INFERENCE_RESOURCE_REQUESTS") (ne $key "INFERENCE_RESOURCE_LIMITS") (ne $key "TRACEBLOC_INFERENCE_RESOURCE_LIMITS") (ne $key "INFERENCE_GPU_REQUESTS") (ne $key "TRACEBLOC_INFERENCE_GPU_REQUESTS") (ne $key "INFERENCE_GPU_LIMITS") (ne $key "TRACEBLOC_INFERENCE_GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "TRACEBLOC_RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "TRACEBLOC_SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "TRACEBLOC_CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "TRACEBLOC_IMAGE_PULL_SECRET_NAME") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "TRACEBLOC_RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_LOCAL_API_ENABLED") (ne $key "TRACEBLOC_LOCAL_API_PORT") (ne $key "TRACEBLOC_LOCAL_API_PUBLIC_PORT") (not (has $key $proxyKeys)) $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "TRACEBLOC_RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "TRACEBLOC_RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "TRACEBLOC_RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "TRACEBLOC_GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "TRACEBLOC_GPU_LIMITS") (ne $key "INFERENCE_RESOURCE_REQUESTS") (ne $key "TRACEBLOC_INFERENCE_RESOURCE_REQUESTS") (ne $key "INFERENCE_RESOURCE_LIMITS") (ne $key "TRACEBLOC_INFERENCE_RESOURCE_LIMITS") (ne $key "INFERENCE_GPU_REQUESTS") (ne $key "TRACEBLOC_INFERENCE_GPU_REQUESTS") (ne $key "INFERENCE_GPU_LIMITS") (ne $key "TRACEBLOC_INFERENCE_GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "TRACEBLOC_RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "TRACEBLOC_SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "TRACEBLOC_CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "TRACEBLOC_IMAGE_PULL_SECRET_NAME") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "TRACEBLOC_RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_LOCAL_API_ENABLED") (ne $key "TRACEBLOC_LOCAL_API_PORT") (ne $key "TRACEBLOC_LOCAL_API_PUBLIC_PORT") (ne $key "TRACEBLOC_STORAGE_MODE") (not (has $key $proxyKeys)) $value }}
         {{- include "tracebloc.envPassthroughEntry" (dict "key" $key "value" $value "env" $.Values.env) | nindent 8 }}
         {{- end }}
         {{- end }}

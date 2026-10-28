@@ -270,7 +270,10 @@ _report_create_failure() {
   # `head -4` closes the pipe once grep has produced 4 matches; under pipefail
   # the substitution then yields 141 and errexit aborts _report_create_failure
   # before warn/hint print why provisioning failed -- its entire purpose.
-  errmatches="$(grep -aE 'Error:|HTTP [0-9][0-9][0-9]|refused|timed? ?out|unauthorized|forbidden|denied' "$out" 2>/dev/null || true)"
+  # The CLI ends a failure on "  ✖ <reason>"; older CLIs wrote "Error: <reason>".
+  # Read both, and hand the lines below the older shape (sed reads to the end,
+  # so nothing closes the pipe early).
+  errmatches="$(grep -aE 'Error:|✖|HTTP [0-9][0-9][0-9]|refused|timed? ?out|unauthorized|forbidden|denied' "$out" 2>/dev/null | LC_ALL=C sed -E 's/^[[:space:]]*✖ /Error: /' || true)"
   errline="$(head -4 <<<"$errmatches")"
   if [[ -n "$errline" ]]; then
     warn "The client couldn't be provisioned:"

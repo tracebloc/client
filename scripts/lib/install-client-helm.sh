@@ -2387,6 +2387,26 @@ _host_os_set_args() {
   )
 }
 
+# _selinux_set_args -- selinux.confine as one --set pair, into _TB_SELINUX_ARGS: true
+# only when native k3s on this Linux host runs confined, as its config.yaml says
+# (_native_k3s_selinux_confined), so the chart's level and k3s's --selinux never
+# disagree. false everywhere else. A config.yaml that cannot be read passes nothing,
+# which keeps the release's stored value.
+_selinux_set_args() {
+  local rc=0
+  _TB_SELINUX_ARGS=()
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" != "Darwin" ]] \
+     && declare -F _native_k3s_selinux_confined >/dev/null 2>&1; then
+    _native_k3s_selinux_confined || rc=$?
+  else
+    rc=1
+  fi
+  case "$rc" in
+    0) _TB_SELINUX_ARGS=(--set "selinux.confine=true") ;;
+    1) _TB_SELINUX_ARGS=(--set "selinux.confine=false") ;;
+  esac
+}
+
 # TB_MAC_NODE_PROFILE -- the macOS node's values profile (RFC-0185 D10 item 6,
 # client-dev#2297), one KEY=VALUE a word: the one declaration of it. The walls a Mac's
 # cluster keeps, whatever runs in it, CPU pods today and the Apple GPU runner's jobs later:
@@ -3048,6 +3068,9 @@ _reconcile_adopted_client() {
   # The machine facts ride it too, for the same reason.
   _machine_facts_set_args
   _args+=("${_TB_MACHINE_FACTS_ARGS[@]}")  # set-u-safe: _machine_facts_set_args always assigns six words
+  # And whether k3s runs the pods confined: the chart's level must follow config.yaml.
+  _selinux_set_args
+  _args+=(${_TB_SELINUX_ARGS[@]+"${_TB_SELINUX_ARGS[@]}"})
   # The local API (backend#5208) rides the same reconcile, for the same reason:
   # a release from before localApi existed reuses the chart default, off, while
   # the macOS node's publish (_mac_ct_ensure_node, client-dev#2379) has just mapped
@@ -4676,6 +4699,9 @@ EOF
   # The machine facts (kind, cloud, CPU name), the same way.
   _machine_facts_set_args
   _gpu_args+=("${_TB_MACHINE_FACTS_ARGS[@]}")  # set-u-safe: _machine_facts_set_args always assigns six words
+  # Whether k3s runs the pods confined (_selinux_set_args), the same way.
+  _selinux_set_args
+  _gpu_args+=(${_TB_SELINUX_ARGS[@]+"${_TB_SELINUX_ARGS[@]}"})
   # The macOS node's values profile (client-dev#2297), on both branches: over the values
   # file this run wrote, and over a caller's own in dev mode.
   _mac_node_profile_set_args

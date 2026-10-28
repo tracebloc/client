@@ -421,10 +421,13 @@ _native_k3s_group_name_ok() {
 #                 its token from that file and never from the server/token it
 #                 rewrites on every start (client-dev#1976). The macOS node names its
 #                 own (_mac_ct_node_config) and passes none.
+#   SELINUX       optional: `true` writes `selinux: true` (k3s's --selinux, pods run
+#                 confined), _native_k3s_selinux_confine's answer; `false` or empty
+#                 writes nothing.
 # It never emits `server:` or `token:` -- this node is a server, alone, and its token
 # is a file's, never a value in this file, which the daily user's group may read.
 _native_k3s_render_config() {
-  local mode="$1" name="$2" cidrs="$3" storage="$4" cgroup="$5" kgroup="${6:-}" tokfile="${7:-}" cluster_cidr service_cidr kubelet_args
+  local mode="$1" name="$2" cidrs="$3" storage="$4" cgroup="$5" kgroup="${6:-}" tokfile="${7:-}" selinux="${8:-}" cluster_cidr service_cidr kubelet_args
   case "$mode" in
     node-local|hostpath) ;;
     *) echo "native k3s: '${mode}' is not a storage mode (node-local or hostpath)." >&2; return 1 ;;
@@ -448,6 +451,10 @@ _native_k3s_render_config() {
     ""|/*) ;;
     *) echo "native k3s: the join token's file '${tokfile}' is not an absolute path." >&2; return 1 ;;
   esac
+  case "$selinux" in
+    ""|true|false) ;;
+    *) echo "native k3s: '${selinux}' is not an SELinux answer (true or false)." >&2; return 1 ;;
+  esac
   printf '%s\n' "$TB_K3S_CONFIG_MARKER"
   printf '# node-name and the two CIDRs are read back from here and never change.\n'
   printf 'disable: [traefik, servicelb]\n'
@@ -463,6 +470,9 @@ _native_k3s_render_config() {
     printf 'write-kubeconfig-mode: "0600"\n'
   fi
   printf 'kubelet-arg: [%s]\n' "$kubelet_args"
+  if [[ "$selinux" == true ]]; then
+    printf 'selinux: true\n'
+  fi
   if [[ -n "$storage" ]]; then
     printf 'default-local-storage-path: "%s"\n' "$storage"
   fi
@@ -751,7 +761,8 @@ _native_k3s_write_config() {
   local mode="$1" name="$2" cidrs="$3" storage="$4" cgroup="$5" ca="${6:-}" cfg kubelet ca_body kgroup
   kgroup="$(_native_k3s_kubeconfig_grant)" \
     || error "native k3s: ${TB_K3S_CONFIG_PATH} exists but could not be read, so this run cannot tell which group it grants k3s's kubeconfig to. Check it with 'sudo cat ${TB_K3S_CONFIG_PATH}', then re-run."
-  cfg="$(_native_k3s_render_config "$mode" "$name" "$cidrs" "$storage" "$cgroup" "$kgroup" "$TB_K3S_TOKEN_PATH")" || return 1
+  cfg="$(_native_k3s_render_config "$mode" "$name" "$cidrs" "$storage" "$cgroup" "$kgroup" "$TB_K3S_TOKEN_PATH" \
+    "$(_native_k3s_selinux_confine "$mode")")" || return 1
   [[ "$cgroup" != v1 ]] || _native_k3s_cgroup_v1_notice
   kubelet="$(_render_kubelet_config)" || return 1
   tb_root install -d -m 0755 /etc/rancher || return 1
@@ -791,44 +802,109 @@ _native_k3s_config_value() {
 
 # ── Node name ─────────────────────────────────────────────────────────────────
 
-# _native_k3s_sanitize_node_name RAW -- RAW as a DNS-1123 subdomain, which is what
-# Kubernetes takes as a node name: lowercased (by `tr`; bash 3.2 has no `${x,,}`),
-# every other character outside [a-z0-9.-] made '-', each dot-separated label trimmed
-# of leading and trailing '-' and cut to 63, empty labels dropped, the whole cut to
-# 253. Empty when nothing usable is left.
-_native_k3s_sanitize_node_name() {
-  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9.-' '-' | awk -F. '{
-    out = ""
-    for (i = 1; i <= NF; i++) {
-      l = $i; sub(/^-+/, "", l); l = substr(l, 1, 63); sub(/-+$/, "", l)
-      if (l != "") out = out (out == "" ? "" : ".") l
-    }
-    out = substr(out, 1, 253); sub(/[.-]+$/, "", out)
-    printf "%s", out
-  }'
+# The node name a new install gets (backend#5881): TB_K3S_NODE_NAME_PREFIX and four
+# random bytes in hex, e.g. tracebloc-3f9a01c2. Never the hostname, the user's name or
+# a MAC address: the node name leaves the machine (client-runtime reports it to the
+# backend as the heartbeat's hostname and as node_name, and `tracebloc doctor
+# --diagnose` prints it), and a laptop's hostname often carries a person's name.
+# TB_K3S_NODE_NAME_RE is its shape, built from the prefix.
+TB_K3S_NODE_NAME_PREFIX="tracebloc-"
+TB_K3S_NODE_NAME_RE="^${TB_K3S_NODE_NAME_PREFIX}[0-9a-f]{8}\$"
+
+# _native_k3s_mint_node_name -- a new node name in TB_K3S_NODE_NAME_RE's shape, from
+# /dev/urandom, the way _native_k3s_pin_token makes the join token. Returns 1 when
+# /dev/urandom gave nothing usable.
+_native_k3s_mint_node_name() {
+  local id name
+  id="$(od -An -tx1 -N4 /dev/urandom | tr -d ' \n')" || id=""
+  name="${TB_K3S_NODE_NAME_PREFIX}${id}"
+  [[ "$name" =~ $TB_K3S_NODE_NAME_RE ]] || return 1
+  printf '%s\n' "$name"
+}
+
+# _native_k3s_node_exists CONFIG -- 0 when k3s already runs a node that CONFIG was
+# written for, 1 when it runs none, 2 when this run cannot tell. Asked only when
+# CONFIG names no node, so a yes is a config.yaml whose node-name went missing after
+# the node was made:
+#   - an adopted host: the administrator's k3s runs (_native_k3s_prepared_for_me).
+#   - the macOS node: run-args beside CONFIG, which _mac_ct_ensure_node writes after
+#     CONFIG and before it makes the node.
+#   - otherwise: k3s's data holds a server (server/cred/passwd or server/token under
+#     TB_K3S_DATA_PATH, read as _native_k3s_pin_token reads them). A sudo that did not
+#     run is cannot tell, never "no node".
+_native_k3s_node_exists() {
+  local cfg="$1" srv="${TB_K3S_DATA_PATH}/server"
+  [[ "${TB_K3S_ADOPTED:-}" != 1 ]] || return 0
+  if [[ "${TB_K3S_ON_MAC:-}" == 1 ]]; then
+    [[ -e "${cfg%/*}/run-args" ]] && return 0
+    return 1
+  fi
+  if tb_root test -e "${srv}/cred/passwd" || tb_root test -e "${srv}/token"; then return 0; fi
+  tb_root test -d / || return 2
+  return 1
+}
+
+# _native_k3s_node_name_ok NAME -- NAME is one Kubernetes node name, a DNS-1123
+# subdomain (TB_K3S_ANY_NODE_NAME_RE), so a list of two names (a space) or an empty
+# answer is not one.
+TB_K3S_ANY_NODE_NAME_RE='^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$'
+_native_k3s_node_name_ok() {
+  [[ "$1" =~ $TB_K3S_ANY_NODE_NAME_RE ]]
+}
+
+# _native_k3s_running_node_name -- the name of the one node this machine's k3s runs,
+# read back from k3s itself; returns 1 when k3s does not say.
+#   1. Its API: `kubectl get nodes` on k3s.yaml, as root (an adopted host: through the
+#      prepared group, with no sudo); on the macOS node, asked inside the node
+#      (mac-container.sh's _mac_ct_running_node_name).
+#   2. When the API does not answer, on a host this run is root on: k3s's own record,
+#      the kubelet's client certificate (agent/client-kubelet.crt under
+#      TB_K3S_DATA_PATH), whose subject k3s writes as CN=system:node:<name> on every
+#      start. Read with openssl, when the host has it.
+# Anything but exactly one node name is no answer.
+_native_k3s_running_node_name() {
+  local name="" pem
+  if [[ "${TB_K3S_ON_MAC:-}" == 1 ]]; then
+    if declare -F _mac_ct_running_node_name >/dev/null 2>&1; then name="$(_mac_ct_running_node_name)" || name=""; fi
+  else
+    name="$(_native_k3s_read env KUBECONFIG="$TB_K3S_KUBECONFIG_PATH" "$TB_K3S_BIN_PATH" kubectl get nodes --request-timeout=5s -o 'jsonpath={.items[*].metadata.name}' 2>/dev/null)" || name=""
+    if ! _native_k3s_node_name_ok "$name" && [[ "${TB_K3S_ADOPTED:-}" != 1 ]] && has openssl; then
+      pem="$(tb_root cat "${TB_K3S_DATA_PATH}/agent/client-kubelet.crt" 2>/dev/null)" || pem=""
+      name="$(printf '%s\n' "$pem" | openssl x509 -noout -subject -nameopt RFC2253 2>/dev/null | sed -n 's/.*CN=system:node:\([^,]*\).*/\1/p')" || name=""
+    fi
+  fi
+  _native_k3s_node_name_ok "$name" || return 1
+  printf '%s\n' "$name"
 }
 
 # _native_k3s_node_name [CONFIG] -- the node name, FROZEN at first install (RFC-0175
 # D4, decision 8): local-path volumes are pinned to it, so a later rename would strand
-# them. Once CONFIG (config.yaml) names a node, that name is returned and the hostname
-# is never read again. Otherwise the lowercased hostname, sanitised, and both names
-# logged. Never a constant: the environment switcher shows it (backend#4346).
+# them. Once CONFIG (config.yaml) names a node, that name is returned, whatever made
+# it: an install from before backend#5881 keeps the hostname it was given. Otherwise a
+# new install gets a new name (_native_k3s_mint_node_name), logged; the hostname is
+# never read. Never a constant: the environment switcher shows it (backend#4346).
+# When CONFIG names no node but k3s already runs one (_native_k3s_node_exists, or
+# cannot tell), that node's name is read back from k3s (_native_k3s_running_node_name)
+# and the caller freezes it in CONFIG again; a new name would be a new node. Only when
+# k3s does not say is the run stopped.
 _native_k3s_node_name() {
-  local cfg="${1:-$TB_K3S_CONFIG_PATH}" have rc=0 raw name
+  local cfg="${1:-$TB_K3S_CONFIG_PATH}" have rc=0 name
   have="$(_native_k3s_config_value node-name "$cfg")" || rc=$?
   [[ "$rc" -eq 0 ]] || error "native k3s: ${cfg} exists but could not be read, so the node name it froze cannot be kept. Check it with 'sudo cat ${cfg}', then re-run."
   if [[ -n "$have" ]]; then
     printf '%s\n' "$have"
     return 0
   fi
-  raw="$(hostname 2>/dev/null || uname -n)"
-  name="$(_native_k3s_sanitize_node_name "$raw")"
-  [[ -n "$name" ]] || error "native k3s: this machine's hostname '${raw}' has nothing a Kubernetes node name can use. Give the machine a hostname with letters or digits, then re-run."
-  if [[ "$name" == "$raw" ]]; then
-    log "native k3s node name: '${name}' (the hostname)."
-  else
-    log "native k3s node name: '${name}' (the hostname '${raw}', made a valid Kubernetes name)."
+  rc=0; _native_k3s_node_exists "$cfg" || rc=$?
+  if [[ "$rc" -ne 1 ]]; then
+    name="$(_native_k3s_running_node_name)" \
+      || error "native k3s: ${cfg} no longer names this machine's k3s node, and k3s did not say its name. A new name would leave the node's volumes behind. Start k3s if it is stopped, then re-run. Or run \"tracebloc delete\", which deletes k3s and its data, then install again."
+    log "native k3s node name: '${name}' (read back from k3s; ${cfg} no longer named it)."
+    printf '%s\n' "$name"
+    return 0
   fi
+  name="$(_native_k3s_mint_node_name)" || error "native k3s: /dev/urandom gave no node name for k3s."
+  log "native k3s node name: '${name}' (new; frozen in ${cfg} from here on)."
   printf '%s\n' "$name"
 }
 
@@ -964,6 +1040,44 @@ _native_k3s_cgroup_version() {
   else
     printf 'v1'
   fi
+}
+
+# ── SELinux ───────────────────────────────────────────────────────────────────
+
+# TB_K3S_SELINUX_ARMED -- 1 lets _native_k3s_selinux_confine answer true; 0 confines no
+# host. Confined, every pod sharing a local-path volume runs at the chart's selinux.level,
+# the pods jobs-manager spawns included (it passes them TRACEBLOC_SELINUX_LEVEL).
+TB_K3S_SELINUX_ARMED=1
+
+# _native_k3s_selinux_enabled -- true when `selinuxenabled` says SELinux is on
+# (Enforcing or Permissive). A host without the command has no SELinux to confine
+# with. TRACEBLOC_K3S_SELINUXENABLED is the TEST SEAM: the command asked.
+_native_k3s_selinux_enabled() {
+  local cmd="${TRACEBLOC_K3S_SELINUXENABLED:-selinuxenabled}"
+  command -v "$cmd" >/dev/null 2>&1 || return 1
+  "$cmd" >/dev/null 2>&1
+}
+
+# _native_k3s_selinux_confine MODE -- `true` when this k3s runs its pods confined
+# (`selinux: true`), else `false`. Only with SELinux on and MODE node-local:
+# hostpath's volumes are the chart's hostPath PVs, which the kubelet never relabels,
+# so a confined pod could not use their directories.
+_native_k3s_selinux_confine() {
+  if [[ "$TB_K3S_SELINUX_ARMED" == 1 && "${1:-}" == node-local ]] && _native_k3s_selinux_enabled; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}
+
+# _native_k3s_selinux_confined -- whether this machine's config.yaml runs k3s
+# confined: 0 yes, 1 no (no config.yaml, or no `selinux: true` in it), 2 cannot tell.
+# The chart's selinux.confine is read from here, so the two never disagree.
+_native_k3s_selinux_confined() {
+  local v rc=0
+  v="$(_native_k3s_config_value selinux)" || rc=$?
+  [[ "$rc" -eq 0 ]] || return 2
+  [[ "$v" == true ]]
 }
 
 # ── kubeconfig and the API ────────────────────────────────────────────────────
@@ -1319,25 +1433,25 @@ TB_K3S_GPU_CDI_RUN_DIR="/var/run/cdi"
 # still decides. (`nvidia-ctk cdi generate` itself exists from 1.12.0.)
 TB_K3S_GPU_TOOLKIT_FLOOR="1.18.0"
 
-# _native_k3s_gpu_marker -- the wired-pass marker: the GPU stack signature
-# (gpu-nvidia.sh _gpu_stack_signature) of the last run whose gate passed. A re-run
-# whose signature equals it restarts nothing. In prepared mode the data dir is the
-# named user's, and root never writes into a directory that user controls (common.sh
-# _tb_record_user_copy): the marker sits beside their root copy, read and written as
-# root (_native_k3s_gpu_marker_do).
-_native_k3s_gpu_marker() {
-  if [[ "${TB_K3S_PREPARED:-}" == 1 && -n "${TB_RECORD_FOR_USER:-}" ]]; then
-    local root; root="$(_tb_record_root_path "$TB_RECORD_FOR_USER")"
-    printf '%s/.gpu-k3s-wired' "${root%/*}"
-    return 0
-  fi
-  printf '%s/.gpu-k3s-wired' "${HOST_DATA_DIR:-$HOME/.tracebloc}"
+# The wired-pass marker: the GPU stack signature (gpu-nvidia.sh _gpu_stack_signature)
+# of the last run whose gate passed; a re-run whose signature equals it restarts nothing.
+# Root's in both modes and recorded as a `file`, a kind delete removes only under /etc
+# (the schema's x-tracebloc-artefact-paths); k3s's own uninstall removes it too.
+TB_K3S_GPU_MARKER_PATH="${TB_K3S_ETC_DIR}/tracebloc-gpu-wired"
+
+# _native_k3s_gpu_mark SIG -- a gate that passed: the marker holds SIG, and the record
+# lists it once. Best-effort: a marker root could not write is not recorded.
+_native_k3s_gpu_mark() {
+  { tb_root mkdir -p "${TB_K3S_GPU_MARKER_PATH%/*}" \
+      && printf '%s' "$1" | tb_root tee "$TB_K3S_GPU_MARKER_PATH" >/dev/null; } 2>/dev/null || return 0
+  tb_record_write file gpu-wired "$TB_K3S_GPU_MARKER_PATH"
 }
 
-# _native_k3s_gpu_marker_do CMD... -- CMD on the marker: as root in prepared mode,
-# where it sits in a root-owned directory; as this user otherwise.
-_native_k3s_gpu_marker_do() {
-  if [[ "${TB_K3S_PREPARED:-}" != 1 ]]; then "$@"; else tb_root "$@"; fi
+# _native_k3s_gpu_unmark -- the marker goes, so the next run asks again, and its record
+# line with it; a marker root could not remove stays recorded.
+_native_k3s_gpu_unmark() {
+  tb_root rm -f "$TB_K3S_GPU_MARKER_PATH" 2>/dev/null || return 0
+  tb_record_drop file gpu-wired "$TB_K3S_GPU_MARKER_PATH"
 }
 
 # _native_k3s_gpu_cpu REASON [blind] -- CPU mode for this run, said ONCE: TRACEBLOC_GPU_WIRED
@@ -1349,7 +1463,7 @@ _native_k3s_gpu_marker_do() {
 # passes no flag.
 _native_k3s_gpu_cpu() {
   TRACEBLOC_GPU_WIRED=0
-  _native_k3s_gpu_marker_do rm -f "$(_native_k3s_gpu_marker)" 2>/dev/null || true
+  _native_k3s_gpu_unmark
   if [[ "${2:-}" == blind ]] && declare -F _gpu_container_blind >/dev/null; then
     _gpu_container_blind "k3s"
   fi
@@ -1561,14 +1675,13 @@ _native_k3s_gpu_handler() {
 # re-run reinstalled the toolkit, k3s still listed none until this gate's one restart,
 # and then it did.
 _native_k3s_gpu_wire() {
-  local name="$1" marker sig last="" rc=0 why=""
+  local name="$1" sig last="" rc=0 why=""
   [[ "${GPU_VENDOR:-}" == "nvidia" && -n "${TB_K3S_GPU_PREPARED:-}" ]] || return 0
   # --print (prepare-host): k3s never started, so there is no runtime to ask about.
   if tb_root_planning; then return 0; fi
-  marker="$(_native_k3s_gpu_marker)"
   sig="$(_gpu_stack_signature)"
-  if _native_k3s_gpu_marker_do test -f "$marker" 2>/dev/null; then
-    last="$(_native_k3s_gpu_marker_do cat "$marker" 2>/dev/null)" || last=""
+  if tb_root test -f "$TB_K3S_GPU_MARKER_PATH" 2>/dev/null; then
+    last="$(tb_root cat "$TB_K3S_GPU_MARKER_PATH" 2>/dev/null)" || last=""
   fi
   _native_k3s_gpu_handler || rc=$?
   case "$rc" in
@@ -1607,10 +1720,9 @@ _native_k3s_gpu_wire() {
   # shellcheck disable=SC2034  # consumed cross-file by common.sh (_gpu_wired)
   TRACEBLOC_GPU_WIRED=1
   if [[ -n "$sig" ]]; then
-    { _native_k3s_gpu_marker_do mkdir -p "$(dirname "$marker")" \
-        && printf '%s' "$sig" | _native_k3s_gpu_marker_do tee "$marker" >/dev/null; } 2>/dev/null || true
+    _native_k3s_gpu_mark "$sig"
   else
-    _native_k3s_gpu_marker_do rm -f "$marker" 2>/dev/null || true
+    _native_k3s_gpu_unmark
   fi
   # Not "wired" yet: the runtime is registered, and the GPUs are counted after the
   # install, once the device plugin runs (_native_k3s_gpu_verify).

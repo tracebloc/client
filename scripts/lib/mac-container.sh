@@ -1212,6 +1212,18 @@ _mac_ct_node_ready_since() {
   (( 10#${hb//[^0-9]/} >= 10#${4//[^0-9]/} ))
 }
 
+# _mac_ct_running_node_name -- the name of the one node the macOS node's k3s runs,
+# asked inside the node (`container exec NAME kubectl`, as _mac_ct_node_ready_since
+# asks): the Mac has no k3s of its own. Fails when the node does not answer (stopped,
+# or no runtime). k3s.sh's _native_k3s_running_node_name asks it when the Mac's
+# config.yaml no longer names the node (backend#5881).
+_mac_ct_running_node_name() {
+  local root name
+  root="$(_mac_ct_install_root 2>/dev/null)" && name="$(_mac_ct_node_name 2>/dev/null)" || return 1
+  _bounded 15 "${root}/bin/container" exec "$name" kubectl get nodes --request-timeout=5s \
+    -o 'jsonpath={.items[*].metadata.name}' </dev/null 2>/dev/null
+}
+
 # _mac_ct_ready_why CT NAME SINCE -- why the macOS node's Ready wait was refused: the
 # last Ready condition it read (k3s.sh _native_k3s_ready_said) with its heartbeat, and
 # whether the node container still runs. Where Linux counts k3s's restarts, the Mac
@@ -1284,6 +1296,7 @@ _mac_ct_node_token() {
       [[ "$t" =~ $TB_MAC_CT_NODE_TOKEN_RE ]] || error "Apple container: /dev/urandom gave no join token for the node." ;;
     container)
       rc=0; _mac_ct_node_running "$ct" "$name" || rc=$?
+      [[ "$rc" -ne 1 ]] || _mac_ct_run_started "$ct" "$name"
       case "$rc" in
         0) ;;
         1) _bounded 120 "$ct" start "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || true ;;
@@ -1532,7 +1545,7 @@ _mac_ct_ensure_node() {
       _bounded 120 "$ct" stop "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || true
       _bounded 60 "$ct" delete "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
         || error "Apple container: could not remove the node ${name} to recreate it. Its volume is untouched. Run \"${ct}\" delete --force ${name}, then re-run."
-      start=run
+      start=run; running=""   # the node that ran is gone: the one started below is this run's
     else
       [[ -n "$running" ]] || start=start
     fi
@@ -1543,6 +1556,7 @@ _mac_ct_ensure_node() {
   # with it was removed above, to be made again without).
   [[ -n "$TB_MAC_CT_NODE_PROXY" ]] || rm -f "$penv"
   since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  [[ -z "$start" || -n "$running" ]] || _mac_ct_run_started "$ct" "$name"
   if [[ "$start" == start ]]; then
     rc=0; _bounded 120 "$ct" start "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || rc=$?
     if [[ "$rc" -ne 0 && -n "$TRACEBLOC_MAC_CT_LOCAL_API" ]]; then
@@ -1791,6 +1805,10 @@ _mac_ct_ensure_agent() {
   fi
   # launchd fails the job (EX_CONFIG) when its log's folder is missing.
   mkdir -p "$dir" "${agent_log%/*}" || error "Apple container: could not create ${dir} or ${agent_log%/*}."
+  # What an early exit takes back (_mac_ct_stop_run_node): the item this run loads, and
+  # its plist when there was none.
+  [[ -e "$plist" ]] || TB_MAC_CT_RUN_PLIST="$plist"
+  [[ "$loaded" -eq 0 ]] || TB_MAC_CT_RUN_AGENT=1
   printf '%s\n' "$want" > "${plist}.tmp" && mv "${plist}.tmp" "$plist" \
     || { rm -f "${plist}.tmp"; error "Apple container: could not write ${plist}."; }
   # The log an earlier plist named, which nothing else removes: that one file, by its
@@ -1804,6 +1822,51 @@ _mac_ct_ensure_agent() {
   _bounded 30 launchctl bootstrap "gui/$(id -u)" "$plist" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
     || error "Apple container: launchd did not load the login item ${plist}, so the node would not come back after a reboot. It's safe to re-run this installer."
   log "Apple container: the login item ${TB_MAC_CT_AGENT_LABEL} is loaded and runs ${bin} node ensure every ${TB_MAC_CT_AGENT_INTERVAL} s."
+}
+
+# What this run started, for _mac_ct_stop_run_node: the node (its runtime's container
+# CLI and its name), and the login item and the plist it added. Cleared where the lib is
+# sourced, so a value in the environment decides nothing.
+TB_MAC_CT_RUN_CT=""; TB_MAC_CT_RUN_NODE=""; TB_MAC_CT_RUN_AGENT=""; TB_MAC_CT_RUN_PLIST=""
+
+# _mac_ct_run_started CT NAME -- this run starts node NAME, which was not running.
+_mac_ct_run_started() { TB_MAC_CT_RUN_CT="$1"; TB_MAC_CT_RUN_NODE="$2"; }
+
+# _mac_ct_stop_run_node -- an install that did not finish (install_cleanup) stops the node
+# this run started, so no VM it started keeps holding this Mac's memory, and says so in
+# one line: stopped, or still running with the command that stops it. A node that ran
+# before the run, or that an earlier install's login item keeps running, is left alone.
+# The login item this run loaded goes first, with the plist when the run wrote the only
+# one, or it would start the node again within a minute and after every login. Never fails.
+_mac_ct_stop_run_node() {
+  local ct="${TB_MAC_CT_RUN_CT:-}" name="${TB_MAC_CT_RUN_NODE:-}" stop rc=0
+  [[ -n "$name" ]] || return 0
+  stop="\"${ct}\" stop ${name}"
+  if [[ -n "${TB_MAC_CT_RUN_AGENT:-}" ]]; then
+    _bounded 30 launchctl bootout "gui/$(id -u)/${TB_MAC_CT_AGENT_LABEL}" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || true
+    _mac_ct_agent_loaded || rc=$?
+    if [[ "$rc" -ne 1 ]]; then
+      warn "The VM this install started is still running. To stop it: launchctl bootout gui/$(id -u)/${TB_MAC_CT_AGENT_LABEL}; ${stop}"
+      return 0
+    fi
+    [[ -z "${TB_MAC_CT_RUN_PLIST:-}" ]] || rm -f "$TB_MAC_CT_RUN_PLIST" || true
+  else
+    # Only a confirmed none (1) lets this run stop the node: an earlier install's item (0)
+    # keeps it running, and one launchctl cannot answer for (2) may.
+    _mac_ct_agent_loaded || rc=$?
+    [[ "$rc" -ne 0 ]] || return 0
+    [[ "$rc" -eq 1 ]] || { warn "The VM this install started is still running. To stop it: ${stop}"; return 0; }
+  fi
+  rc=0; _mac_ct_node_running "$ct" "$name" || rc=$?
+  [[ "$rc" -ne 1 ]] || return 0
+  _bounded 120 "$ct" stop "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || true
+  rc=0; _mac_ct_node_running "$ct" "$name" || rc=$?
+  if [[ "$rc" -eq 1 ]]; then
+    info "Stopped the VM this install started, to free this Mac's memory."
+  else
+    warn "The VM this install started is still running. To stop it: ${stop}"
+  fi
+  return 0
 }
 
 # ── Part 4b: the runner's login item io.tracebloc.runner ────────────────────
@@ -2017,7 +2080,7 @@ _mac_ct_runner_gpu_ready() {
 _mac_ct_ensure_runner() {
   local ns="${TB_NAMESPACE:-}" bin="${TRACEBLOC_CLI_BIN:-}" home dir plist runner_log kcfg want have="" loaded=0 why
   local bundles listed=0 bad
-  local cpu="GPU jobs run on the CPU. It's safe to re-run this installer."
+  local cpu="GPU training falls back to the CPU. It's safe to re-run this installer."
   TRACEBLOC_MAC_GPU_RUNNER_READY=""
   if ! _mac_ct_runner_on; then
     [[ "${OS:-}" != "Darwin" ]] || log "The Apple-GPU runner: $(_mac_ct_runner_off_why), so no runner login item."
@@ -2240,7 +2303,7 @@ _mac_ct_local_network_gate() {
       # A refusal: nothing changes until the user allows it, so no "try again" footer.
       # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
       TB_EXIT_REFUSED=1
-      error "This Mac blocks the cluster's API: Local Network access is not allowed for \"${TB_MAC_CT_LAN_HELPER}\", the part of Apple's container runtime that makes the API reachable from this Mac. Allow it in ${TB_MAC_CT_LAN_SETTINGS}, then re-run this installer. The node is running and keeps its data." ;;
+      error "This Mac blocks the cluster's API: Local Network access is not allowed for \"${TB_MAC_CT_LAN_HELPER}\", the part of Apple's container runtime that makes the API reachable from this Mac. Allow it in ${TB_MAC_CT_LAN_SETTINGS}, then re-run this installer. The node keeps its data." ;;
     *)
       error "The node is Ready, but its API on 127.0.0.1:6443 did not answer from this Mac within ${TB_MAC_CT_LAN_WAIT_S}s (the last try exited ${rc}${body:+ and said: ${body}}). It's safe to re-run this installer." ;;
   esac

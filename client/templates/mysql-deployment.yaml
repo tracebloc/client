@@ -36,6 +36,9 @@ spec:
       securityContext:
         fsGroup: 999
         fsGroupChangePolicy: "OnRootMismatch"
+        {{- with include "tracebloc.seLinuxLevel" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
       initContainers:
       {{- if (default dict .Values.hostPath).enabled }}
       # kubelet does not apply fsGroup to hostPath volumes

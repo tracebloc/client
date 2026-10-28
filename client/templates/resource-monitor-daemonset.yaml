@@ -131,6 +131,9 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+        {{- with include "tracebloc.seLinuxHostAgent" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
       # NVML loads only under the NVIDIA runtime (a RuntimeClass on native k3s): take the
       # device plugin's class, empty keeps runc. Never env.RUNTIME_CLASS_NAME, the training
       # pods' class: a gVisor or Kata sandbox hides the node's /proc and /sys from this pod.

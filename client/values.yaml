@@ -592,6 +592,19 @@ openshift:
   scc:
     enabled: false
 
+# -- SELinux on native k3s
+# The installer sets confine: true when k3s runs with --selinux, and leaves it
+# false everywhere else (OpenShift's SCCs assign their own levels and refuse a
+# pod that names another). Confined, the kubelet relabels each volume to the
+# level of the pod that mounts it, so every pod that mounts a release
+# PersistentVolumeClaim runs at the ONE level below, and jobs-manager passes it
+# to the pods it starts (TRACEBLOC_SELINUX_LEVEL). The node agents that mount
+# host paths keep spc_t, the unconfined type they run as without --selinux.
+selinux:
+  confine: false
+  # Any fixed MCS pair; what matters is that every pod uses the same one.
+  level: "s0:c412,c817"
+
 # -- Namespace management
 # Default: OFF -- the chart assumes the operator pre-created the namespace via
 #   kubectl create namespace <name>
@@ -1458,56 +1471,56 @@ images:
   training:
     pinned: ""
     digestRegistry: "ghcr.io"
-    engineCommit: "7cf3d2cb79c3310f8227899f45e76999b55d6365"
+    engineCommit: "4fb5f66972b0c6f12e1afc09ff60c9b964cbc355"
     digests:
       causal_language_modeling:
-        cpu: "sha256:a583876b31d763947851972fb0a1b951f78aaa5a05e1ef228f12ad0e0a490a54"
-        gpu: "sha256:022367eae53190398879bf60642f9c523751d6e1dadb84ec28bd03fbf0432f29"
+        cpu: "sha256:0d951bb5849c3671e250ae02d790e68dc5ce89350fb1a999a0037e6b16a8a148"
+        gpu: "sha256:0b1977303314043048b6ffd65759d88accdac8165002b340cc39bdb5b7bd487c"
       embeddings:
-        cpu: "sha256:9b5ec4df1b6cfadbf45d4991eeb840c51a174dc2f822c803d90f86236b496b0a"
-        gpu: "sha256:3276335e420abeb4c5b9628c3917a88beddd9f03b35bc1900ad093c36dbc9641"
+        cpu: "sha256:0df9d3ffc39106bcc1fd5512cbfc827ca2ecafd71ac3701168315bafb4f860c2"
+        gpu: "sha256:4aac729f093beb3902094aa054f99768e8e8e38642eabfcc690cc8f42d4f65a3"
       image_classification:
-        cpu: "sha256:b4217956158abd8298b2218ac79942121fa7ba61e58a3ccd6ee61be3b67f0904"
-        gpu: "sha256:a64b7beb0e062c563245e4d86a1c88f8641a2f03eb2075ebe1f377a796274502"
+        cpu: "sha256:3fcfeca7332145f33bbafe1ad0579c566b435ef0a6234a63d775490f4f019470"
+        gpu: "sha256:0ff292c34e00c2416855ee01d6894c23a67f45faa720a39f4909d465e673a1ac"
       keypoint_detection:
-        cpu: "sha256:e726ad5416c6fc9c9fbe06e012b9ba829a28af9607bdd6f011cf62d6f3570de1"
-        gpu: "sha256:2681a14b8ff44a62f2c74517f463d81a35b8d4e407ec4fc5b3eff7453bf26fa1"
+        cpu: "sha256:69fad503eb739ef65ca87447e344b8474753c9844bba86540cedbae250785656"
+        gpu: "sha256:b0de65af079a76266db16c71aa25cd384c425eb65865f9adf3ed566b8bd2c744"
       masked_language_modeling:
-        cpu: "sha256:fed5b91ec6a74183e9be7f46eb5eb8d5ee3c704787d68a2e490629a94f75fee3"
-        gpu: "sha256:911ca291103d460be14fd7eeafee0d3c6f6f0426aa71205db4fbd3519d3c3d4c"
+        cpu: "sha256:828b5df517a614b497f65e9f4c5bdfb027369bee7e11e6bc9498095c566793c8"
+        gpu: "sha256:1d67b9f83a4c0da692ce02aab527e940f6ef752dff1f3601530da19ac0d23ec8"
       object_detection:
-        cpu: "sha256:53b61f02f94d2dc72213c42e7a3f1440b9f5f7071e3eafb0b22aa1155fa903f1"
-        gpu: "sha256:99c30a0848d06bd1fae07ce34ea35563184e0f3ce1701cc85c736d6060226817"
+        cpu: "sha256:25cdc7bd908f1957acf8afbaa3c611c464404170cd9ea2f8481e4d17a04cc551"
+        gpu: "sha256:9c7157fd51ef3c7e8c468de1eb27d70f4fbee3cf5a32f4edede732081e90e326"
       semantic_segmentation:
-        cpu: "sha256:a18b9f11e291d09a4687559623d778b1078f9630cfa5db49c9537a0a39fb4ec2"
-        gpu: "sha256:4dec9bafb0977d75b85f598d4723bd5c769c0b8349ec40dd8c45cc2bfdd57fd6"
+        cpu: "sha256:f583944f51bf972f570d970d4b37f4ff803cf0a2aa50cb1f6326751c103a1058"
+        gpu: "sha256:2280dec2cd36bd41fb1dee82b88e14e09558cf24f0846edfa6293e5a79459b2f"
       sentence_pair_classification:
-        cpu: "sha256:0d7643339af858834dc7a548060b0610a872b7a6a64105dc32cbe391d8f1f204"
-        gpu: "sha256:3f2655bf98b7d5c61ac53cdcfa745cdead4a7ee71cb6821ecb5081ddef7513bf"
+        cpu: "sha256:df6bf44efaaf6a95b55191c73c1770b8ec64823e8d61e9f5bf51606e87e7e25d"
+        gpu: "sha256:4bc50eceaf6dc04920fe06b35e599f8b4cfed3d63bad9333a2cd79aaa755b64a"
       seq2seq:
-        cpu: "sha256:4292ab38765c56b813940797772a3d9396bffbd950f0d66b8a59d540669fe03e"
-        gpu: "sha256:6d860615da5a2be5e621a4504826ea058861b99e205ad6998ef9e5bc379de935"
+        cpu: "sha256:0f1aa6777dbe9ae08881ffb400e2264e55f93004ce92b188e86d98791512a0c3"
+        gpu: "sha256:d2ca9dc969291c887d486db732bc9e766d2b29f480a9bb5580a22467585e2139"
       tabular_classification:
-        cpu: "sha256:eebee28b8eb218a58f727f51e3c1fc328d389453b3f39e60d7b889c927ae5034"
-        gpu: "sha256:8c6e1275aa476213e73db28bd1e098790122158d337dcad0d51ceb11b875257b"
+        cpu: "sha256:35350594ddde8d690624807242f9fd58e58d5772dfc656ec8e336f358dcfd49e"
+        gpu: "sha256:c7f358b7f50c16848828feecabd2977ff35b03871852fe4863a29d771c201266"
       tabular_regression:
-        cpu: "sha256:7036c31494f58a4c3265580f00e7dc6dc0008013b7f93e493312bd7387f47d15"
-        gpu: "sha256:dc121647777b14e8521f58e22942f540d0c5e8d5da0ec70a37ce771f47b03846"
+        cpu: "sha256:ec8dcd80b62f1f4f39e60e448d908c0dc1e25f6165d3f3438665411d15217a8e"
+        gpu: "sha256:c4648c4d83ba49ba79ba0ab494069f45dd9d5e0e27831f16b432c44fab902ea6"
       text_classification:
-        cpu: "sha256:2aa863c0d7fc9b9d0304f3c6b4fcef3d2ba83ace8b51c2e6995d5b5acdc8b3e1"
-        gpu: "sha256:bffdff603ef0f6b097748ca86d663f6829649dc6525289e0fd3ef05839d67fb2"
+        cpu: "sha256:118f07347971e797f7308e1a5d08fa6fce5e9137fba4313925c7a2ab20e0a830"
+        gpu: "sha256:de12195a616756f90e6b41ddeb6f0828a5af1b83ac1ed0b24b71f107f287d9c4"
       time_series_classification:
-        cpu: "sha256:4badd3fb047a4a450c9c2d70993e94d50bcc42f60bbb9d9311e81f130e202822"
-        gpu: "sha256:3704d9aebdd8489c75f6830e84a12650ba7126d5f060bd87e2acbf04da4e6bac"
+        cpu: "sha256:a552992c8b8df7318af63a0e073680b5dc3311497405bab693829f755967cf6b"
+        gpu: "sha256:eb35b819c08aec74cb5244a55d6628d97ce199a67a57e8548dfe681eba43865e"
       time_series_forecasting:
-        cpu: "sha256:6dcddd7881073c174554680a02d4e8a1044e79a4c494437c7f6b93c096ef3f85"
-        gpu: "sha256:74f9919bdba384e93fcca0642580b0c9d5886ac7a5f6426745a0ff53ef6890e4"
+        cpu: "sha256:2b2ad3e13272da02bda5b0245e5d97641d1b84234990b86da3c19533876e574c"
+        gpu: "sha256:7563204d0c25878b3189101e03f57b7707414a01fe009b0ee62d74c7a2615a24"
       time_to_event_prediction:
-        cpu: "sha256:763d2d8f435d1e76302ca885438941dc9c7d8d57700af1593a8e9d4a4b6621b8"
-        gpu: "sha256:0ac16457fc36b9c833311ba9f671ba2d13a4ea028da2a375454400a9cc0c1885"
+        cpu: "sha256:af4728d1534571c880e09453c32cd38448f301bccd04d3beb973cf919eead028"
+        gpu: "sha256:343a5ec05a3828686d30a635ffd78dc9adbfb81c8f0eec6b1a67280876951e32"
       token_classification:
-        cpu: "sha256:fbade722a1a66507231c284cbcf6b313335a16e1f76a765cb400a088b110c207"
-        gpu: "sha256:3ed740115fbb519ab193dda6fa8610f2a43dcae1af6cd2b4ce3cf097dfc5778f"
+        cpu: "sha256:1c831859645e5078696cfd9210aa4f075073e6e8e27ecc60da5eec7f481272a0"
+        gpu: "sha256:8a83e36e0d596a66b9b6374ea0fabf4446596b8ff05f53283d39294e49b498be"
     capabilities: "ddp,loss-coupled:embeddings,loss-coupled:time_to_event_prediction,min-micro-batch:2,per_rank_split"
     parents:
       gpu:
@@ -1516,8 +1529,8 @@ images:
         platforms:
           - "linux/amd64"
     macosBundle:
-      digest: "sha256:d4bc7c5f1657f0090b9cb006ded596b4c632749a34030730ea2e47cfc39c3a42"
-      location: "ghcr.io/tracebloc/engine-macos-arm64@sha256:097b233e75951fd69ace97db495f1806879dc70e1cf87f29095e9bc985119c7b"
+      digest: "sha256:3af78ebfad65eb6112288e1d3515607ccd66a84dbb6b9a15278dd64916e075c0"
+      location: "ghcr.io/tracebloc/engine-macos-arm64@sha256:98d587e63e6fe1e41e46c73f912a0bcc123e569f02ac287e5367be93d129e4ae"
   # client-runtime#40 / client#125: the ingestor image is spawned by
   # jobs-manager at ingestion-submission time, not as a long-lived pod.
   # jobs-manager resolves ONE effective digest from the keys below and spawns
@@ -2846,20 +2859,23 @@ perIngestionTables:
 
 # -- PER-ENVIRONMENT ROLLOUT for the gate above (backend#1834).
 #
-# Each fleet turns on once a dev-edge run of ITS ingestor has shown the whole
-# D16 path: the backend row carries physical_table, training reads the
-# ds_<hex> table, and `tb data delete` drops the table, the salt and the
-# journal. An ingestor older than data-ingestors v0.8.16 reports the dataset's
-# --name instead of its ds_ handle and its delete misses the table
-# (backend#2895), so prod's v0.8.2 prodDigest pin must not run under the flag.
+# On for every fleet. A dev-edge run showed the whole D16 path: the backend
+# row carries physical_table, training reads the ds_<hex> table, and `tb data
+# delete` drops the table, the salt and the journal (backend#1834).
+#
+# An ingestor older than data-ingestors v0.8.16 reports the dataset's --name
+# instead of its ds_ handle and its delete misses the table (backend#2895). A
+# prod edge with service DB accounts off runs prodDigest (v0.8.2), so
+# tracebloc.perIngestionTables resolves off on that pin whatever this map or the
+# override says.
 #
 # An edge upgraded with plain `--reuse-values` from a chart without these keys
 # has neither: the gate resolves off there and the render does not fail. The
 # auto-upgrade CronJob uses --reset-then-reuse-values, which picks the map up.
 perIngestionTablesByEnv:
-  dev: false
-  stg: false
-  prod: false
+  dev: true
+  stg: true
+  prod: true
 
 # ============================================================
 # Per-dataset PVC mounts (RFC-0003 D9 Track B — client-runtime#203 / #261)

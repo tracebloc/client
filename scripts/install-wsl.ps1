@@ -3500,7 +3500,7 @@ function Read-HostInstallRecord {
 # longer sets up tracebloc's earlier Windows install, nor moves a machine off it.
 # The distro beside one would be a second client, and both would want the
 # Kubernetes API port on localhost. So one is refused by name before WSL is
-# touched, read from files only, never by asking the runtime it ran on:
+# touched, read from its files first:
 #   - the host record (above), when its substrate is one the schema retires on
 #     Windows: x-tracebloc-substrate.retired.windows, which Pester holds these
 #     keys to. A record that is there but cannot be read is "cannot tell",
@@ -3513,7 +3513,10 @@ function Read-HostInstallRecord {
 #     whole value is the context's name, in any spelling kubectl reads (block or flow
 #     YAML, JSON, a quoted key, a trailing comment), and not on a comment line: the mark
 #     the tracebloc CLI's delete trusts too. That file is the user's, not ours, so one that cannot be
-#     read is no mark.
+#     read is no mark;
+#   - with none of them, the containers Docker still has for the cluster that
+#     context names (Get-RetiredClusterContainer): a record, a state file and a
+#     context deleted by hand leave the cluster running.
 # None of them: nothing is left to keep, and the install goes on.
 # Each retired substrate, with the name a customer knew its install by and the
 # context it wrote (the substrate, then common.sh's default cluster name, as
@@ -3524,26 +3527,40 @@ $RetiredInstalls = [ordered]@{
 }
 $RetiredInstallNames = @($RetiredInstalls.Values | ForEach-Object { $_.Name }) -join ' or '
 $RetiredCoreStateRelPath = '.tracebloc\install-state.json'
-# The last tracebloc CLI release whose `tracebloc delete` still deletes such a
-# secure environment, the way out's fallback when the CLI on this machine refuses
-# to: facts.env's RETIRED_OFFBOARD_CLI, stamped here by scripts/check-facts.sh
-# (--check holds it to facts.env, as it holds reinstall.sh's copy for Linux and
-# macOS). The way out never sends a machine to an older installer: that would run
-# whichever CLI is on this machine, and the newest no longer deletes one.
-$RETIRED_OFFBOARD_CLI = "0.11.35"
+
+# The path of the program NAME on PATH, or $null. Pester's seam for what is installed.
+function Find-HostCommand {
+  param([string]$Name)
+  $c = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($c) { return $c.Source }
+  return $null
+}
+
+# The first container Docker lists, stopped ones too, under the label k3d gives
+# every container of the cluster CLUSTER: '' when it lists none or no docker
+# command is here, $null when it fails or does not answer while k3d is installed.
+function Get-RetiredClusterContainer {
+  param([string]$Cluster)
+  $docker = Find-HostCommand 'docker'
+  if (-not $docker) { return '' }
+  $p = Invoke-WslProbe -FilePath $docker -ArgumentList @('ps', '-a', '--filter', "label=k3d.cluster=$Cluster", '--format', '{{.Names}}') -TimeoutSec $WslProbeTimeoutSec
+  if ($p.Started -and -not $p.TimedOut -and $p.ExitCode -eq 0) {
+    $names = @($p.Output -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($names.Count -gt 0) { return [string]$names[0] }
+    return ''
+  }
+  if (Find-HostCommand 'k3d') { return $null }
+  return ''
+}
 
 # Refuses, by name, a machine on the retired Windows install (above).
 function Assert-NoRetiredInstall {
-  # The way out, last in each message, so its command is the line's end: delete that
-  # secure environment with 'tracebloc delete', as reinstall.sh's refusal says on
-  # Linux and macOS, then the state file and the context if they are still there
+  # The way out, last in each message: delete that secure environment with
+  # 'tracebloc delete', then the state file and the context if they are still there
   # (a delete that finds no install record leaves them), then this installer again.
-  # A CLI that refuses gets the release that can still delete it, pinned by the
-  # CLI's own installer's TRACEBLOC_RELEASE_VERSION.
   $state = Join-Path $env:USERPROFILE $RetiredCoreStateRelPath
   $contexts = @($RetiredInstalls.Values | ForEach-Object { $_.Context }) -join ' and '
-  $move = 'To move it, delete that secure environment with ''tracebloc delete''. Then delete ' + $state + ' and the ' + $contexts + ' entries from your kubeconfig if they are still there, and run this installer again. ' +
-    'If ''tracebloc delete'' refuses, tracebloc CLI ' + $RETIRED_OFFBOARD_CLI + ' can still delete it. Install that CLI in PowerShell with:  $env:TRACEBLOC_RELEASE_VERSION = ''v' + $RETIRED_OFFBOARD_CLI + '''; irm ' + $TRACEBLOC_CLI_INSTALL_URL + ' | iex; Remove-Item Env:TRACEBLOC_RELEASE_VERSION'
+  $move = 'To move it, delete that secure environment with ''tracebloc delete''. Then delete ' + $state + ' and the ' + $contexts + ' entries from your kubeconfig if they are still there, and run this installer again.'
   $record = Get-HostRecordPath
   if (Test-Path -LiteralPath $record) {
     $rec = $null
@@ -3569,6 +3586,17 @@ function Assert-NoRetiredInstall {
       if ($text -match $named) {
         throw "This machine has a secure environment on $($r.Name) (the kubeconfig $kc has its context, $($r.Context)), and this installer no longer sets one up or moves one. Nothing was changed on this machine. If that secure environment is already gone, delete the $($r.Context) entries from $kc and re-run. $move"
       }
+    }
+  }
+  $r = $RetiredInstalls['k3d']
+  if ($r) {
+    $cluster = $r.Context -replace '^k3d-', ''
+    $found = Get-RetiredClusterContainer $cluster
+    if ($null -eq $found) {
+      throw "k3d is installed on this machine, and Docker did not answer whether it has the containers of the cluster $cluster, so this installer cannot tell whether a secure environment on $($r.Name) is still set up here, and the tracebloc WSL distro is never set up beside one. Start Docker Desktop, then re-run. Nothing was changed on this machine."
+    }
+    if ($found) {
+      throw "This machine has a secure environment on $($r.Name) (Docker has the containers of its cluster $cluster, $found), and this installer no longer sets one up or moves one. Nothing was changed on this machine. $move"
     }
   }
 }

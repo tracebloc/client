@@ -385,6 +385,27 @@ client-pvc
 {{- end -}}
 
 {{/*
+  Where this release keeps its volumes, one of three words jobs-manager reports
+  to the platform as the heartbeat's storage mode:
+    hostpath       hostPath.enabled: every claim, MySQL's included, on a static
+                   PV under hostPath.root.
+    job-data       jobData.path: data, logs and resume on the Mac's folder,
+                   MySQL on the storage class.
+    storage-class  neither: every claim on the storage class.
+  The two settings are refused together (tracebloc.jobDataRefusal). Nil-guarded
+  for `--reuse-values` upgrades predating either key.
+*/}}
+{{- define "tracebloc.storageMode" -}}
+{{- if (default dict .Values.hostPath).enabled -}}
+hostpath
+{{- else if include "tracebloc.jobDataPath" . -}}
+job-data
+{{- else -}}
+storage-class
+{{- end -}}
+{{- end -}}
+
+{{/*
   The hostPath a release claim's chart PV names, or "" when the claim has no
   chart PV and is on the storage class. Called as
   (dict "root" $ "claim" "data|logs|resume|mysql"); the claim's word is also its
@@ -2077,20 +2098,31 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
        (backend#1834: each fleet turns on once its ingestor is shown to carry
        the whole D16 path on a dev edge).
 
+  NEVER ON THE prodDigest PIN, whichever answer the two give. An edge whose
+  ingestor resolves to `images.ingestor.prodDigest` (a prod edge with service DB
+  accounts off, see tracebloc.ingestorDigest) runs v0.8.2, which predates the
+  ds_ handle fix (backend#2895): under the flag it reports the dataset's --name
+  instead of its ds_ table, so `tb data delete` misses the table. The backend
+  cannot see that edge's overrides, so the chart refuses the combination.
+
   NIL-SAFE BOTH WAYS: an edge upgraded with plain `--reuse-values` from a chart
   that predates these keys has neither, and the gate resolves off -- legacy
   label-named tables, the behaviour that edge already had. Returns "true" or
   empty.
 */}}
 {{- define "tracebloc.perIngestionTables" -}}
+{{- $on := "" -}}
 {{- $override := (default dict .Values).perIngestionTables -}}
 {{- if not (kindIs "invalid" $override) -}}
-{{- if $override }}true{{ end -}}
+{{- if $override }}{{ $on = "true" }}{{ end -}}
 {{- else -}}
 {{- $env := include "tracebloc.clientEnv" . -}}
 {{- $byEnv := default dict .Values.perIngestionTablesByEnv -}}
-{{- if get $byEnv $env }}true{{ end -}}
+{{- if get $byEnv $env }}{{ $on = "true" }}{{ end -}}
 {{- end -}}
+{{- $pin := (default dict (index (default dict .Values.images) "ingestor")).prodDigest | default "" -}}
+{{- if and $on $pin (eq (include "tracebloc.ingestorDigest" .) $pin) }}{{ $on = "" }}{{ end -}}
+{{- $on -}}
 {{- end }}
 
 {{/*
@@ -2773,7 +2805,7 @@ Usage inside a container's env: list:
 {{- $cred := "" -}}
 {{- if $user }}{{- $cred = printf "%s:%s@" $user $pass -}}{{- end -}}
 {{- $url := printf "http://%s%s" $cred $hostport -}}
-{{- $noProxy := "localhost,127.0.0.1,0.0.0.0,169.254.169.254,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal" -}}
+{{- $noProxy := "localhost,127.0.0.1,0.0.0.0,169.254.169.254,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local" -}}
 {{- with .Values.env.NO_PROXY }}{{- $noProxy = printf "%s,%s" . $noProxy -}}{{- end }}
 - name: HTTP_PROXY
   value: {{ $url | quote }}
@@ -3387,3 +3419,29 @@ derives the pairs from the render and fails on one missing here.
 {{-   end }}
 {{- end }}
 {{- end }}
+
+{{/*
+tracebloc.seLinuxLevel -- a pod securityContext's seLinuxOptions for a pod that mounts
+a release PersistentVolumeClaim: selinux.level when selinux.confine, else nothing.
+Why one level: see selinux in values.yaml.
+*/}}
+{{- define "tracebloc.seLinuxLevel" -}}
+{{- $s := default dict .Values.selinux -}}
+{{- if $s.confine -}}
+{{- $_ := required "selinux.level is required when selinux.confine is on" $s.level -}}
+seLinuxOptions:
+  level: {{ $s.level | quote }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.seLinuxHostAgent -- a pod securityContext's seLinuxOptions for a pod that
+mounts host paths: spc_t when selinux.confine, the type it runs as unconfined, since
+the kubelet never relabels a hostPath. Else nothing.
+*/}}
+{{- define "tracebloc.seLinuxHostAgent" -}}
+{{- if (default dict .Values.selinux).confine -}}
+seLinuxOptions:
+  type: spc_t
+{{- end -}}
+{{- end -}}

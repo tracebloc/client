@@ -126,6 +126,10 @@ spec:
           operator: Exists
           effect: NoSchedule
       priorityClassName: "system-node-critical"
+      {{- with include "tracebloc.seLinuxHostAgent" . }}
+      securityContext:
+        {{- . | nindent 8 }}
+      {{- end }}
       {{- if include "tracebloc.useImagePullSecrets" . }}
       # Mirror/private-registry pull secret, copied into this namespace by
       # docker-registry-secret.yaml so the plugin can pull when global.imageRegistry
@@ -223,6 +227,10 @@ spec:
       tolerations:
         - key: CriticalAddonsOnly
           operator: Exists
+      {{- with include "tracebloc.seLinuxHostAgent" . }}
+      securityContext:
+        {{- . | nindent 8 }}
+      {{- end }}
       {{- if include "tracebloc.useImagePullSecrets" . }}
       imagePullSecrets:
         - name: {{ include "tracebloc.registrySecretName" . }}
