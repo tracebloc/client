@@ -1478,56 +1478,56 @@ images:
   training:
     pinned: ""
     digestRegistry: "ghcr.io"
-    engineCommit: "0471909d4a45c8214238b02081e3147f6f0a050f"
+    engineCommit: "a59548281bef7deb6b149ed4700d293ba3c04d34"
     digests:
       causal_language_modeling:
-        cpu: "sha256:6aee8a743a090783026b1951b7afbf89f53fec85ecb74bf13f0229e530a089ee"
-        gpu: "sha256:c625244f5290509dffdb8e919645b5732efcd6fd874952ea8100c2d9115581d0"
+        cpu: "sha256:0092f3e9812263009d1cf4e9a7999a098dfe1f9b6aae6491fecedad7983009a9"
+        gpu: "sha256:484b0710498cfd42bc87a967b66f89ed079d8e8275e9eb4eb6954824d022e1fe"
       embeddings:
-        cpu: "sha256:2fdcba7aef95b7d33d992595f28933dfe36f116496b28e19eb10002717f5e1c4"
-        gpu: "sha256:46b4efed35026d7608747086f1fc07be99a4a08ff1bb5b4a703aa267ad15acc6"
+        cpu: "sha256:14bab4ae8c855b9fd820bc02a9fd65ad93f21d165b7230ded921d1464ba7f225"
+        gpu: "sha256:21ae51eeb503c04b4807bd29c7dc2b7dea92de4320251e94fffd4f7d41aea063"
       image_classification:
-        cpu: "sha256:b8a4a3f59c03871c8c333f981b59304d64fbc46c6c4945723aac5eb3aa430813"
-        gpu: "sha256:022c473260a296a7c97188a8e2fc3913eaad61fc0502cf0a2a009d8e8b21561c"
+        cpu: "sha256:046cf1a7a73620a07551d24f8f8514466daf959d6ef77964fe733ad62e136374"
+        gpu: "sha256:4da7a921542be5ae3cd10bd6dbe7a614004764180ff034561b623a0b6386adb2"
       keypoint_detection:
-        cpu: "sha256:f77ee590355efc5627f93401ac3831956e4be1025a66a2e67cdbc72986f533cd"
-        gpu: "sha256:a76e3d3f64abaafe6b95926813d6dcd93ac3fe16d0bd1532c769e23dfb1f13e7"
+        cpu: "sha256:027dac8e870d6eda5a503bbfb78825113eebf1f40d93264ed32b36da9bda85b7"
+        gpu: "sha256:0523b5ea2508afe3185ab1de41b8e9dcea9d47f245051e60cba9ecba992bd51a"
       masked_language_modeling:
-        cpu: "sha256:37e61063810ce81a422f88ad435f4570fc760353ae4c6c761ae555f31481477e"
-        gpu: "sha256:e4605d11af64af4940d9b1ccd0d95986f34aa0241614381c38661b9e11a3c904"
+        cpu: "sha256:32e24e1045436dfba03da791182d22462970a3a555b10e330e605ae1931700b1"
+        gpu: "sha256:3eeb8a82f3e9074f61c174e55fd4f8612fa29f91f5a80738bc5cf9503241ebf7"
       object_detection:
-        cpu: "sha256:021963f6784db9f07ec5b1597a30cd91bda2a9daf979f55082ecef692c3d7efd"
-        gpu: "sha256:a1852c0f4a146d0c20e95e7a7626661477cc8a565dbbd98abc604e6110fa8389"
+        cpu: "sha256:b36d691e802dbe847b1bd7a5d949c3f7a600c9e84903730deedf1ad13d1ed98a"
+        gpu: "sha256:69ce113336f7b892282afc85e323743c0c887725c979651dfc7fd80fe1e3ddac"
       semantic_segmentation:
-        cpu: "sha256:b8ffabcaa2d5efe7c5b75a8483ab32e81b2dc3c37b034a309c03ccecb672e983"
-        gpu: "sha256:4205a9d3e05812ba9df0a30976cd3dc59638d0e6a2144b010fd7a34b65e14adb"
+        cpu: "sha256:4299a7a289069cac4ec182dc5b37d8548a904348f7461c3685e060723f84176a"
+        gpu: "sha256:47dff8fcef5cf0f5d9dba41fe366060bd2300191e916a0afbf7ab2f038146b38"
       sentence_pair_classification:
-        cpu: "sha256:8876a5928639bc423f685eee24413d7aa546a1e3840ef56a31640eb5f6ed3a48"
-        gpu: "sha256:196fe4e628ee9fd65d6a5cde699a7e407747a299583fd8dfb5b08ba187c77dbe"
+        cpu: "sha256:c7ac4fd99f97858c73de04be8845f7c625e85afdd61b04d0fb557568c1e542f4"
+        gpu: "sha256:3297428fc0fbae7aadd02314ccc32ad87f733a9d3fefd28ed6da78bde3df9658"
       seq2seq:
-        cpu: "sha256:42e989e308992f47397ff20c690023d7ad675089c8d0818bf5740897a40188b0"
-        gpu: "sha256:22f3213a9ea52cac88bc4fbb5fdb5ccdc5fbf3e958be3c2e73a87107ca527ec0"
+        cpu: "sha256:869b2f2a5d07b20165f77672b5ee3c720f2526e1134944e54d28ffe7dc7c635a"
+        gpu: "sha256:3bb8298ddeb3436a5ee83cdcc39c83ce4e4d48d45d80b4b0c18249d1f4522d64"
       tabular_classification:
-        cpu: "sha256:a12069be41d9f6249ac5f6a6ca35f4da20d6b76ef42ff3f80872901829c6569b"
-        gpu: "sha256:4a5160a33a3c009366d4d53a94320f7f56de401ba1a236c546404714f41f485a"
+        cpu: "sha256:31a416db0d885281d0497f55b2f047742e79ec0f9ba2c7d868e31ba390b64840"
+        gpu: "sha256:e41efcdf0cd16982c39d5b76dbe977528e356e83dd9a457c4470ac2338ffd26d"
       tabular_regression:
-        cpu: "sha256:a102dc1f54bae8eeeb46fe68b0f0b61b1f7bbbcf6e24633280e8056eabfa9e45"
-        gpu: "sha256:f49839f3af4bb664ba628b8d9438de7cfc1e7cc84ea74059b741152dc1227ad5"
+        cpu: "sha256:ef5968de033a1e8a9a45e78b750dbfb4dd7d41738e1b5444add17320019d744b"
+        gpu: "sha256:e773faaf1036424eda8b3426399ddd594fc41cc2ebe72f658af2cad027f58679"
       text_classification:
-        cpu: "sha256:3c9681d8c674d0f664ecdc8ae2e4f5014a6ba2a346964b96185dab9ebef8f797"
-        gpu: "sha256:0d79bdbb30cbf532e1728e9abd5e0d1c4e738b7a6758982d148899fe8e984ffb"
+        cpu: "sha256:f1f9a34c918783e67c8c89b1019768c7d1e7672b07abe68419d0e62a62d520cb"
+        gpu: "sha256:4d08efbe53f66bf7057f2bff3edc939ec3c5c84b713092d3536be27c9dd72474"
       time_series_classification:
-        cpu: "sha256:d77ea999ed9bb11a16b1b7a475afcc44e01b6ac9a7565d33e390b7ed0d7bac02"
-        gpu: "sha256:60403ffb223b50362b31931f31418ed24fc5509a25c7422d660f60358a001682"
+        cpu: "sha256:1691d456edb51f97e07806947e7a494ce7f7d92311b62c4f1b7e513f0213cf61"
+        gpu: "sha256:3407a93f932a44d0ed80efdd9ff481010379fcc0191252efeda2fca445bc425f"
       time_series_forecasting:
-        cpu: "sha256:ceed37dcefd174212193a949ba8f2a8180b598df5181c94bacfaf6466299b541"
-        gpu: "sha256:0b53f98d1a067cf2332283b76fd33be1c000373fb0203c87d8f88343b3848bec"
+        cpu: "sha256:28606dc3b0c632da8cdea2761a7dc985b44fd3c3cde0384edc227beff510e828"
+        gpu: "sha256:608e438d7090a98ddffcc845713dc4bb2dd2fd6758058a42a0b890c1682536ee"
       time_to_event_prediction:
-        cpu: "sha256:ee4e0c1b6fb8c20c472f88f9e480d075089e3ead6d5d37500ad83d17638ec5aa"
-        gpu: "sha256:ff56b2d94628d63a1d0c61e02dd75475ccce9ce750556ebc970d873ac8c58e8f"
+        cpu: "sha256:b939e2836c5486c300f14039250484d387dd8ae13cc8121ea4c3e6f5092fca74"
+        gpu: "sha256:74743beb2dabc5bd9c76228222b872f6e62f8ac5caaeb4905e5ae42311d88815"
       token_classification:
-        cpu: "sha256:7041cad53dac1d233acbeb4663661c9047dc3435a4586a48ced230fd724ffec8"
-        gpu: "sha256:73fcfdfa04919712aee0ee759ebfaa09831cf6908d8307c14a1dcca253a566c5"
+        cpu: "sha256:dfa5596ca9dd1e731d7982adc13c4ececf9e19cddfcd0d6c8a8222e8527992cb"
+        gpu: "sha256:4b97d40a728407a6914aed91e92e8cad83f60e3d1586d8d6052d6ed23ea326b4"
     capabilities: "ddp,loss-coupled:embeddings,loss-coupled:time_to_event_prediction,min-micro-batch:2,per_rank_split"
     parents:
       gpu:
@@ -1536,8 +1536,8 @@ images:
         platforms:
           - "linux/amd64"
     macosBundle:
-      digest: "sha256:4ebc80f99b2c76f42040a2f8ee528dd9268f1ffc39f892632bb0d13e4f2f5e25"
-      location: "ghcr.io/tracebloc/engine-macos-arm64@sha256:14deb7443d86c5dbce8bbbfaa690ef4f63fd42a469a2489deb5760221e4bfbac"
+      digest: "sha256:d8c1c7d9c4325614994c7ae484149fa26f2490e2e3109568ef6cfa5b74796f81"
+      location: "ghcr.io/tracebloc/engine-macos-arm64@sha256:54404142074b625cb7826de587d850af783583b7ee1b99a476fe2ede5fafb57b"
   # client-runtime#40 / client#125: the ingestor image is spawned by
   # jobs-manager at ingestion-submission time, not as a long-lived pod.
   # jobs-manager resolves ONE effective digest from the keys below and spawns
@@ -3212,12 +3212,16 @@ ingestRunToken:
 # data-ingestors `develop` and carries #931, and the dev API serves
 # /ingest-token/ (backend#5223).
 #
-# stg: FALSE. The :stg channel publishes from data-ingestors `staging`, which
-# does not carry #931 until the release train promotes it, and backend#5223 must
-# reach backend staging too. Flip this when BOTH are true.
+# stg: TRUE. stg floats on the :stg channel, which publishes from
+# data-ingestors `staging` and carries #931, and backend staging serves
+# /ingest-token/.
 #
-# prod: FALSE. Prod runs images.ingestor.prodDigest (v0.8.2), which predates
-# #931. Flip this only once prodDigest moves past a release containing #931.
+# prod: FALSE. A prod edge with serviceDbAccounts off spawns
+# images.ingestor.prodDigest (v0.8.2), which predates #931, and this map cannot
+# tell it from an edge that spawns prodDigestServiceDb. Flip this only once
+# prodDigest moves past a release containing #931. That pin is held on purpose:
+# moving it is bound by the data-ingestors#468 ordering constraint in
+# docs/SECURITY.md §4.1.1.
 #
 # An edge upgraded with plain `--reuse-values` from a chart without these keys
 # has neither: the gate resolves off there, the shared-token behaviour it already
@@ -3225,7 +3229,7 @@ ingestRunToken:
 # to pick up this map.
 ingestRunTokenByEnv:
   dev: true
-  stg: false
+  stg: true
   prod: false
 
 # ============================================================

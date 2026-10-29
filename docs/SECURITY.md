@@ -773,7 +773,7 @@ Previously the tracebloc backend issued Django REST Framework `authtoken` creden
 
 **Intentionally unchanged — edge devices and bots.** Non-interactive service credentials (edge devices, bots) deliberately keep the legacy long-lived DRF `Token`: these are machine identities with no interactive re-login path, so a bounded web-session token doesn't apply. This is by design, not an oversight.
 
-**Ingestion Jobs — per-run token, rolling out per environment.** With `ingestRunToken` on, the jobs-manager gives each ingestion Job its own backend token, scoped to ingestion and valid for one run and 24 hours, instead of the edge's shared long-lived token, so a compromised ingestion pod leaks far less. The chart turns it on for `dev` and leaves it off for `stg` and `prod` (`ingestRunTokenByEnv`) until each environment's ingestor supports the per-run token; an older ingestor fails its backend calls under one. Where the backend does not offer the token yet, the jobs-manager falls back to the shared one.
+**Ingestion Jobs — per-run token, rolling out per environment.** With `ingestRunToken` on, the jobs-manager gives each ingestion Job its own backend token, scoped to ingestion and valid for one run and 24 hours, instead of the edge's shared long-lived token, so a compromised ingestion pod leaks far less. The chart turns it on for `dev` and `stg` and leaves it off for `prod` (`ingestRunTokenByEnv`) until the pinned prod ingestor supports the per-run token; an older ingestor fails its backend calls under one. Where the backend does not offer the token yet, the jobs-manager falls back to the shared one.
 
 **Residual risk — accepted, 2026-10-06.** The web-session token is still stored in JS-readable storage (localStorage + a non-`httpOnly` cookie), so it remains exfiltratable via XSS. The alternative was to move it to an `httpOnly; Secure` cookie (the issue proposed `SameSite=Strict`; the backend half was built as `SameSite=Lax`); that migration has been **assessed and declined**, and SEC-06 is closed as mitigated by backend#590 rather than eliminated.
 
@@ -918,6 +918,7 @@ Cross-reference for reviewers and contributors.
 - **2026-10-24** — §5.5: the local API paragraph describes the macOS node alone, without its comparison with a runtime the installer no longer sets up.
 - **2026-10-26** — §4.1.1: the drift watch re-verifies each new ingestor release on the prod line and opens the service-DB pin PR itself; a failed check keeps it red and opens nothing. `prodDigest`, its `ackDrift` hold and the ordering constraint stay human-only.
 - **2026-10-28** — §8.2: the egress gateway allowlist is per environment (`egressProxy.allowlistByEnv`). A client's gateway permits only its own environment's API host, so a prod client no longer reaches the dev or staging API; `scripts/tests/egress-allowlist-env.sh` holds each environment's render to the installer's backend host for that environment.
+- **2026-10-29** — §8.3: the per-run ingestion token is on for `stg` as well as `dev`, since the staging ingestor and the staging backend both support it. `prod` stays off while its pinned ingestor predates the per-run token.
 
 ---
 

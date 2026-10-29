@@ -2060,14 +2060,9 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
     1. `ingestRunToken` -- an explicit operator override, true or false.
     2. `ingestRunTokenByEnv[<resolved CLIENT_ENV>]` -- the fleet default.
 
-  Shipped default: on for dev only. stg and prod are off because the token is
-  BOUND to one ingestor: an ingestor that does not read TRACEBLOC_INGESTOR_ID /
-  BACKEND_TOKEN_SCHEME (data-ingestors#931) breaks under it. dev floats on the
-  :dev ingestor channel, which carries #931, and the dev API has the endpoint
-  (backend#5223). stg turns on once data-ingestors `staging` carries #931 (the
-  :stg channel publishes from it) and backend staging serves /ingest-token/;
-  prod turns on once images.ingestor.prodDigest moves past a release that
-  contains #931 (it pins v0.8.2, which predates it).
+  Shipped default: on for dev and stg, off for prod. The token is BOUND to one
+  ingestor, and an ingestor without data-ingestors#931 breaks under it; why each
+  fleet has its answer: see ingestRunTokenByEnv in values.yaml.
 
   NIL-SAFE BOTH WAYS. An edge upgraded with plain `--reuse-values` from a chart
   that predates these keys has NEITHER of them: the override reads as unset and

@@ -2,6 +2,23 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## `ingestRunToken` is on for `stg`
+
+**What changed.** `ingestRunTokenByEnv.stg` is now `true`; `dev` stays `true`
+and `prod` stays `false`. In a **stg** secure environment, each ingestion run
+now gets its own backend token, scoped to ingestion and valid for one run and
+24 hours, instead of the secure environment's shared backend token (see 1.9.198
+below for how).
+
+**What you have to do: nothing,** on any environment. The staging ingestor and
+the staging backend both support the per-run token.
+
+**To keep a stg secure environment as it was**, set `ingestRunToken: false`.
+
+**Upgrading with plain `--reuse-values`** keeps the value the release already
+stored, so the setting stays off there. `--reset-then-reuse-values`, which the
+auto-upgrade runs, picks up the new default.
+
 ## The installer writes the stage as `env.TRACEBLOC_ENV` only
 
 **What changed.** The values file the installer generates used to carry a dev
