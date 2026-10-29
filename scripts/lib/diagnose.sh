@@ -5,12 +5,14 @@
 #  Collects logs + cluster/host status into ONE redacted archive the customer
 #  can send to support, collapsing multi-round triage into a single file.
 #
-#  Two guarantees:
+#  Three guarantees:
 #   • Best-effort — works even when the install is broken (the whole collection
 #     runs under `set +e`; every section is independent).
 #   • Credential-safe — clientPassword, proxy credentials (user:pass@host), and
 #     password=/token/secret values are redacted from EVERY file before it is
 #     archived. clientId is kept (it's the identifier support needs, not a secret).
+#   • No training output — a training's log tail stays on this machine; the
+#     bundle says where to read it (_drop_log_tails, _drop_termination_messages).
 #
 #  Side-effect-safe to source (function definitions only).
 # =============================================================================
@@ -36,6 +38,31 @@ _redact_file() {
 _redact_tree() {
   local f
   while IFS= read -r f; do _redact_file "$f"; done < <(find "$1" -type f 2>/dev/null)
+}
+
+# A training's log tail is training output, which stays on this machine unless
+# its owner sends it. Each filter streams stdin to stdout, so one that fails
+# leaves its file short, never holding a tail; LC_ALL=C reads any byte.
+
+# jobs-manager logs a failed pod's tail as one line, `... log.tail=<JSON-quoted
+# tail>`: the line stays, and the tail gives way to where to read it.
+_drop_log_tails() {   # HOW -- the command that reads this log on this machine
+  _TB_DIAG_HOW="$1" LC_ALL=C awk '
+    { i = index($0, "log.tail=") }
+    i { print substr($0, 1, i - 1) "log.tail=[left out of this bundle: a training log tail. Read it on this machine with: " ENVIRON["_TB_DIAG_HOW"] "]"; next }
+    { print }'
+}
+
+# A terminated container state's `Message:` in `kubectl describe` is the attempt's
+# log tail, later lines unindented up to `Exit Code:`. Only a waiting state's is
+# kept; any other drops to `Exit Code:` or the end. `[ \t]`: not every awk has [[:space:]].
+_drop_termination_messages() {   # NS POD
+  _TB_DIAG_NS="$1" _TB_DIAG_POD="$2" LC_ALL=C awk '
+    drop && /^      Exit Code:[ \t]+-?[0-9]+[ \t]*$/ { drop = 0 }
+    drop { next }
+    /^    [^ ]/ { waiting = ($0 ~ /^    (State|Last State):[ \t]+Waiting[ \t]*$/) }
+    /^      Message:/ && !waiting { print "      Message:      [left out of this bundle: a training log tail. Read it on this machine with: kubectl describe pod -n " ENVIRON["_TB_DIAG_NS"] " " ENVIRON["_TB_DIAG_POD"] "]"; drop = 1; next }
+    { print }'
 }
 
 run_diagnose() {
@@ -123,7 +150,7 @@ run_diagnose() {
     {
       echo "## describe of non-Running pods in namespace '$ns'"
       for p in $(kubectl get pods -n "$ns" --no-headers $kt 2>/dev/null | awk '$3!="Running" && $3!="Completed"{print $1}'); do
-        echo; echo "### $p"; kubectl describe pod -n "$ns" "$p" $kt 2>&1
+        echo; echo "### $p"; kubectl describe pod -n "$ns" "$p" $kt 2>&1 | _drop_termination_messages "$ns" "$p"
       done
     } > "$d/03-describe.txt" 2>&1
     # workload logs (current + previous). The Deployments are READ from the
@@ -134,8 +161,10 @@ run_diagnose() {
     local w _role _wl_rows
     if _wl_rows="$(_client_workloads "$ns" 5s)"; then
       while read -r _role w; do
-        kubectl logs -n "$ns" "deploy/$w" --all-containers --tail=500 $kt           </dev/null > "$d/logs/${w}.log" 2>&1
-        kubectl logs -n "$ns" "deploy/$w" --all-containers --previous --tail=500 $kt </dev/null > "$d/logs/${w}.previous.log" 2>&1
+        kubectl logs -n "$ns" "deploy/$w" --all-containers --tail=500 $kt           </dev/null 2>&1 \
+          | _drop_log_tails "kubectl logs -n $ns deploy/$w --all-containers" > "$d/logs/${w}.log" 2>&1
+        kubectl logs -n "$ns" "deploy/$w" --all-containers --previous --tail=500 $kt </dev/null 2>&1 \
+          | _drop_log_tails "kubectl logs -n $ns deploy/$w --all-containers --previous" > "$d/logs/${w}.previous.log" 2>&1
       done <<<"$_wl_rows"
     else
       {
