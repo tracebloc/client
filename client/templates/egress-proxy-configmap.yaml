@@ -7,7 +7,14 @@
   gateway — and nothing else. Service Bus is NOT here; it stays on the
   requests-proxy:8888 path. The allowlist falls CLOSED: an empty list renders no
   allow rule, so everything is denied.
+
+  The list is the release's own environment's `allowlistByEnv` entry plus the
+  operator's `allowlist` extras, never another environment's hosts. A release
+  whose values predate `allowlistByEnv` (`--reuse-values`) keeps its stored list.
 */ -}}
+{{- $ep := .Values.egressProxy }}
+{{- $envHosts := get (default dict $ep.allowlistByEnv) (include "tracebloc.clientEnv" .) | default (list) }}
+{{- $allowlist := concat $envHosts (default (list) $ep.allowlist) | uniq }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -33,7 +40,7 @@ data:
 
     acl SSL_ports port 443
     acl CONNECT method CONNECT
-    {{- with .Values.egressProxy.allowlist }}
+    {{- with $allowlist }}
     # dstdomain: a leading dot matches subdomains (e.g. .s3.eu-central-1.amazonaws.com),
     # a bare host is an exact match (e.g. api.tracebloc.io).
     acl allowed_fqdns dstdomain {{ join " " . }}

@@ -467,14 +467,15 @@ setup_example_use_case() {
   # installer's INT trap is a no-op meanwhile, since the install is connected and stays
   # done. Unattended, no Ctrl-C can come, so a run that does not end is stopped.
   # Either way its output goes through _example_lines: its results on screen, all of it
-  # in the log. pipefail makes the pipeline's status the CLI's.
+  # in the log. The CLI's status is PIPESTATUS[0]: _example_lines returns 0, so the
+  # pipeline's own status is the CLI's only under pipefail.
   int_trap="$(trap -p INT)"
   trap ':' INT
   if _example_attended; then
-    "$cli" data ingest --example </dev/null 2>&1 | _example_lines || rc=$?
+    "$cli" data ingest --example </dev/null 2>&1 | _example_lines && rc=${PIPESTATUS[0]} || rc=${PIPESTATUS[0]}
   else
     deadline="${TRACEBLOC_EXAMPLE_TIMEOUT:-15m}"
-    _bounded "$deadline" "$cli" data ingest --example </dev/null 2>&1 | _example_lines || rc=$?
+    _bounded "$deadline" "$cli" data ingest --example </dev/null 2>&1 | _example_lines && rc=${PIPESTATUS[0]} || rc=${PIPESTATUS[0]}
   fi
   if [[ -n "$int_trap" ]]; then eval "$int_trap"; else trap - INT; fi
   # A Ctrl-C ends _example_lines before its live line does: clear what it drew.

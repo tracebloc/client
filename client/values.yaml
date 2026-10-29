@@ -828,13 +828,20 @@ egressProxy:
   # squid. Image-specific — verify if you swap image.
   runAsUser: 13
   port: 3128
-  # FQDNs the gateway permits HTTPS CONNECT to. squid dstdomain syntax: a leading
-  # dot matches subdomains; a bare host is exact. Fails CLOSED when empty.
-  allowlist:
-    - dev-api.tracebloc.io
-    - stg-api.tracebloc.io
-    - api.tracebloc.io
-    - xray-backend.azurewebsites.net
+  # FQDNs the gateway permits HTTPS CONNECT to, per environment. A release permits
+  # only its own environment's list (env.TRACEBLOC_ENV; unset is prod), so a prod
+  # client's pods reach the prod API and no other environment's host.
+  # squid dstdomain syntax: a leading dot matches subdomains; a bare host is exact.
+  allowlistByEnv:
+    dev:
+      - dev-api.tracebloc.io
+    stg:
+      - stg-api.tracebloc.io
+    prod:
+      - api.tracebloc.io
+  # Extra FQDNs the gateway permits in every environment, on top of allowlistByEnv.
+  # Fails CLOSED: with both empty for the release's environment, nothing is permitted.
+  allowlist: []
   resources:
     requests:
       cpu: "50m"

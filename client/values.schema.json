@@ -1082,9 +1082,37 @@
             }
           }
         },
+        "allowlistByEnv": {
+          "type": "object",
+          "description": "FQDNs the gateway permits HTTPS CONNECT to, keyed by environment (squid dstdomain syntax: leading dot = subdomain match, bare host = exact). A release permits only the list of its own environment (env.TRACEBLOC_ENV, unset = prod).",
+          "additionalProperties": false,
+          "properties": {
+            "dev": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "stg": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "prod": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
         "allowlist": {
           "type": "array",
-          "description": "FQDNs the gateway permits HTTPS CONNECT to (squid dstdomain syntax: leading dot = subdomain match, bare host = exact).",
+          "description": "Extra FQDNs the gateway permits in every environment, on top of allowlistByEnv (squid dstdomain syntax: leading dot = subdomain match, bare host = exact).",
           "items": {
             "type": "string",
             "minLength": 1
