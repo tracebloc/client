@@ -35,6 +35,9 @@ setup_pm() {
   # (client-dev#2048): a held lock then ends as apt's own lock error, handled as
   # a failed install, and never as the deadline's "mirror stalled".
   if   has apt-get; then PM_UPDATE="tb_root apt-get update -qq -o DPkg::Lock::Timeout=240"; PM_INSTALL="tb_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -q -o DPkg::Lock::Timeout=540 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+    # A 0600 NVIDIA toolkit source list or keyring an older installer wrote fails every
+    # apt-get update: repaired before this run's first one (client-dev#2879).
+    if declare -F _nvidia_toolkit_repo_files_readable >/dev/null; then _nvidia_toolkit_repo_files_readable; fi
   elif has dnf;     then PM_UPDATE="tb_root dnf makecache -q";             PM_INSTALL="tb_root dnf install -y -q"
   elif has yum;     then PM_UPDATE="tb_root yum makecache -q";             PM_INSTALL="tb_root yum install -y -q"
   elif has zypper;  then PM_UPDATE="tb_root zypper refresh";               PM_INSTALL="tb_root zypper install -y"
@@ -251,7 +254,7 @@ _ensure_unpack_tools() {
   has tar  || missing+=(tar)
   has gzip || missing+=(gzip)
   [ ${#missing[@]} -eq 0 ] && return 0
-  setup_pm    # variable setup only (PM_UPDATE/PM_INSTALL); errors on unknown PM
+  setup_pm    # PM_UPDATE/PM_INSTALL (and, on apt, the toolkit-file repair); errors on unknown PM
   # PM_INSTALL leads with `tb_root` — the common.sh executor (A2): as root it
   # runs the command directly (fine with no sudo binary at all), so nothing to
   # strip here. The OPTION-led probes below must BYPASS the shadow via

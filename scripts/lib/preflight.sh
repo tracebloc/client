@@ -213,6 +213,23 @@ _pf_probe_url() {
   return 0
 }
 
+# The pause between connectivity attempts: its own seam, so a test stubs it
+# without a file-wide no-op `sleep`.
+_pf_retry_pause() { sleep "$1"; }
+
+# _pf_probe_url, retried after a pause: a network blip lasts seconds, so attempts
+# made back to back all land inside it. Waits 1s, then 3s, before giving up.
+_pf_probe_with_retry() {
+  local url="$1" mode="${2:-}" status pause
+  status="$(_pf_probe_url "$url" "$mode")"
+  for pause in 1 3; do
+    [[ "$status" == "ok" ]] && break
+    _pf_retry_pause "$pause"
+    status="$(_pf_probe_url "$url" "$mode")"
+  done
+  printf '%s' "$status"
+}
+
 # Free space in KB on the filesystem holding $1.
 _pf_free_kb() { df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $4}'; }
 
@@ -1534,8 +1551,7 @@ _pf_connectivity() {
   for c in "${criticals[@]}"; do  # set-u-safe: criticals is a literal list
     label="${c%%|*}"; rest="${c#*|}"; url="${rest%%|*}"
     mode=""; [[ "$rest" == *"|"* ]] && mode="${rest##*|}"
-    status="$(_pf_probe_url "$url" "$mode")"
-    if [[ "$status" != "ok" ]]; then status="$(_pf_probe_url "$url" "$mode")"; fi   # one retry (transient blips)
+    status="$(_pf_probe_with_retry "$url" "$mode")"
     if [[ "$status" != "ok" ]]; then
       fails+=("${label}|${status}")
       if [[ "$status" == "tls" ]]; then tls_seen=1; fi

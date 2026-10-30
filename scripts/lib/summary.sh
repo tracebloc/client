@@ -541,7 +541,7 @@ print_summary() {
         echo -e "     ${TB_CMD}tracebloc data ingest${RESET}"
         echo ""
         echo -e "  3. Create a use case"
-        echo -e "     ${TB_LINK}$(_dashboard_url 'my-use-cases-v2?create=1')${RESET}"
+        echo -e "     ${TB_LINK}$(_dashboard_url 'use-cases?create=1')${RESET}"
         echo ""
         echo -e "  4. Invite peers"
         echo -e "     ${TB_DESC}Let others train models on your data${RESET}"

@@ -313,7 +313,9 @@ install_tracebloc_cli() {
   local _cli_out _cli_rc=0
   _cli_out="$(mktemp)" || _cli_out=""
   # Appended, never truncated: without a temp file the fallback is the install log.
-  sh "$installer" >> "${_cli_out:-${LOG_FILE:-/dev/null}}" 2>&1 &
+  # Under umask 022, not the core's 077 (common.sh): the CLI it installs is for this
+  # user's every shell, and under 077 it landed 0700 (client-dev#2880).
+  ( umask 022; sh "$installer" ) >> "${_cli_out:-${LOG_FILE:-/dev/null}}" 2>&1 &
   # Set and unset, not a prefix assignment: a prefix on a function can outlive the call.
   _TB_SPIN_QUIET=1
   spin "$!" "Installing the tracebloc CLI..." || _cli_rc=$?
@@ -420,6 +422,24 @@ _example_lines() {
   return 0
 }
 
+# _example_wait_api -- the cluster API answers again before the ingest reads the PVC:
+# a node restart right after readiness refuses connections for a few seconds. Bounded
+# by the TB_API_WAIT_S budget; a budget spent still runs the ingest, which reports its own failure.
+# One on-screen line on the first refusal, so a wait of up to the budget never looks like a hang.
+_example_wait_api() {
+  local budget t0 told=0
+  declare -F _api_answers >/dev/null 2>&1 || return 0
+  budget="$(_api_wait_budget_s)"; t0="$(date +%s)"
+  until _api_answers; do
+    if (( $(date +%s) - t0 >= budget )); then
+      log "Example use case: the cluster API did not answer within ${budget}s; running it anyway."
+      return 0
+    fi
+    (( told )) || { info "Waiting for the cluster API to answer…"; told=1; }
+    sleep 2
+  done
+}
+
 # setup_example_use_case -- after a connected install, `tracebloc data ingest --example`
 # sets up the account's example use case. The CLI asks tracebloc first, so a re-run
 # sets nothing up twice. It never fails the install: every path returns 0.
@@ -455,6 +475,7 @@ setup_example_use_case() {
     log "Example use case: not set up, as '${cli} data ingest --example --help' exited ${probe} (124: no answer within ${TB_CLI_PROBE_TIMEOUT:-30s})."
     return 0
   fi
+  _example_wait_api
   echo ""
   echo ""
   echo -e "  ${BOLD}Setting up your example use case${RESET}"
