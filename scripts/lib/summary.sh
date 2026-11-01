@@ -148,6 +148,123 @@ _diagnose_not_ready() {
   printf 'starting'
 }
 
+# _mysql_first_boot_verdict NS -- "<verdict> <user_data>" from the last
+# TRACEBLOC_MYSQL_FIRST_BOOT line the chart's mysql-first-boot init container
+# printed (client/files/mysql-first-boot.sh): "never-served none", "incomplete
+# present", ...; nothing when it printed none or cannot be read. Read through a
+# here-string (backend#1778).
+_mysql_first_boot_verdict() {
+  local logs line v u
+  logs="$(kubectl logs -n "$1" deployment/mysql-client -c mysql-first-boot --tail=50 --request-timeout=5s 2>/dev/null || true)"
+  line="$(grep -E '^TRACEBLOC_MYSQL_FIRST_BOOT=[a-z-]+ user_data=[a-z]+$' <<<"$logs" | tail -n 1 || true)"
+  [[ -n "$line" ]] || return 0
+  v="${line#TRACEBLOC_MYSQL_FIRST_BOOT=}"; u="${v#* user_data=}"; v="${v%% *}"
+  printf '%s %s' "$v" "$u"
+}
+
+# _mysql_client_crashlooping NS -- mysql-client's own container is crash-looping
+# (waiting in CrashLoopBackOff, or restarted twice or more), so a crash outcome can
+# be MySQL's and not another pod's.
+_mysql_client_crashlooping() {
+  local rows n reason
+  rows="$(kubectl get pods -n "$1" -l app=mysql-client --request-timeout=5s \
+    -o 'jsonpath={range .items[*]}{range .status.containerStatuses[?(@.name=="mysql-client")]}{.restartCount} {.state.waiting.reason}{"\n"}{end}{end}' 2>/dev/null || true)"
+  while read -r n reason; do
+    [[ "$n" =~ ^[0-9]+$ ]] || continue
+    if [[ "$reason" == CrashLoopBackOff ]] || (( n >= 2 )); then return 0; fi
+  done <<<"$rows"
+  return 1
+}
+
+# _mysql_first_boot_running_s NS -- how long mysql-first-boot has been initialising,
+# from its own "still initialising after Ns" lines, while it is still running; nothing
+# otherwise. A first boot takes seconds (a whole first boot measured 6 s).
+_mysql_first_boot_running_s() {
+  local st logs line
+  st="$(kubectl get pods -n "$1" -l app=mysql-client --request-timeout=5s \
+    -o 'jsonpath={range .items[*]}{range .status.initContainerStatuses[?(@.name=="mysql-first-boot")]}{.state.running.startedAt}{end}{end}' 2>/dev/null || true)"
+  [[ -n "$st" ]] || return 0
+  logs="$(kubectl logs -n "$1" deployment/mysql-client -c mysql-first-boot --tail=5 --request-timeout=5s 2>/dev/null || true)"
+  line="$(grep -E '^mysql-first-boot: still initialising after [0-9]+s$' <<<"$logs" | tail -n 1 || true)"
+  [[ "$line" =~ after\ ([0-9]+)s$ ]] && printf '%s' "${BASH_REMATCH[1]}"
+  return 0
+}
+
+# _helm_release_revision NS -- the release's newest revision (the release is
+# named after its namespace), or nothing when helm cannot say. Bounded: helm has
+# no request timeout, and a wedged API must not hang the summary.
+_helm_release_revision() {
+  local h
+  h="$(_bounded 20 helm history "$1" -n "$1" --max 1 -o json 2>/dev/null || true)"
+  [[ "$h" =~ \"revision\":([0-9]+) ]] && printf '%s' "${BASH_REMATCH[1]}"
+  return 0
+}
+
+# _mysql_volume_kind NS -- how mysql-client's datadir is emptied, only when it is
+# the chart's own mysql-pvc (never a mysqlClaimName claim made outside the chart):
+# "claim mysql-pvc" when deleting the claim deletes its data (reclaim Delete),
+# "hostpath <dir>" for the chart's Retain <release>-mysql-pv at a .../mysql path,
+# nothing otherwise.
+_mysql_volume_kind() {
+  local claim pv row path
+  claim="$(kubectl get deployment mysql-client -n "$1" --request-timeout=5s \
+    -o 'jsonpath={.spec.template.spec.volumes[?(@.name=="mysql-persistent-storage")].persistentVolumeClaim.claimName}' 2>/dev/null || true)"
+  [[ "$claim" == mysql-pvc ]] || return 0
+  pv="$(kubectl get pvc mysql-pvc -n "$1" -o 'jsonpath={.spec.volumeName}' --request-timeout=5s 2>/dev/null || true)"
+  [[ -n "$pv" ]] || return 0
+  row="$(kubectl get pv "$pv" -o 'jsonpath={.spec.persistentVolumeReclaimPolicy} {.spec.hostPath.path}' --request-timeout=5s 2>/dev/null || true)"
+  path="${row#* }"
+  case "$row" in
+    "Delete "*) printf 'claim mysql-pvc' ;;
+    "Retain /"*)
+      if [[ "$pv" == *-mysql-pv && "$path" == /*/mysql && "$path" != *[[:space:]\'\"\\]* ]]; then
+        printf 'hostpath %s' "$path"
+      fi ;;
+  esac
+  return 0
+}
+
+# _mysql_incomplete_summary NS VERDICT USER_DATA -- the crash outcome when MySQL's
+# first start was stopped part-way and its datadir cannot start (MY-012960), which a
+# re-run does not repair: mysql-pvc is kept. Reset steps only when the datadir holds
+# no user data AND either its redo log says MySQL never finished creating it
+# (never-served: no server ever ran on it, at any revision) or the release is at
+# revision 1. Nothing is run here.
+_mysql_incomplete_summary() {
+  local ns="$1" verdict="$2" user_data="$3" rev kind steps=""
+  echo -e "  ${TB_ERR}✖ Setup didn't finish — MySQL's first start was stopped before it finished, and its files are incomplete.${RESET}" >&2
+  echo ""
+  echo -e "  MySQL can't start on those files, and re-running the installer doesn't repair them."
+  rev="$(_helm_release_revision "$ns")"
+  kind="$(_mysql_volume_kind "$ns")"
+  if [[ "$user_data" == none && -n "$kind" ]] && [[ "$verdict" == never-served || "$rev" == 1 ]]; then steps=1; fi
+  if [[ -n "$steps" ]]; then
+    echo -e "  MySQL never finished setting up this database, so it holds no data yet. Reset it, then re-run the installer:"
+    echo -e "    ${TB_CMD}kubectl -n ${ns} scale deploy/mysql-client --replicas=0${RESET}"
+    if [[ "$kind" == claim* ]]; then
+      echo -e "    ${TB_CMD}kubectl -n ${ns} delete pvc mysql-pvc${RESET}"
+    else
+      echo -e "    ${TB_CMD}sudo find '${kind#hostpath }' -mindepth 1 -delete${RESET}"
+    fi
+  else
+    echo -e "  The installer doesn't reset it, because it may hold your data. Contact tracebloc support."
+  fi
+  echo -e "  Logs:     ${TB_CMD}kubectl logs -n ${ns} deploy/mysql-client -c mysql-first-boot${RESET}"
+}
+
+# _crash_or_pull_summary NS -- the image_pull and crash outcomes, but for the one
+# _mysql_incomplete_summary names.
+_crash_or_pull_summary() {
+  local reason="a component didn't start"
+  [[ "$TRACEBLOC_CLIENT_STATE" == "image_pull" ]] && reason="an image couldn't be pulled"
+  [[ "$TRACEBLOC_CLIENT_STATE" == "crash" ]] && reason="a container is restarting (crash loop)"
+  echo -e "  ${TB_ERR}✖ Setup didn't finish — ${reason}.${RESET}" >&2
+  echo ""
+  echo -e "  Inspect:  ${TB_CMD}kubectl get pods -n ${1}${RESET}"
+  echo -e "  Logs:     ${DIM}~/.tracebloc/install-*.log${RESET}"
+  echo -e "  ${DIM}Re-running this installer is safe.${RESET}"
+}
+
 # Reports the outcome based on TRACEBLOC_CLIENT_STATE (set by wait_for_client_ready).
 # The "secure compute environment / your data never leaves" claim is printed
 # ONLY when the client is verifiably connected — never on a partial/failed run.
@@ -572,13 +689,25 @@ print_summary() {
       _summary_footer "$logdisp" "$ns" >>"${LOG_FILE:-/dev/null}" 2>&1
       ;;
     starting)
-      echo -e "  ${TB_WARN}⚠${RESET}  Almost there — tracebloc is installed but still starting."
-      echo ""
-      echo -e "  Components are still downloading/starting (first run can take a few minutes)."
-      echo -e "  Check progress:   ${TB_CMD}kubectl get pods -n ${ns}${RESET}"
-      echo ""
-      echo -e "  Your client will show as ${BOLD}🟢 Online${RESET} at ${TB_LINK}$(_dashboard_url)${RESET}"
-      echo -e "  once it finishes. ${DIM}Re-running this installer is safe.${RESET}"
+      # A first boot past five minutes is a stall, not a start: it measured 6 s, and the
+      # one that stalled ran 128 s before it was killed.
+      local fbs
+      fbs="$(_mysql_first_boot_running_s "$ns")"
+      if [[ -n "$fbs" ]] && (( fbs >= 300 )); then
+        echo -e "  ${TB_WARN}⚠${RESET}  Almost there — but MySQL's first start has been running for $(( fbs / 60 )) minutes, and it normally takes seconds."
+        echo ""
+        echo -e "  It is still running, and nothing is lost if it finishes later. To see where it is:"
+        echo -e "    ${TB_CMD}kubectl logs -n ${ns} deploy/mysql-client -c mysql-first-boot${RESET}"
+        echo -e "  If it is still running in ten minutes, contact tracebloc support with that output."
+      else
+        echo -e "  ${TB_WARN}⚠${RESET}  Almost there — tracebloc is installed but still starting."
+        echo ""
+        echo -e "  Components are still downloading/starting (first run can take a few minutes)."
+        echo -e "  Check progress:   ${TB_CMD}kubectl get pods -n ${ns}${RESET}"
+        echo ""
+        echo -e "  Your client will show as ${BOLD}🟢 Online${RESET} at ${TB_LINK}$(_dashboard_url)${RESET}"
+        echo -e "  once it finishes. ${DIM}Re-running this installer is safe.${RESET}"
+      fi
       ;;
     bad_creds)
       echo -e "  ${TB_ERR}✖ Couldn't connect — your Client ID or password was rejected.${RESET}" >&2
@@ -611,15 +740,17 @@ print_summary() {
       echo -e "  Inspect:  ${TB_CMD}kubectl get events -n ${ns} | grep -i x509${RESET}"
       echo -e "  ${DIM}Re-running this installer is safe.${RESET}"
       ;;
-    image_pull|crash)
-      local reason="a component didn't start"
-      [[ "$TRACEBLOC_CLIENT_STATE" == "image_pull" ]] && reason="an image couldn't be pulled"
-      [[ "$TRACEBLOC_CLIENT_STATE" == "crash" ]] && reason="a container is restarting (crash loop)"
-      echo -e "  ${TB_ERR}✖ Setup didn't finish — ${reason}.${RESET}" >&2
-      echo ""
-      echo -e "  Inspect:  ${TB_CMD}kubectl get pods -n ${ns}${RESET}"
-      echo -e "  Logs:     ${DIM}~/.tracebloc/install-*.log${RESET}"
-      echo -e "  ${DIM}Re-running this installer is safe.${RESET}"
+    crash)
+      local fb=""
+      if _mysql_client_crashlooping "$ns"; then fb="$(_mysql_first_boot_verdict "$ns")"; fi
+      if [[ "$fb" == "incomplete "* || "$fb" == "never-served "* ]]; then
+        _mysql_incomplete_summary "$ns" "${fb%% *}" "${fb#* }"
+      else
+        _crash_or_pull_summary "$ns"
+      fi
+      ;;
+    image_pull)
+      _crash_or_pull_summary "$ns"
       ;;
   esac
   # A native k3s user with no KUBECONFIG reads the release only through the merged

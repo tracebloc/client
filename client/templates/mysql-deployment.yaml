@@ -107,6 +107,9 @@ spec:
             fi
             case "${TRACEBLOC_EXPECTED_ENGINE:-${TB_EXPECTED_ENGINE:-}}" in
               8.4)
+                if [ ! -e "$d/mysql.ibd" ] && [ -e "$d/.tracebloc-init-started" ] && [ ! -e "$d/.tracebloc-init-complete" ]; then
+                  exit 0  # a first boot killed before mysql.ibd existed, not 5.7 data: mysql-first-boot decides
+                fi
                 if [ ! -e "$d/mysql.ibd" ]; then
                   echo "REFUSING TO START: MySQL 8.4 image over a 5.7-format datadir (no mysql.ibd)."
                   echo "8.4 cannot open 5.7 data — MySQL supports staged upgrades only (5.7 -> 8.0 -> 8.4)."
@@ -128,6 +131,71 @@ spec:
         - name: mysql-persistent-storage
           mountPath: /var/lib/mysql/
           readOnly: true
+      {{- $mysqlImg := default dict (index (default dict .Values.images) "mysqlClient") }}
+      # First boot of the datadir, out of reach of mysql-client's probes. Nothing
+      # listens on 3306 while the entrypoint initialises, so a first boot slower
+      # than the startup probe's budget was killed part-way and left a datadir
+      # MySQL cannot open (MY-012960). Here the image's own entrypoint and CMD run
+      # unchanged; BASH_ENV sources files/mysql-first-boot.sh first, which marks,
+      # resets an unfinished first boot that holds no data, and exits once the
+      # datadir is initialised. On an initialised datadir it exits at once, so
+      # mysql-client and its probes are exactly as before.
+      # No MYSQL_HOME: an init_file must never reach initialisation (mysql-root-init).
+      # 8.x engines only (tracebloc.mysqlFirstBoot): 5.7 and custom images initialise in
+      # mysql-client as before.
+      {{- if (include "tracebloc.mysqlFirstBoot" .) }}
+      - name: mysql-first-boot
+        # mysql-client's image, rendered the same way as on mysql-client below.
+        image: {{ include "tracebloc.image" (dict "repository" ($mysqlImg.repository | default "tracebloc/mysql-client") "tag" ($mysqlImg.tag | default "prod") "digest" (include "tracebloc.honouredPin" (dict "image" "mysqlClient" "root" $)) "registry" (include "tracebloc.tbRegistry" .)) | quote }}
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: BASH_ENV
+          value: /etc/mysql/tracebloc-first-boot/mysql-first-boot.sh
+        {{- if (include "tracebloc.rotateMysqlRoot" .) }}
+        # The same Secret and key as mysql-client's: the entrypoint sets root from it.
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
+              key: MYSQL_ROOT_PASSWORD
+        {{- end }}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 999
+          runAsGroup: 999
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          {{- include "tracebloc.mysqlResources" . | nindent 10 }}
+        volumeMounts:
+        - name: mysql-persistent-storage
+          mountPath: /var/lib/mysql/
+        - name: mysql-config
+          mountPath: /etc/mysql/conf.d/
+        {{- if eq (include "tracebloc.mysqlEngineMajor" .) "8.4" }}
+        # The same option files as mysql-client's (see its my.cnf mount).
+        - name: mysql-config
+          mountPath: /etc/mysql/my.cnf
+          subPath: mysql.cnf
+          readOnly: true
+        {{- end }}
+        - name: mysql-logs
+          mountPath: /var/log/mysql/
+        - name: mysql-run
+          mountPath: /var/run/mysqld
+        - name: mysql-tmp
+          mountPath: /tmp
+        - name: mysql-files
+          mountPath: /var/lib/mysql-files
+        - name: mysql-first-boot
+          mountPath: /etc/mysql/tracebloc-first-boot
+          readOnly: true
+      {{- end }}
       {{- if (include "tracebloc.selfRotateMysqlRoot" .) }}
       # Root init file (backend#5427; tracebloc.selfRotateMysqlRoot). On an EXISTING
       # datadir, write root's ALTER USER statements and an option file naming them
@@ -205,7 +273,6 @@ spec:
       # which the frozen Hub namespace and ghcr.io both serve.
       # NIL-GUARDED (backend#4372): `images.mysqlClient: null` or `images: null`
       # renders the defaults below rather than a nil-pointer failure.
-      {{- $mysqlImg := default dict (index (default dict .Values.images) "mysqlClient") }}
       - image: {{ include "tracebloc.image" (dict "repository" ($mysqlImg.repository | default "tracebloc/mysql-client") "tag" ($mysqlImg.tag | default "prod") "digest" (include "tracebloc.honouredPin" (dict "image" "mysqlClient" "root" $)) "registry" (include "tracebloc.tbRegistry" .)) | quote }}
         imagePullPolicy: IfNotPresent
         name: mysql-client
@@ -252,28 +319,7 @@ spec:
         # cause of mysql crashes than a noisy neighbour. PriorityClass +
         # PodDisruptionBudget cover the eviction angle instead.
         resources:
-          requests:
-            memory: {{ .Values.resources.mysql.requests.memory | default "1Gi" | quote }}
-            cpu: {{ .Values.resources.mysql.requests.cpu | default "150m" | quote }}
-          limits:
-            memory: {{ .Values.resources.mysql.limits.memory | default "1Gi" | quote }}
-            {{- /*
-              CPU limit is intentionally unset by default (see comment block
-              above). Schema permits it, so honour an explicit override here
-              instead of silently dropping it.
-
-              An operator flipping this on to buy Guaranteed QoS gets NEITHER
-              half of that trade (backend#2872). They get the CPU throttling the
-              block above warns about — the cause of InnoDB lock-wait timeouts —
-              and no QoS change at all, because ComputePodQOS requires
-              requests == limits in EVERY container including init containers,
-              and `mysql-format-guard` above carries no resources
-              UNCONDITIONALLY. mysql therefore cannot be Guaranteed on any
-              cluster, whatever is set here. Measured, not inferred.
-            */}}
-            {{- with .Values.resources.mysql.limits.cpu }}
-            cpu: {{ . | quote }}
-            {{- end }}
+          {{- include "tracebloc.mysqlResources" . | nindent 10 }}
         ports:
         - containerPort: 3306
           name: mysql-client
@@ -412,6 +458,12 @@ spec:
         emptyDir: {}
       - name: mysql-files
         emptyDir: {}
+      {{- if (include "tracebloc.mysqlFirstBoot" .) }}
+      - name: mysql-first-boot
+        configMap:
+          name: mysql-first-boot
+          defaultMode: 0444
+      {{- end }}
       {{- if (include "tracebloc.selfRotateMysqlRoot" .) }}
       # backend#5427. In memory, because it holds root's password. Written once per pod start
       # by the init container; mysqld mounts it read-only.

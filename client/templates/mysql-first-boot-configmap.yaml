@@ -1,0 +1,22 @@
+{{- /*
+  The script the mysql-first-boot init container sources through BASH_ENV
+  (mysql-deployment.yaml). It lives in files/ so it is linted and tested as a
+  shell file. An empty read fails the render rather than shipping an init
+  container that sources nothing.
+*/}}
+{{- if (include "tracebloc.mysqlFirstBoot" .) }}
+{{- $script := .Files.Get "files/mysql-first-boot.sh" -}}
+{{- if not $script -}}
+{{- fail "files/mysql-first-boot.sh is missing from the chart: the mysql-first-boot init container cannot run without it" -}}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-first-boot
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+data:
+  mysql-first-boot.sh: |
+    {{- $script | nindent 4 }}
+{{- end }}

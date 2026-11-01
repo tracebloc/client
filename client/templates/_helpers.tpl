@@ -3484,3 +3484,32 @@ seLinuxOptions:
   type: spc_t
 {{- end -}}
 {{- end -}}
+
+{{/*
+tracebloc.mysqlResources — the resources of mysql-client and of its
+mysql-first-boot init container, which runs the same mysqld for initialisation.
+requests.memory == limits.memory and no default CPU limit: the reasons are on
+mysql-client in mysql-deployment.yaml. An explicit limits.cpu is honoured, but
+buys no Guaranteed QoS: ComputePodQOS needs requests == limits in EVERY
+container, and `mysql-format-guard` carries no resources.
+*/}}
+{{- define "tracebloc.mysqlResources" -}}
+requests:
+  memory: {{ .Values.resources.mysql.requests.memory | default "1Gi" | quote }}
+  cpu: {{ .Values.resources.mysql.requests.cpu | default "150m" | quote }}
+limits:
+  memory: {{ .Values.resources.mysql.limits.memory | default "1Gi" | quote }}
+  {{- with .Values.resources.mysql.limits.cpu }}
+  cpu: {{ . | quote }}
+  {{- end }}
+{{- end }}
+
+{{/*
+tracebloc.mysqlFirstBoot — "true" when the mysql-first-boot init container renders:
+an 8.x engine, whose official entrypoint runs as bash PID 1 (the hook arrives
+through BASH_ENV) and which initialises a datadir holding dot-files. 5.7 and
+custom (unknown) images initialise in mysql-client, as before.
+*/}}
+{{- define "tracebloc.mysqlFirstBoot" -}}
+{{- if has (include "tracebloc.mysqlEngineMajor" .) (list "8.4" "8.0") }}true{{ end -}}
+{{- end }}
