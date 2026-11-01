@@ -1,0 +1,40 @@
+{{- $name := include "tracebloc.egressRecordPvc" . -}}
+{{- $hostPath := include "tracebloc.claimHostPath" (dict "root" . "claim" "egress-record") }}
+{{- if $hostPath }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ include "tracebloc.egressRecordPvName" . }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  storageClassName: {{ include "tracebloc.claimStorageClass" (dict "root" . "claim" "egress-record") }}
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadWriteOnce
+  claimRef:
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+  hostPath:
+    path: {{ $hostPath }}
+    type: DirectoryOrCreate
+---
+{{- end }}
+{{- /* No "helm.sh/resource-policy: keep": the record holds the bodies of what
+     left, and whether it may outlive the release is a retention decision. */}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  storageClassName: {{ include "tracebloc.claimStorageClass" (dict "root" . "claim" "egress-record") }}
+  accessModes:
+    - {{ include "tracebloc.claimAccessMode" (dict "root" . "claim" "egress-record") }}
+  resources:
+    requests:
+      {{- /* Size: see tracebloc.egressRecordPvc. */}}
+      storage: 2Gi

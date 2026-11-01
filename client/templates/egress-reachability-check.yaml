@@ -11,12 +11,12 @@
 
   Service Bus itself is intentionally NOT probed here: its host is fetched
   post-auth from the backend (static nowhere in the chart) and its egress is
-  brokered by the requests-proxy, whose readiness `tracebloc cluster doctor`
-  already checks. Reaching the backend is the prerequisite for both.
+  brokered by the egress gate, whose readiness is its own /healthz.
+  Reaching the backend is the prerequisite for both.
 
   The probe pod is deliberately NOT labelled `tracebloc.io/workload: training`, so
   the training-egress lockdown never selects it — it shares the egress class of
-  the jobs-manager / requests-proxy (the pods that actually reach the backend),
+  the jobs-manager / egress gate (the pods that actually reach the backend),
   and honours the corporate proxy via tracebloc.proxyEnv, so it tests the real
   path. As a test hook it never runs during install/upgrade, so it can never
   block them or the hourly auto-upgrade. Set egressReachabilityCheck.enabled=false

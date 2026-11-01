@@ -124,6 +124,17 @@ _pf_budget_floor_gb() {
   if [[ "$(_pf_run_floor_family 2>/dev/null)" == linux ]]; then printf '%s' "$PF_MIN_MEM_GB"
   else _pf_vm_floor_gb; fi
 }
+# The memory a machine needs, as _pf_memory names it to a person: on native Linux the
+# host's own floor (the run floor in tenths, or the typed one under the escape hatch),
+# which carries no OS reserve; on a Mac or under WSL2 the VM's floor and the reserve.
+_pf_machine_need_gb() {
+  local m
+  if [[ "$(_pf_run_floor_family 2>/dev/null)" == linux ]]; then
+    if m="$(_pf_run_floor_mib linux)"; then _pf_tenths_gb "$m" up; else printf '%s' "$PF_MIN_MEM_GB"; fi
+  else
+    printf '%s' "$(( $(_pf_vm_floor_gb) + PF_OS_RESERVE_GB ))"
+  fi
+}
 # What a budget below that floor costs, worded once for every gate: the derived
 # floor is about one training run, the typed one about the client itself.
 _pf_vm_floor_words() {
@@ -185,6 +196,48 @@ _pf_fail_line() { echo -e "  ${RED}✖${RESET} $*"; }
 # own always-on summary line and so do NOT route through these.
 _pf_ok()   { [[ -n "${PF_QUIET_SUCCESS:-}" ]] || success "$*"; }
 _pf_note() { [[ -n "${PF_QUIET_SUCCESS:-}" ]] || info "$*"; }
+
+# A person's lines in the collapsed run-through. A check's whole line and its remedy
+# are machine lines there (_pf_detail CMD...: tb_machine_lines), and the check says
+# what a person reads with _pf_person FIELD GLYPH TEXT [NEXT [CMD]]: one short line per
+# field (arch, cpu, mem, disk), printed by run_preflight under the hardware line,
+# which leaves out a field that failed. NEXT is what to do about a ✖, for the end
+# block (tb_fail_next), and CMD the command under it (_pf_next). Called directly, a
+# check prints its whole lines as before.
+PF_PERSON=(); PF_FAILED_FIELDS=""; PF_PERSON_HARD=0; PF_NEXTS=""; PF_NEXT_COVERS=0; PF_NEXT_CMD=""
+_pf_detail() { if [[ -n "${PF_QUIET_SUCCESS:-}" ]]; then tb_machine_lines "$@"; return; fi; "$@"; }
+_pf_say()    { [[ -z "${PF_QUIET_SUCCESS:-}" ]] || "$@"; }
+_pf_person() {
+  [[ -n "${PF_QUIET_SUCCESS:-}" ]] || return 0
+  local p i=0
+  if [[ "$2" == "✖" ]]; then
+    PF_PERSON_HARD=$(( PF_PERSON_HARD + 1 ))   # every ✖ the field's line covers
+    PF_FAILED_FIELDS="${PF_FAILED_FIELDS} $1"
+    [[ -z "${4:-}" ]] || PF_NEXT_COVERS=$(( PF_NEXT_COVERS + 1 ))   # and the field's remedy
+  fi
+  # One line per field, and a ✖ outranks a ⚠: a later ✖ takes the field's ⚠ line and
+  # adds its remedy, so a stop never shows only a warning (a field graded twice: a
+  # Mac's node volume then its job-data folder, k3s's data then its training data).
+  for p in ${PF_PERSON[@]+"${PF_PERSON[@]}"}; do
+    if [[ "${p%%|*}" == "$1" ]]; then
+      if [[ "$2" == "✖" && "${p#*|}" == "⚠ "* ]]; then PF_PERSON[i]="$1|$2 $3"; _pf_next "${4:-}" 0 "${5:-}"; fi
+      return 0
+    fi
+    i=$(( i + 1 ))
+  done
+  PF_PERSON+=("$1|$2 $3")
+  [[ "$2" != "✖" ]] || _pf_next "${4:-}" 0 "${5:-}"
+}
+# _pf_next TEXT [N] [CMD] -- what to do about the ✖ lines it answers: N hard fails (1
+# by default; _pf_person counts its own), and the command under it when TEXT ends in
+# ":" (the install command when none). run_preflight passes it on only when it is the
+# one remedy and it answers every hard fail (PF_NEXT_COVERS == PF_HARD_FAIL).
+_pf_next() {
+  [[ -n "$1" ]] || return 0
+  PF_NEXTS="${PF_NEXTS}${1}"$'\n'
+  PF_NEXT_COVERS=$(( PF_NEXT_COVERS + ${2:-1} ))
+  [[ -z "${3:-}" ]] || PF_NEXT_CMD="$3"
+}
 
 # ── Injectable readers (overridden in bats so checks run without net/df) ─────
 
@@ -569,9 +622,11 @@ _pf_runtime_mem_status() {
   rt_fam="$(_pf_runtime_floor_family)"
   run_floor_mib="$(_pf_runtime_run_floor_mib)" || run_floor_mib=""
   if [[ -n "$run_floor_mib" ]] && (( rt_mib < run_floor_mib )); then
-    warn "${what}: $(_pf_tenths_gb "$rt_mib" down) GB — below the $(_pf_tenths_gb "$run_floor_mib" up) GB one training run needs beside the tracebloc platform; no run can schedule."
+    _pf_detail warn "${what}: $(_pf_tenths_gb "$rt_mib" down) GB — below the $(_pf_tenths_gb "$run_floor_mib" up) GB one training run needs beside the tracebloc platform; no run can schedule."
+    _pf_person mem ⚠ "Low memory · a training needs about ${PF_WARN_MEM_GB} GB"
   elif (( rt_mib < $(_pf_vm_floor_mib "$rt_fam") )); then
-    warn "${what}: ${rt_gb} GB — $(_pf_vm_floor_words "$rt_fam")."
+    _pf_detail warn "${what}: ${rt_gb} GB — $(_pf_vm_floor_words "$rt_fam")."
+    _pf_person mem ⚠ "Low memory · a training needs about ${PF_WARN_MEM_GB} GB"
   # The WARN threshold carries the grace too, not just the floor one. The shown
   # figure is now (mib + grace)/1024, so grading this branch on the raw threshold
   # reopened the same self-contradiction one boundary up: every budget in
@@ -595,9 +650,11 @@ _pf_runtime_mem_status() {
       local spare_gb host_gb
       host_gb="$(_pf_host_mem_gb)"
       spare_gb="$(_pf_spare_gb "$warn_eff" "$host_gb")"
-      warn "${what}: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${spare_gb} GB, so $(_pf_spare_rung_words)."
+      _pf_detail warn "${what}: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${spare_gb} GB, so $(_pf_spare_rung_words)."
+      _pf_person mem ⚠ "Low memory · a training needs about ${PF_WARN_MEM_GB} GB"
     else
-      warn "${what}: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted (${rec_eff} GB to train comfortably); $(_pf_below_rung_words)."
+      _pf_detail warn "${what}: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted (${rec_eff} GB to train comfortably); $(_pf_below_rung_words)."
+      _pf_person mem ⚠ "Low memory · a training needs about ${PF_WARN_MEM_GB} GB"
     fi
   else
     _pf_ok "${what}: ${rt_gb} GB"
@@ -835,19 +892,22 @@ _pf_memory() {
 
   if [[ "$mib" -lt "$floor_mib" ]]; then
     if [[ -n "$run_floor_mib" ]]; then
-      _pf_fail_line "Memory: only $(_pf_tenths_gb "$mib" down) GB (${label}) — this machine cannot fit one training run beside the tracebloc platform; need ≥ $(_pf_tenths_gb "$run_floor_mib" up) GB."
+      _pf_detail _pf_fail_line "Memory: only $(_pf_tenths_gb "$mib" down) GB (${label}) — this machine cannot fit one training run beside the tracebloc platform; need ≥ $(_pf_tenths_gb "$run_floor_mib" up) GB."
       PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
       # Unclamped on purpose: the remedy is a LARGER machine, so the clamp to this
       # one's RAM (#428) would ask for less than the floor just named.
-      hint "Use a machine (or resize the VM) with ≥ $(_pf_tenths_gb "$run_floor_mib" up) GB of RAM; ${PF_REC_MEM_GB} GB to train locally. Then re-run."
+      _pf_detail hint "Use a machine (or resize the VM) with ≥ $(_pf_tenths_gb "$run_floor_mib" up) GB of RAM; ${PF_REC_MEM_GB} GB to train locally. Then re-run."
+      _pf_person mem ✖ "$(_pf_tenths_gb "$mib" down) GB memory · tracebloc needs $(_pf_tenths_gb "$run_floor_mib" up) GB" "Use a machine with at least $(_pf_tenths_gb "$run_floor_mib" up) GB of memory."
     elif [[ "$native_linux" == 1 ]]; then
-      _pf_fail_line "Memory: only ${gb} GB (${label}) — need ≥ ${PF_MIN_MEM_GB} GB to run the tracebloc client."
+      _pf_detail _pf_fail_line "Memory: only ${gb} GB (${label}) — need ≥ ${PF_MIN_MEM_GB} GB to run the tracebloc client."
       PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
-      hint "Resize the VM (or free memory) to ≥ ${warn_gb} GB; ${rec_gb} GB to train locally. Then re-run."
+      _pf_detail hint "Resize the VM (or free memory) to ≥ ${warn_gb} GB; ${rec_gb} GB to train locally. Then re-run."
+      _pf_person mem ✖ "${gb} GB memory · tracebloc needs ${PF_MIN_MEM_GB} GB" "Free up memory or use a larger machine, then run the installer again:"
     else
       # Mac/Win: the MACHINE itself is below the floor — no runtime setting can
       # fix that, so don't offer a resize remedy here. Warn (don't block).
-      warn "Memory: ${gb} GB (${label}) — $(_pf_vm_floor_words)."
+      _pf_detail warn "Memory: ${gb} GB (${label}) — $(_pf_vm_floor_words)."
+      _pf_person mem ⚠ "Low memory · tracebloc needs about $(( floor_gb + PF_OS_RESERVE_GB )) GB"
     fi
   elif [[ "$(_pf_run_floor_family 2>/dev/null)" != linux ]] \
      && _pf_host_too_small_for_floor "$(_pf_host_mem_gb)"; then
@@ -859,7 +919,8 @@ _pf_memory() {
     # floor family, not on OS: WSL2 reports OS=Linux but is graded on the
     # Windows VM floor, and _pf_clamp_mem_gb would otherwise lift its "can spare"
     # figure above the host's own RAM (client-dev#2124, Bugbot).
-    warn "Memory: ${gb} GB (${label}) — the client needs a ${floor_gb} GB node and the OS needs ~${PF_OS_RESERVE_GB} GB, so this machine is below the practical minimum of about $(( floor_gb + PF_OS_RESERVE_GB )) GB. Free up memory or use a larger machine."
+    _pf_detail warn "Memory: ${gb} GB (${label}) — the client needs a ${floor_gb} GB node and the OS needs ~${PF_OS_RESERVE_GB} GB, so this machine is below the practical minimum of about $(( floor_gb + PF_OS_RESERVE_GB )) GB. Free up memory or use a larger machine."
+    _pf_person mem ⚠ "Low memory · tracebloc needs about $(( floor_gb + PF_OS_RESERVE_GB )) GB"
   elif [[ "$mib" -lt "$warn_mib" ]]; then
     # The DERIVED budget, not its clamp (Bugbot on client#1085) — the same rule as
     # _pf_runtime_mem_status. AND NO
@@ -877,9 +938,11 @@ _pf_memory() {
       # the VM less a Windows reserve, which read 6 (client-dev#2158): _pf_spare_gb.
       local spare_gb
       spare_gb="$(_pf_spare_gb "$rec_gb" "$gb")"
-      warn "Memory: ${gb} GB (${label}) — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${spare_gb} GB, so $(_pf_spare_rung_words)."
+      _pf_detail warn "Memory: ${gb} GB (${label}) — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${spare_gb} GB, so $(_pf_spare_rung_words)."
+      _pf_person mem ⚠ "Low memory · a training needs about ${PF_WARN_MEM_GB} GB"
     else
-      warn "Memory: ${gb} GB (${label}) — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted. ${rec_gb} GB of RAM recommended to train locally."
+      _pf_detail warn "Memory: ${gb} GB (${label}) — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted. ${rec_gb} GB of RAM recommended to train locally."
+      _pf_person mem ⚠ "Low memory · a training needs about ${PF_WARN_MEM_GB} GB"
     fi
   else
     _pf_ok "Memory: ${gb} GB (${label})"
@@ -992,12 +1055,15 @@ _pf_disk_k3s() {
   fi
   if [[ "$rc" -eq 4 ]]; then
     # A host prepared for this user that cannot be adopted yet (1.1g): a password
-    # would end in preflight_sudo's prompt, and is not what is missing. Say
-    # what is, with the remedy step b gives (_native_k3s_prepare_host_remedy).
+    # would end in preflight_sudo's prompt, and is not what is missing. A person
+    # reads what is, and its way forward, in the end block (_native_k3s_prepared_reason);
+    # the log keeps the reason with the prepare-host remedy.
     why="$(_native_k3s_prepared_for_me)" || true
-    _pf_fail_line "Disk: where this machine's k3s keeps its volumes is in ${TB_K3S_CONFIG_PATH}, which you cannot read yet."
+    _pf_detail _pf_fail_line "Disk: where this machine's k3s keeps its volumes is in ${TB_K3S_CONFIG_PATH}, which you cannot read yet."
     PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
-    hint "$(_native_k3s_prepare_host_remedy "$why")"
+    _pf_detail hint "$(_native_k3s_prepare_host_remedy "$why")"
+    _pf_person disk ✖ "Can't read this machine's k3s settings yet" \
+      "$(_native_k3s_prepared_reason "$why" next)" "$(_native_k3s_prepared_reason "$why" cmd)"
     return 0
   fi
   if [[ "$rc" -eq 3 ]]; then
@@ -1081,11 +1147,13 @@ _pf_disk_grade() {
   fi
   free_gb=$(( free_kb / 1024 / 1024 ))
   if [[ "$free_gb" -lt "$PF_MIN_DISK_GB" ]]; then
-    _pf_fail_line "Disk: only ${free_gb} GB free on ${at} for ${what} — need ≥ ${PF_MIN_DISK_GB} GB."
+    _pf_detail _pf_fail_line "Disk: only ${free_gb} GB free on ${at} for ${what} — need ≥ ${PF_MIN_DISK_GB} GB."
     PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
-    hint "Free up space or attach a larger disk, then re-run."
+    _pf_detail hint "Free up space or attach a larger disk, then re-run."
+    _pf_person disk ✖ "${free_gb} GB free disk · tracebloc needs ${PF_MIN_DISK_GB} GB" "Free up disk space, then run the installer again:"
   elif [[ "$free_gb" -lt "$PF_WARN_DISK_GB" ]]; then
-    warn "Disk: ${free_gb} GB free on ${at} for ${what} — recommended ≥ ${PF_WARN_DISK_GB} GB; images + data may fill it."
+    _pf_detail warn "Disk: ${free_gb} GB free on ${at} for ${what} — recommended ≥ ${PF_WARN_DISK_GB} GB; images + data may fill it."
+    _pf_person disk ⚠ "Low disk space · tracebloc recommends ${PF_WARN_DISK_GB} GB free"
   else
     _pf_ok "Disk: ${free_gb} GB free on ${at} for ${what}"
   fi
@@ -1565,20 +1633,55 @@ _pf_connectivity() {
     log "Connected: tracebloc.io, Docker Hub (registry-1.docker.io), GitHub (ghcr.io)"
     success "Internet connection verified"
   else
-    local ff
+    local ff hosts="" slow="" h tls_n=0 to_n=0 all_tls=0
     for ff in "${fails[@]}"; do  # set-u-safe: the else of the empty-fails check
-      _pf_fail_line "${ff%%|*} unreachable (${ff#*|})"
+      _pf_detail _pf_fail_line "${ff%%|*} unreachable (${ff#*|})"
       PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
       cfail=$(( cfail + 1 ))
+      h="${ff%%|*}"; h="${h##*(}"; h="${h%%)*}"
+      if [[ "${ff#*|}" == timeout ]]; then
+        to_n=$(( to_n + 1 )); slow="${slow:+${slow}, }${h}"
+      else
+        hosts="${hosts:+${hosts}, }${h}"
+      fi
+      [[ "${ff#*|}" != tls ]] || tls_n=$(( tls_n + 1 ))
     done
+    # A person reads one line per cause: a network whose certificate this machine does not
+    # trust (every host failed, each on TLS: the network is up), no connection at all, the
+    # hosts this network blocks, or the hosts that never answered. A timeout cannot tell
+    # offline from blocked, so it is never named either. Each remedy covers its ✖ lines.
+    if [[ "${#fails[@]}" -eq "${#criticals[@]}" && "$tls_n" -eq "${#fails[@]}" ]]; then
+      all_tls=1
+      _pf_say _pf_fail_line "This network's certificate isn't trusted"
+      _pf_next "Point CURL_CA_BUNDLE at your company's certificate file, then run the installer again:" "${#fails[@]}"
+    elif [[ "${#fails[@]}" -eq "${#criticals[@]}" && "$to_n" -eq 0 ]]; then
+      _pf_say _pf_fail_line "No internet connection"
+      _pf_next "Connect this machine to the internet, then run the installer again:" "${#fails[@]}"
+    else
+      if [[ "$to_n" -lt "${#fails[@]}" ]]; then
+        _pf_say _pf_fail_line "Blocked on this network · ${hosts}"
+        _pf_next "Allow HTTPS to those addresses, then run the installer again:" "$(( ${#fails[@]} - to_n ))"
+      fi
+      if [[ "$to_n" -gt 0 ]]; then
+        _pf_say _pf_fail_line "No answer from · ${slow}"
+        _pf_next "Check this machine's connection and proxy, then run the installer again:" "$to_n"
+      fi
+    fi
   fi
 
   if [[ "$tls_seen" -eq 1 ]]; then
-    hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here."
-    hint "Fix THESE host checks with CURL_CA_BUNDLE=/path/to/corporate-ca.pem (the installer's HTTPS downloads honor it) or by adding the CA to the system trust store. ${nodes_trust} trusted separately via TRACEBLOC_CA_BUNDLE (or CURL_CA_BUNDLE) at cluster-create — so CURL_CA_BUNDLE covers both, TRACEBLOC_CA_BUNDLE only the nodes. Ask IT for the bundle if unsure."
+    local tls_why="A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here."
+    local tls_fix="Fix THESE host checks with CURL_CA_BUNDLE=/path/to/corporate-ca.pem (the installer's HTTPS downloads honor it) or by adding the CA to the system trust store. ${nodes_trust} trusted separately via TRACEBLOC_CA_BUNDLE (or CURL_CA_BUNDLE) at cluster-create — so CURL_CA_BUNDLE covers both, TRACEBLOC_CA_BUNDLE only the nodes. Ask IT for the bundle if unsure."
+    # Every host on TLS: the ✖ line and its remedy say it, so this is detail. Mixed
+    # with other failures, these lines are the only certificate advice a person reads.
+    if [[ "$all_tls" -eq 1 ]]; then
+      _pf_detail hint "$tls_why"; _pf_detail hint "$tls_fix"
+    else
+      hint "$tls_why"; hint "$tls_fix"
+    fi
   fi
   if [[ "$cfail" -gt 0 ]]; then
-    hint "Allow HTTPS (443) egress to the host(s) named above — the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, ${backend_host}, tracebloc.github.io, plus any tool-download host listed (${tool_hosts}) — or set HTTP_PROXY if you use a corporate proxy."
+    _pf_detail hint "Allow HTTPS (443) egress to the host(s) named above — the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, ${backend_host}, tracebloc.github.io, plus any tool-download host listed (${tool_hosts}) — or set HTTP_PROXY if you use a corporate proxy."
   fi
   # #585: when the CONTAINER REGISTRIES themselves are blocked (not just any host),
   # the images can't be pulled directly at all — surface the mirror / offline options
@@ -1590,7 +1693,7 @@ _pf_connectivity() {
     esac
   done
   if [[ "$reg_blocked" -eq 1 ]]; then
-    hint "The container registries (Docker Hub / GHCR) look blocked here, so the images can't be pulled directly. If your site runs a mirror you CAN reach, point the install at it; for a fully offline site, an air-gapped image bundle is the alternative. See the 'Blocked container registry' section of docs/INSTALL.md."
+    _pf_detail hint "The container registries (Docker Hub / GHCR) look blocked here, so the images can't be pulled directly. If your site runs a mirror you CAN reach, point the install at it; for a fully offline site, an air-gapped image bundle is the alternative. See the 'Blocked container registry' section of docs/INSTALL.md."
   fi
   return 0
 }
@@ -1625,12 +1728,14 @@ _pf_hw_summary_line() {
   local cpu mem_kb mem_gb disk_target="" disk_kb disk_gb tab=$'\t'
   local -a parts=()
   cpu="$(_pf_ncpu)"
+  [[ " ${PF_FAILED_FIELDS:-} " != *" cpu "* ]] || cpu=""
   if [[ -n "$cpu" ]]; then parts+=("${cpu} CPU cores"); fi
   # Host RAM, not the VM budget (#417): a hardware summary that read "7 GB
   # memory" on a 15 GB machine (a VM's default budget) was the same
   # flip-flop bug in miniature. Fall back to the runtime only if the host is
   # unreadable, so the field is still populated rather than dropped.
   mem_kb="$(_pf_host_mem_kb)"; [[ -z "$mem_kb" ]] && mem_kb="$(_pf_runtime_mem_kb)"
+  [[ " ${PF_FAILED_FIELDS:-} " != *" mem "* ]] || mem_kb=""
   # Through the shared converter so the collapsed summary can never disagree with
   # the memory line above it (Bugbot #445 r6).
   if [[ -n "$mem_kb" ]]; then mem_gb="$(_pf_display_gb_from_mib "$(( mem_kb / 1024 ))")"; parts+=("${mem_gb} GB memory"); fi
@@ -1643,6 +1748,7 @@ _pf_hw_summary_line() {
     disk_target="$(_pf_nearest_existing "$TB_K3S_DATA_PATH")"; [[ -n "$disk_target" ]] || disk_target="/"
   fi
   disk_kb=""; [[ -z "$disk_target" ]] || disk_kb="$(_pf_free_kb "$disk_target")"
+  [[ " ${PF_FAILED_FIELDS:-} " != *" disk "* ]] || disk_kb=""
   if [[ -n "$disk_kb" ]]; then disk_gb=$(( disk_kb / 1024 / 1024 )); parts+=("${disk_gb} GB free disk"); fi
   local joined="" p
   for p in ${parts[@]+"${parts[@]}"}; do joined="${joined:+$joined · }$p"; done
@@ -1655,18 +1761,29 @@ run_preflight() {
     info "Preflight checks skipped (TRACEBLOC_SKIP_PREFLIGHT set)."
     return 0
   fi
-  PF_HARD_FAIL=0
+  PF_HARD_FAIL=0; PF_PERSON=(); PF_FAILED_FIELDS=""; PF_PERSON_HARD=0; PF_NEXTS=""; PF_NEXT_COVERS=0; PF_NEXT_CMD=""
   # Run the arch/CPU/RAM/disk checks in quiet-success mode: on the happy path they
-  # print nothing and we collapse them into ONE summary line below; a warning or
-  # hard-fail still prints its specific ⚠/✖. '|| true' so a single check returning
-  # non-zero can't trip set -e before the others run — PF_HARD_FAIL is the truth.
+  # print nothing and we collapse them into ONE summary line below. A check that
+  # warns or fails says so in a person's line (_pf_person), printed under it; one
+  # that has none prints its whole line in place. '|| true' so a single check
+  # returning non-zero can't trip set -e before the others run — PF_HARD_FAIL is
+  # the truth.
   PF_QUIET_SUCCESS=1
   _pf_arch         || true
   _pf_cpu          || true
   _pf_memory       || true
   _pf_disk         || true
-  # The machine and its combined hardware line — only when nothing hard-failed so far.
-  if [[ "$PF_HARD_FAIL" -eq 0 ]]; then _pf_os_summary_line; _pf_hw_summary_line; fi
+  # The machine and its combined hardware line, less any field that failed: only when
+  # every failure so far has its person's line, so no ✔ contradicts a ✖ printed above.
+  local p
+  if [[ "$PF_HARD_FAIL" -eq "$PF_PERSON_HARD" ]]; then _pf_os_summary_line; _pf_hw_summary_line; fi
+  for p in ${PF_PERSON[@]+"${PF_PERSON[@]}"}; do
+    p="${p#*|}"
+    case "$p" in
+      "✖ "*) _pf_fail_line "${p#✖ }" ;;
+      *)      warn_note "${p#⚠ }" ;;
+    esac
+  done
   # Connectivity (own spinner + combined "Connected:" line) and storage
   # ("Local storage (…)") each print their own always-on summary line.
   _pf_connectivity || true
@@ -1674,7 +1791,20 @@ run_preflight() {
   unset PF_QUIET_SUCCESS
 
   if [[ "$PF_HARD_FAIL" -gt 0 ]]; then
-    echo ""
-    error "Preflight failed — resolve the ✖ item(s) above and re-run. (Override at your own risk with TRACEBLOC_SKIP_PREFLIGHT=1.)"
+    # What to do, for the end block: the one remedy, when it answers every ✖ (a ✖
+    # with none of its own, such as arch or network storage, leaves it short), else a
+    # general one. A remedy that ends in ":" takes the install command under it.
+    local nexts="${PF_NEXTS%$'\n'}"
+    if [[ -z "$nexts" || "$nexts" == *$'\n'* || "$PF_NEXT_COVERS" -ne "$PF_HARD_FAIL" ]]; then
+      tb_fail_next "Fix what the ✖ lines above say, then run the installer again:"
+    elif [[ "$nexts" == *: && -n "${PF_NEXT_CMD:-}" ]]; then
+      tb_fail_next "$nexts" "$PF_NEXT_CMD"
+    elif [[ "$nexts" == *: ]]; then
+      tb_fail_next "$nexts"
+    else
+      tb_fail_next "$nexts" ""
+    fi
+    tb_machine_lines echo ""
+    error_said "" "Preflight failed — resolve the ✖ item(s) above and re-run. (Override at your own risk with TRACEBLOC_SKIP_PREFLIGHT=1.)"
   fi
 }

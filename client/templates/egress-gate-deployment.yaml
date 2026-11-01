@@ -1,0 +1,260 @@
+{{- /*
+  The egress gate: the one service the client's senders
+  hand their messages to. It checks each against the declaration of what may
+  leave, sends or refuses it, and writes one line per message in the record on
+  this machine. It took over the requests-proxy's workload: the same image, the
+  same send port, and requests-proxy-service selects it as an alias.
+
+  Container `gate` serves the send port and is the record's only writer;
+  container `record` serves the record read-only on its own port. One replica
+  and `Recreate`, so two gates never write the record at once.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tracebloc.egressGateName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: egress-gate
+  template:
+    metadata:
+      labels:
+        app: egress-gate
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # The record volume's group, so the gate (uid 1001) can write it on a CSI
+        # volume. kubelet ignores fsGroup on hostPath: init-egress-record below.
+        fsGroup: 1001
+        fsGroupChangePolicy: "OnRootMismatch"
+        seccompProfile:
+          type: RuntimeDefault
+        {{- with include "tracebloc.seLinuxLevel" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
+      {{- if (default dict .Values.hostPath).enabled }}
+      initContainers:
+      # kubelet creates a hostPath PV's directory root:root 0755 and applies no
+      # fsGroup to it (kubernetes/kubernetes#138411), so the gate could not write
+      # its record and would send nothing. Only CHOWN: the gate is the one writer.
+      - name: init-egress-record
+        image: {{ include "tracebloc.thirdPartyImage" (dict "site" "images.busybox" "root" $) | quote }}
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+            add: ["CHOWN"]
+          seccompProfile:
+            type: RuntimeDefault
+        command: ['sh', '-c', 'chown 1001:1001 /var/lib/tracebloc/egress-record']
+        # Requests equal to limits, so this init never keeps the pod from
+        # Guaranteed QoS (scripts/tests/qos-reachability.sh).
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "16Mi"
+          limits:
+            cpu: "10m"
+            memory: "16Mi"
+        volumeMounts:
+        - name: egress-record
+          mountPath: /var/lib/tracebloc/egress-record
+      {{- end }}
+      containers:
+        - name: gate
+          {{- /*
+            The gate runs the jobs-manager IMAGE, so it follows the jobs-manager
+            pin: `images.requestsProxy.digest` stays an explicit per-workload
+            override, and when it is empty -- or IGNORED, because it was resolved
+            on a registry this release does not pull from -- the workload follows
+            the honoured `images.jobsManager.digest` (tracebloc.effectivePin, the
+            same function the pull policy and the image-refresh env read).
+            Without that, pinning jobs-manager alone would leave this Deployment
+            on the floating tag while image-refresh, which skips pinned images,
+            never moved it. Nil-guarded inside the helper for --reuse-values.
+          */}}
+          image: {{ include "tracebloc.controlPlaneImage" (dict "image" "requestsProxy" "root" $) | quote }}
+          # IfNotPresent wherever an update path exists without `Always` (a
+          # pinned digest, or the image-refresh reconcile, which re-images this
+          # Deployment with jobs-manager in one tick); see
+          # tracebloc.controlPlanePullPolicy. `Always` re-pulled on every restart,
+          # so a restart while offline landed in ImagePullBackOff.
+          imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "image" "requestsProxy" "root" $) }}
+          workingDir: /app
+          command: ["python", "-m", "gunicorn"]
+          args:
+            - "--bind=0.0.0.0:8888"
+            # The gate verifies registered pod tokens from process-local memory,
+            # so it runs a single worker unless the registry moves to shared
+            # storage.
+            - "--workers=1"
+            - "--worker-tmp-dir=/dev/shm"
+            - "--threads=4"
+            - "--graceful-timeout=30"
+            - "--timeout=60"
+            - "--access-logfile=-"
+            - "--error-logfile=-"
+            - "egress_gate:create_app()"
+          ports:
+            - name: send
+              containerPort: 8888
+          # Startup and liveness on the socket: the master binds it before the
+          # worker imports the app. Readiness on /healthz: it is 503 while the
+          # declaration is unreadable or the record unwritable, when the gate
+          # refuses or sends nothing, so the Service sends it no traffic.
+          startupProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          {{- /* Nil-guarded through default dict for --reuse-values replays
+                 predating resources.requestsProxy; `{{-` without `-}}` keeps the
+                 newline before `resources:`. */ -}}
+          {{- $rp := default dict (default dict .Values.resources).requestsProxy }}
+          {{- $rpReq := default dict $rp.requests }}
+          {{- $rpLim := default dict $rp.limits }}
+          resources:
+            requests:
+              cpu: {{ $rpReq.cpu | default "50m" | quote }}
+              memory: {{ $rpReq.memory | default "96Mi" | quote }}
+            limits:
+              cpu: {{ $rpLim.cpu | default "1000m" | quote }}
+              memory: {{ $rpLim.memory | default "512Mi" | quote }}
+          env:
+          {{- include "tracebloc.proxyEnv" . | nindent 12 }}
+            - name: TRACEBLOC_EGRESS_GATE_MODE
+              value: {{ (default dict .Values.egressGate).mode | default "report" | quote }}
+            - name: TRACEBLOC_EGRESS_RECORD_DIR
+              value: "/var/lib/tracebloc/egress-record"
+            - name: MYSQL_HOST
+              value: "mysql-client"
+            {{- /* Settings naming: the queue names follow the service-bus family,
+                 TRACEBLOC_SB_<QUEUE>_QUEUE_NAME, and render under that name only. */}}
+            - name: TRACEBLOC_SB_EXPERIMENTS_QUEUE_NAME
+              value: "experiments"
+            - name: TRACEBLOC_SB_FLOPS_QUEUE_NAME
+              value: "flops"
+            # client-runtime#79: shared HMAC secret used to VERIFY the per-pod
+            # bearer token statelessly (signature + expiry), the same key the
+            # jobs-manager uses to mint it. When present, the gate skips the
+            # pod_tokens table entirely.
+            {{- /* Settings naming: each identity name is emitted as the canonical
+                 TRACEBLOC_<name> (a leading TB_ replaced) only, the name the
+                 gate reads. Every secretKeyRef names the CANONICAL Secret key,
+                 the only one secrets.yaml writes. */}}
+            - name: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
+            {{- if (include "tracebloc.serviceDbAccounts" .) }}
+            # backend#1528 S2 (RFC-0003 D10 close-out): authenticate the gate's
+            # metadata-DB access as the dedicated tb_meta identity instead of
+            # the root-equivalent edgeuser. Only the metadata identity is wired
+            # here -- the gate never touches the dataset DB. jobs-manager mints
+            # tb_meta at its startup; the gate's bootstrap retries until it
+            # lands. Rendered only when enabled, so a default install stays
+            # byte-identical (mirrors the jobs-manager block).
+            - name: TRACEBLOC_SERVICE_DB_ACCOUNTS
+              value: "1"
+            - name: TRACEBLOC_META_USER
+              value: "tb_meta"
+            - name: TRACEBLOC_META_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
+                  key: TRACEBLOC_META_PASSWORD
+            {{- end }}
+          volumeMounts:
+            - name: egress-record
+              mountPath: /var/lib/tracebloc/egress-record
+        - name: record
+          # The same image as `gate`, so one pin and one image-refresh patch
+          # move both. It holds no credential and sends nothing.
+          image: {{ include "tracebloc.controlPlaneImage" (dict "image" "requestsProxy" "root" $) | quote }}
+          imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "image" "requestsProxy" "root" $) }}
+          workingDir: /app
+          command: ["python", "-m", "gunicorn"]
+          args:
+            - "--bind=0.0.0.0:{{ include "tracebloc.egressRecordPort" . }}"
+            - "--workers=1"
+            - "--worker-tmp-dir=/dev/shm"
+            - "--threads=2"
+            - "--timeout=60"
+            - "--access-logfile=-"
+            - "--error-logfile=-"
+            - "egress_record:create_record_app()"
+          ports:
+            - name: record
+              containerPort: {{ include "tracebloc.egressRecordPort" . }}
+          # No readiness probe: the pod is ready only when every container is,
+          # so a viewer that answers slowly would take the gate out of the
+          # Service. The viewer streams line by line, so its limit fits a read.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          {{- $rr := default dict (default dict (default dict .Values.egressGate).record).resources }}
+          {{- $rrReq := default dict $rr.requests }}
+          {{- $rrLim := default dict $rr.limits }}
+          resources:
+            requests:
+              cpu: {{ $rrReq.cpu | default "0" | quote }}
+              memory: {{ $rrReq.memory | default "0Mi" | quote }}
+            limits:
+              cpu: {{ $rrLim.cpu | default "200m" | quote }}
+              memory: {{ $rrLim.memory | default "128Mi" | quote }}
+          env:
+            - name: TRACEBLOC_EGRESS_RECORD_DIR
+              value: "/var/lib/tracebloc/egress-record"
+          volumeMounts:
+            - name: egress-record
+              mountPath: /var/lib/tracebloc/egress-record
+              readOnly: true
+      volumes:
+        - name: egress-record
+          persistentVolumeClaim:
+            claimName: {{ include "tracebloc.egressRecordPvc" . }}
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+      restartPolicy: Always

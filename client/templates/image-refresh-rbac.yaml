@@ -13,7 +13,7 @@ metadata:
   Namespace-scoped Role — narrower than autoUpgrade's cluster-admin
   binding on purpose. This CronJob only touches Deployments in
   {{ .Release.Namespace }}: read the jobs-manager Deployment to compare the
-  recorded refresh digest, and patch the jobs-manager + requests-proxy
+  recorded refresh digest, and patch the jobs-manager + egress gate
   Deployments for `kubectl set image` + annotation update. The one read
   beyond them is `list` on pods, rendered while imageRefresh.deferWhileTraining
   is on: the training gate (tracebloc.trainingGateSh) lists the training pods
@@ -21,8 +21,7 @@ metadata:
   Pod is bounded to re-imaging and annotating those two Deployments, and to
   reading the pods of this namespace.
 
-  #569 added requests-proxy as a patch target. No rule change was needed: it
-  is a Deployment in the SAME namespace, already covered below.
+  The egress gate is a Deployment in the SAME namespace, covered below.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

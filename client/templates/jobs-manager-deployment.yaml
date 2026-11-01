@@ -538,7 +538,7 @@ spec:
               name: {{ include "tracebloc.secretName" . }}
               key: TRACEBLOC_CLIENT_PASSWORD
         # client-runtime#79: shared HMAC secret used to MINT the per-pod
-        # REQUESTS_PROXY_TOKEN. Same Secret key the requests-proxy reads to
+        # REQUESTS_PROXY_TOKEN. Same Secret key the egress gate reads to
         # verify. When present, spin_job mints stateless signed tokens (no
         # pod_tokens table). Never injected into training pods.
         {{- /* Settings naming: every name below is emitted under its canonical

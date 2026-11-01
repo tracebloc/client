@@ -245,11 +245,11 @@ _tb_check_healthy() {
   # diagnostic that reads stdin would consume/block on the script bytes.
   tracebloc doctor </dev/null >/dev/null 2>&1 &
   local pid=$!
-  if [[ "$_tb_anim" == 1 ]]; then tput civis 2>/dev/null || true
-  else printf '  · Checking your tracebloc setup…\n'; fi
+  # A live line on a terminal that animates; plain, nothing (its ✔ line follows).
+  if [[ "$_tb_anim" == 1 ]]; then tput civis 2>/dev/null || true; fi
   while kill -0 "$pid" 2>/dev/null; do
     f="${frames[i]}"; i=$(( (i + 1) % ${#frames[@]} ))
-    if [[ "$_tb_anim" == 1 ]]; then printf '\r  %s%s%s Checking your tracebloc setup…' "$_C" "$f" "$_R"; fi
+    if [[ "$_tb_anim" == 1 ]]; then printf '\r  %s%s%s Checking your secure environment...' "$_C" "$f" "$_R"; fi
     if [[ "$tick" -ge "$maxticks" ]]; then
       kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
       if [[ "$_tb_anim" == 1 ]]; then printf '\r\033[K'; tput cnorm 2>/dev/null || true; fi
@@ -281,8 +281,10 @@ export PATH="${HOME}/.local/bin:${PATH}"
 if [[ "$_tb_bail_ok" == "1" ]] && command -v tracebloc >/dev/null 2>&1; then
   printf '\n'
   if _tb_check_healthy; then
-    printf '  %s✓%s %sAlready set up and healthy — nothing to download or install.%s\n' "$_G" "$_R" "$_B" "$_R"
-    printf "    %sRun%s  %stracebloc%s%s  to use it. Here's your environment:%s\n" "$_D" "$_R" "$_C" "$_R" "$_D" "$_R"
+    printf '  %s✔%s tracebloc is already set up · nothing to install\n' "$_G" "$_R"
+    # What machines read off this answer (e2e's reinstall journey): only when no person watches.
+    [[ -t 1 ]] || printf '  ✓ Already set up and healthy — nothing to download or install.\n'
+    printf '\n  Run %s`tracebloc`%s to manage your secure environment.\n\n' "$_C" "$_R"
     # Hand off to the interactive home screen (exec replaces this process).
     # Under `curl … | bash` stdin is the install pipe, so give the home screen
     # the user's real terminal instead — but only when /dev/tty is actually

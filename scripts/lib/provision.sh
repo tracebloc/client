@@ -91,9 +91,18 @@ _name_slug() {
   printf '%s' "$s"
 }
 
+# _name_all_digits NAME -- true when NAME's slug is only digits. Its namespace would be
+# a number, which the chart's labels render unquoted and Kubernetes refuses.
+_name_all_digits() { [[ "$(_name_slug "${1:-}")" =~ ^[0-9]+$ ]]; }
+
 # _client_name_default -- the name Enter gives the secure environment at the name
-# prompt: this host's name (_host_machine_name) as its namespace will read.
-_client_name_default() { _name_slug "$(_host_machine_name)"; }
+# prompt: this host's name (_host_machine_name) as its namespace will read, with
+# "machine-" in front of an all-digit one.
+_client_name_default() {
+  local s; s="$(_name_slug "$(_host_machine_name)")"
+  if _name_all_digits "$s"; then s="$(_name_slug "machine-${s}")"; fi
+  printf '%s' "$s"
+}
 
 # _machine_labels REUSE_NS PLAN_ACTION — the machine name and provider `client
 # create` sets, into _TB_MACHINE_NAME / _TB_CLIENT_PROVIDER: TRACEBLOC_MACHINE_NAME /
@@ -202,20 +211,23 @@ _device_sign_in() {
   for (( attempt = 1; attempt <= SIGN_IN_ATTEMPTS; attempt++ )); do
     _run_device_login && return 0
     [[ "$attempt" -lt "$SIGN_IN_ATTEMPTS" ]] || break
-    echo ""
-    warn "Sign-in didn't complete — the code lapsed or wasn't approved."
+    # The CLI's own ✖ line above says what went wrong; machines and the log read the rest.
+    tb_machine_lines echo ""
+    tb_machine_lines warn "Sign-in didn't complete — the code lapsed or wasn't approved."
     if ! _prompt_tty || tb_over_ssh; then
-      hint "Nothing is lost: a fresh code follows, and the install carries on from here."
+      tb_machine_lines hint "Nothing is lost: a fresh code follows, and the install carries on from here."
       continue
     fi
-    hint "Nothing is lost: the install is paused right here, not restarted."
+    tb_machine_lines hint "Nothing is lost: the install is paused right here, not restarted."
     # The prompt WRITE is guarded (|| true) so a test without a real /dev/tty
     # doesn't abort; the read comes from TRACEBLOC_TTY, like every other prompt here.
-    printf '\n  Press Enter for a fresh code (or Ctrl-C to stop): ' >/dev/tty 2>/dev/null || true
+    # The CLI's own words for the same offer (cli-dev auth.go, signInInBrowser).
+    printf '\n  ? Press Enter for a new code, or Ctrl-C to stop: ' >/dev/tty 2>/dev/null || true
     IFS= read -r _ <"$TRACEBLOC_TTY" || break
-    echo ""
   done
-  error "Sign-in didn't complete — re-run the installer to try again."
+  tb_fail_next "Run the installer again to sign in:"
+  # The CLI's own ✖ line above says why; the end block says what to do.
+  error_said "" "Sign-in didn't complete — re-run the installer to try again."
 }
 
 # _detect_location_zone: best-effort ISO country code for where this machine
@@ -277,11 +289,15 @@ _report_create_failure() {
   # so nothing closes the pipe early).
   errmatches="$(grep -aE 'Error:|✖|HTTP [0-9][0-9][0-9]|refused|timed? ?out|unauthorized|forbidden|denied' "$out" 2>/dev/null | LC_ALL=C sed -E 's/^[[:space:]]*✖ /Error: /' || true)"
   errline="$(head -4 <<<"$errmatches")"
+  # A person reads what tracebloc answered, under one ✖ line; machines the whole lines.
   if [[ -n "$errline" ]]; then
-    warn "The client couldn't be provisioned:"
-    while IFS= read -r l; do [[ -n "$l" ]] && hint "$l"; done <<<"$errline"
+    tb_machine_lines warn "The client couldn't be provisioned:"
+    while IFS= read -r l; do [[ -z "$l" ]] || tb_machine_lines hint "$l"; done <<<"$errline"
+    _tb_err_line "Couldn't register this machine" 2>&1
+    while IFS= read -r l; do [[ -z "$l" ]] || echo "    ${l#Error: }"; done <<<"$errline"
   else
-    warn "The client couldn't be provisioned."
+    tb_machine_lines warn "The client couldn't be provisioned."
+    _tb_err_line "Couldn't register this machine" 2>&1
   fi
 }
 
@@ -591,9 +607,16 @@ provision_client() {
       # path uses.
       client_name="$(_strip_paste_garbage "$client_name")"
       client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
+      # An all-digit answer is asked again, as an empty one is below.
+      if [[ -n "$client_name" ]] && _name_all_digits "$client_name"; then
+        client_name=""
+        if [[ "$_name_try" -lt 3 ]]; then printf '  A name needs at least one letter.\n' >/dev/tty 2>/dev/null || true; fi
+        continue
+      fi
       [[ -n "$client_name" ]] && break       # captured a name (incl. a no-newline partial)
       [[ "$_name_read_ok" == 0 ]] && break    # EOF / no interactive input — retrying won't help
       if [[ -n "$_name_default" ]]; then client_name="$_name_default"; break; fi   # Enter: the default
+      if [[ "$_name_try" -lt 3 ]]; then printf '  A name is required.\n' >/dev/tty 2>/dev/null || true; fi
     done
   fi
   # Trim surrounding whitespace from the (possibly typed) values FIRST, so a
@@ -615,7 +638,19 @@ provision_client() {
     client_location="$(_detect_location_zone)"; client_location="${client_location%% *}"
   fi
 
-  [[ -n "$client_name" ]] || error "A name for this client is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME (and optionally TRACEBLOC_CLIENT_LOCATION) for an unattended install."
+  # An all-digit name reaches here only from TRACEBLOC_CLIENT_NAME: the prompt asks again.
+  if [[ -z "$_reuse_ns" ]] && _name_all_digits "$client_name"; then
+    tb_fail_next "Set TRACEBLOC_CLIENT_NAME to a name with a letter in it, then run the installer again:"
+    error_said "A name needs at least one letter" "A name needs at least one letter: TRACEBLOC_CLIENT_NAME is '${client_name}', all digits, so its namespace would be a number, which the chart's labels render unquoted and Kubernetes refuses. Set TRACEBLOC_CLIENT_NAME to a name that has one, or unset it and re-run in a terminal to be prompted."
+  fi
+  if [[ -z "$client_name" ]]; then
+    if _prompt_tty; then
+      tb_fail_next "Run the installer again and enter a name:"
+    else
+      tb_fail_next "Run the installer in a terminal, or set TRACEBLOC_CLIENT_NAME\nfor an unattended install." ""
+    fi
+    error_said "No name was given" "A name for this client is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME (and optionally TRACEBLOC_CLIENT_LOCATION) for an unattended install."
+  fi
   _machine_labels "$_reuse_ns" "${_plan_action:-}"
   # --name is required; pass --location only when we have one (the CLI defaults it
   # otherwise). Build as an array so values with spaces survive intact.
@@ -659,7 +694,7 @@ provision_client() {
     rm -f "$cred_file"   # remove any partial the failed create may have written
     _report_create_failure "$_create_out" "$client_location" "$client_location_source"
     rm -f "$_create_out"
-    error "Couldn't provision the client. Re-run to retry — full log: ${LOG_FILE:-the install log}."
+    error_said "" "Couldn't provision the client. Re-run to retry — full log: ${LOG_FILE:-the install log}."
   fi
   cat "$_create_out" >>"${LOG_FILE:-/dev/null}" 2>/dev/null || true
   _show_create_notices "$_create_out"

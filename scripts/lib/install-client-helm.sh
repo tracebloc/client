@@ -908,6 +908,8 @@ _measured_system_requests() {
 # Reads _TB_TRAINING_SIZE and _TB_TRAINING_PROVENANCE. Sets, in the caller's
 # scope:
 #   _TB_FIT_VERDICT   fits | reduced | refused | pinned-over | unverified
+#   _TB_FIT_CAUSE     on refused, what a person is told (_print_fit_refusal):
+#                     memory | cpu | unreadable | broken
 #   _TB_FIT_LINES     the arithmetic, one fact per line, for the caller to print
 # and on `reduced` REWRITES _TB_TRAINING_SIZE to the largest whole-core /
 # whole-MiB envelope that fits (never larger than what was chosen). The
@@ -957,17 +959,48 @@ _print_fit_lines() {   # $1 = printer: hint (on screen) or log (log file only); 
 # after values generation and the estimate before the cluster is created. Same
 # arithmetic lines, same remedy, same TRACEBLOC_TRAINING_RESOURCES way out -- so
 # an operator refused early reads exactly what a late refusal would have said.
-# $1 = the headline, $2 = the lines to print, $3 = the closing error.
+# $1 = the headline, $2 = the lines to print, $3 = the closing error,
+# $4 = the cause (_TB_FIT_CAUSE), which picks the ✖ line and the remedy.
 _print_fit_refusal() {
   # The addons k3s schedules beside the platform are part
   # of what the node must hold, so they are part of what the remedy asks for.
   local _rf _rf_mem=0 _rf_cpu=0
   _rf="$(_system_requests_floor)"
   if [[ -n "$_rf" ]]; then read -r _rf_mem _rf_cpu <<< "$_rf"; fi
-  warn "$1"
-  _print_fit_lines hint "$2"
-  hint "  The client needs ~$(( (_TB_CP_FOOTPRINT_MEM_BYTES + _rf_mem + _TB_ENVELOPE_FLOOR_MEM_BYTES) / 1024 / 1024 )) MiB and $(( _TB_CP_FOOTPRINT_CPU_MILLI + _rf_cpu + _TB_ENVELOPE_FLOOR_CPU_MILLI )) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
-  error "$3"
+  # The arithmetic is for machines and the log (e2e reads its grammar); a person
+  # reads one ✖ line and, in the end block, what to do about its cause.
+  tb_machine_lines warn "$1"
+  tb_machine_lines _print_fit_lines hint "$2"
+  tb_machine_lines hint "  The client needs ~$(( (_TB_CP_FOOTPRINT_MEM_BYTES + _rf_mem + _TB_ENVELOPE_FLOOR_MEM_BYTES) / 1024 / 1024 )) MiB and $(( _TB_CP_FOOTPRINT_CPU_MILLI + _rf_cpu + _TB_ENVELOPE_FLOOR_CPU_MILLI )) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
+  case "${4:-}" in
+    memory)
+      # The figure preflight's memory gate names (_pf_machine_need_gb).
+      local _rf_gb=""
+      if declare -F _pf_machine_need_gb >/dev/null 2>&1; then
+        _rf_gb="$(_pf_machine_need_gb 2>/dev/null)" || _rf_gb=""
+      fi
+      if [[ "$_rf_gb" =~ ^[0-9]+(\.[0-9])?$ ]]; then
+        tb_fail_next "Use a machine with at least ${_rf_gb} GB of memory." ""
+      else
+        tb_fail_next "Use a machine with more memory." ""
+      fi
+      error_said "Not enough memory to run a training" "$3"
+      ;;
+    cpu)
+      # No core count: nothing derives a machine-core figure, and a restated one drifts.
+      tb_fail_next "Use a machine with more CPU cores." ""
+      error_said "Not enough CPU to run a training" "$3"
+      ;;
+    unreadable)
+      tb_fail_next "It's safe to run the installer again:"
+      error_said "Couldn't read this machine's resources" "$3"
+      ;;
+    *)
+      # broken, and a refusal that names no cause: either way the installer is at fault.
+      tb_fail_next "Run the latest installer:"
+      error_said "This installer is broken" "$3"
+      ;;
+  esac
 }
 
 # FAIL CLOSED on the footprint: a blank or non-numeric embed is a broken
@@ -976,17 +1009,17 @@ _print_fit_refusal() {
 # (and sets the verdict) when it refused.
 _fit_footprint_refused() {
   if [[ ! "${_TB_CP_FOOTPRINT_MEM_BYTES:-}" =~ ^[0-9]+$ || ! "${_TB_CP_FOOTPRINT_CPU_MILLI:-}" =~ ^[0-9]+$ ]]; then
-    _TB_FIT_VERDICT="refused"
+    _TB_FIT_VERDICT="refused"; _TB_FIT_CAUSE="broken"
     _TB_FIT_LINES="the chart footprint constants (_TB_CP_FOOTPRINT_*) are missing or not numeric -- this installer cannot verify any envelope"
     return 0
   fi
   if [[ ! "${_TB_CP_TRANSIENT_MEM_BYTES:-}" =~ ^[0-9]+$ || ! "${_TB_CP_TRANSIENT_CPU_MILLI:-}" =~ ^[0-9]+$ || ! "${_TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI:-}" =~ ^[0-9]+$ ]]; then
-    _TB_FIT_VERDICT="refused"
+    _TB_FIT_VERDICT="refused"; _TB_FIT_CAUSE="broken"
     _TB_FIT_LINES="the hourly-job constants (_TB_CP_TRANSIENT_*) are missing or not numeric -- this installer cannot verify any envelope"
     return 0
   fi
   if [[ ! "${_TB_ENVELOPE_INGESTION_MEM_BYTES:-}" =~ ^[0-9]+$ || ! "${_TB_ENVELOPE_INGESTION_CPU_MILLI:-}" =~ ^[0-9]+$ ]]; then
-    _TB_FIT_VERDICT="refused"
+    _TB_FIT_VERDICT="refused"; _TB_FIT_CAUSE="broken"
     _TB_FIT_LINES="the ingestion Job constants (_TB_ENVELOPE_INGESTION_*) are missing or not numeric -- this installer cannot verify any envelope"
     return 0
   fi
@@ -995,6 +1028,7 @@ _fit_footprint_refused() {
 
 _fit_training_envelope() {
   _TB_FIT_VERDICT=""
+  _TB_FIT_CAUSE=""
   _TB_FIT_LINES=""
   _TB_FIT_INGEST_WAITS=0
   local size="${_TB_TRAINING_SIZE:-}" prov="${_TB_TRAINING_PROVENANCE:-}"
@@ -1013,7 +1047,7 @@ _fit_training_envelope() {
   # The machine. Unreadable is decided by who chose the size (see the header).
   if ! _anchor_largest_schedulable; then
     if (( ours )) && [[ "$size" != "$_TRAINING_DEFAULT" ]]; then
-      _TB_FIT_VERDICT="refused"
+      _TB_FIT_VERDICT="refused"; _TB_FIT_CAUSE="unreadable"
       _TB_FIT_LINES="node allocatable could not be read, and ${size} is an installer-chosen envelope that cannot be verified without it"
     else
       _TB_FIT_VERDICT="unverified"
@@ -1025,7 +1059,7 @@ _fit_training_envelope() {
 
   if [[ -z "$env_cpu_m" || -z "$env_mem_b" ]]; then
     if (( ours )); then
-      _TB_FIT_VERDICT="refused"
+      _TB_FIT_VERDICT="refused"; _TB_FIT_CAUSE="broken"
       _TB_FIT_LINES="the installer-chosen envelope '${size}' has no readable cpu and memory pair -- refusing to write what cannot be verified"
     else
       _TB_FIT_VERDICT="unverified"
@@ -1157,6 +1191,8 @@ _fit_verdict() {
 
   if (( new_cores < 1 || new_mib < gib / mib )); then
     _TB_FIT_VERDICT="refused"
+    # Short of memory, the CPU too or not, is memory's; only CPU short is the CPU's.
+    if (( new_mib < gib / mib )); then _TB_FIT_CAUSE="memory"; else _TB_FIT_CAUSE="cpu"; fi
     _TB_FIT_LINES+="what fits is $(( fit_mem_b / mib )) MiB / ${fit_cpu_m} m -- not even a 1-core / 1-GiB run; there is no honest envelope to write"
     return 0
   fi
@@ -1239,11 +1275,13 @@ _fit_verdict() {
 # runtime is "cannot tell", not "too small". All three are `skipped`.
 #
 # Args: VM_MEM_BYTES VM_CPU_MILLI. Sets _TB_PRECREATE_VERDICT
-# (refused | clear | skipped) and _TB_PRECREATE_LINES. Leaves _TB_FIT_* and
+# (refused | clear | skipped), _TB_PRECREATE_CAUSE (the fit's _TB_FIT_CAUSE, on
+# refused) and _TB_PRECREATE_LINES. Leaves _TB_FIT_* and
 # _TB_TRAINING_SIZE as it found them: the real fit must not inherit a verdict or
 # a reduced size from an estimate.
 _precreate_fit_estimate() {
   _TB_PRECREATE_VERDICT=""
+  _TB_PRECREATE_CAUSE=""
   _TB_PRECREATE_LINES=""
   local vm_mem_b="${1:-}" vm_cpu_m="${2:-}"
   if [[ -n "${TRACEBLOC_TRAINING_RESOURCES:-}" ]]; then
@@ -1263,9 +1301,10 @@ _precreate_fit_estimate() {
   fi
 
   # Shadowed: the rule writes these in its caller's scope.
-  local _TB_FIT_VERDICT="" _TB_FIT_LINES="" _TB_TRAINING_SIZE="$_TRAINING_DEFAULT" _TB_TRAINING_UNDERSIZED=0 _TB_FIT_INGEST_WAITS=0
+  local _TB_FIT_VERDICT="" _TB_FIT_CAUSE="" _TB_FIT_LINES="" _TB_TRAINING_SIZE="$_TRAINING_DEFAULT" _TB_TRAINING_UNDERSIZED=0 _TB_FIT_INGEST_WAITS=0
   if _fit_footprint_refused; then
     _TB_PRECREATE_VERDICT="refused"
+    _TB_PRECREATE_CAUSE="$_TB_FIT_CAUSE"
     _TB_PRECREATE_LINES="$_TB_FIT_LINES"
     return 0
   fi
@@ -1314,6 +1353,7 @@ _precreate_fit_estimate() {
   _TB_PRECREATE_LINES="$_TB_FIT_LINES"
   if [[ "$_TB_FIT_VERDICT" == "refused" ]]; then
     _TB_PRECREATE_VERDICT="refused"
+    _TB_PRECREATE_CAUSE="$_TB_FIT_CAUSE"
   else
     _TB_PRECREATE_VERDICT="clear"
   fi
@@ -1348,7 +1388,8 @@ _precreate_fit_gate() {
       _print_fit_refusal \
         "This machine cannot schedule a training run beside the platform, so the cluster is not created:" \
         "$_TB_PRECREATE_LINES" \
-        "Refusing before creating the cluster, so there is no cluster to delete."
+        "Refusing before creating the cluster, so there is no cluster to delete." \
+        "$_TB_PRECREATE_CAUSE"
       ;;
     clear)   _print_fit_lines log "$_TB_PRECREATE_LINES" ;;
     *)       log "pre-create fit estimate skipped: ${_TB_PRECREATE_LINES}" ;;
@@ -1906,8 +1947,8 @@ open_dashboard_link() {
 print_dashboard_link() {
   [[ -n "${_TB_DASHBOARD_LINK:-}" ]] || return 0
   {
-    printf '\n  Open this link in a browser on this machine to see it on your dashboard\n'
-    printf '  as the machine you are on. It works once, for 5 minutes:\n'
+    printf '  Open your dashboard in a browser on this machine.\n'
+    printf '  This link works once, for 5 minutes:\n'
     printf '    %s\n\n' "$_TB_DASHBOARD_LINK"
   } >"${TRACEBLOC_TTY:-/dev/tty}" 2>/dev/null || true
   _TB_DASHBOARD_LINK=""
@@ -1917,7 +1958,7 @@ print_dashboard_link() {
 # ── Corporate-proxy passthrough into the chart (#242) ───────────────────────
 # The node gets the host's HTTP(S)_PROXY (cluster.sh, _node_proxy_env) so
 # containerd can pull images behind a corporate proxy (#166). But the client
-# *workloads* — jobs-manager (api + pods-monitor), requests-proxy, the
+# *workloads* — jobs-manager (api + pods-monitor), the egress gate, the
 # image-refresh / auto-upgrade cronjobs — only get proxy egress if the CHART
 # renders it, and the chart's tracebloc.proxyEnv helper is driven by the SPLIT
 # keys (HTTP_PROXY_HOST/_PORT/_USERNAME/_PASSWORD), not a raw HTTP_PROXY URL.
@@ -2143,7 +2184,7 @@ _tb_wait_auto_upgrade_job() {
   _deadline=$(( SECONDS + _dl ))
   while [[ -n "$_name" ]] && (( SECONDS < _deadline )); do
     if [[ -z "$_said" ]]; then
-      info "The hourly self-update ($_name) is updating your secure environment now; waiting for it to finish (at most ${_dl}s)…"
+      info "The hourly auto-upgrade ($_name) is updating your secure environment now; waiting for it to finish (at most ${_dl}s)…"
       log "auto-upgrade Job $_name active in '$_ns'; waiting up to ${_dl}s before touching the release."
       _said=1
     fi
@@ -2158,7 +2199,7 @@ _tb_wait_auto_upgrade_job() {
   elif [[ -n "$_name" ]]; then
     log "auto-upgrade Job $_name in '$_ns' still active after its deadline; going on."
   elif [[ -n "$_said" ]]; then
-    info "The hourly self-update finished."
+    info "The auto-upgrade finished."
   fi
   return 0
 }
@@ -2258,8 +2299,8 @@ _recover_pending_helm_release() {
   if [[ -n "$_unread" ]]; then
     log "helm status of '$_rel' gave no status outside the helm lock; reading it again under the lock."
   else
-    warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."
-    info "Clearing it before continuing…"
+    tb_machine_lines warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."
+    info "Clearing an update that was interrupted..."
   fi
   # The read above only says whether to recover. What to do is decided under the
   # host's helm lock (cli-dev#1545), by a read made there: the lock can wait up to
@@ -2304,7 +2345,8 @@ _recover_pending_helm_release() {
       return 1
       ;;
     jobs-unread)
-      warn "This installer could not check whether the hourly self-update is running in '$_ns', so it did not roll '$_rel' back and left it as it is."
+      tb_machine_lines warn "This installer could not check whether the hourly auto-upgrade is running in '$_ns', so it did not roll '$_rel' back and left it as it is."
+      info "The hourly auto-upgrade may still be running, so it is left as it is."
       log "No rollback of '$_rel' ($_vs): the auto-upgrade Jobs in '$_ns' could not be listed; leaving it to the bounded upgrade."
       return 0
       ;;
@@ -2571,8 +2613,10 @@ _mac_runner_set_args() {
   # catalog's words (scripts/testdata/golden/03-mac-gpu-no-training-folder.golden).
   local why
   if why="$(_mac_ct_job_data_none_why)"; then
-    warn "This machine keeps no folder for training data, so training here can't use this Mac's GPU and will run on the CPU: ${why}."
-    hint "To train on the GPU, run tracebloc delete, then install again with the default storage."
+    tb_machine_lines warn "This machine keeps no folder for training data, so training here can't use this Mac's GPU and will run on the CPU: ${why}."
+    tb_machine_lines hint "To train on the GPU, run tracebloc delete, then install again with the default storage."
+    warn_note "Training here will use the CPU, not this Mac's GPU." "$(_mac_ct_job_data_none_said "$why")" \
+      "For the GPU, run \`tracebloc delete\`, then install again" "with the default storage."
     return 0
   fi
   # The runner takes this Mac's GPU jobs, so detect_gpu's not_nvidia, which the platform
@@ -4487,7 +4531,8 @@ install_client_helm() {
       _print_fit_refusal \
         "This machine cannot schedule a training run beside the platform, so no training envelope is written:" \
         "$_TB_FIT_LINES" \
-        "Refusing to write a training envelope that cannot be scheduled on this machine."
+        "Refusing to write a training envelope that cannot be scheduled on this machine." \
+        "$_TB_FIT_CAUSE"
       ;;
     reduced)
       # The size it was reduced to is the summary's Compute row. The arithmetic is e2e's

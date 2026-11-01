@@ -1,6 +1,6 @@
 {{/*
   tracebloc.trainingGateSh -- the shell both periodic jobs that replace the
-  jobs-manager or requests-proxy pods run before doing so: auto-upgrade-cronjob.yaml
+  jobs-manager or egress gate pods run before doing so: auto-upgrade-cronjob.yaml
   (a `helm upgrade`) and image-refresh-cronjob.yaml (a `kubectl set image`). A
   replaced jobs-manager starts the next training cycle late, and a multi-edge run
   then averages that cycle without this edge, so the job waits while the edge

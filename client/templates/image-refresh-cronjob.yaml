@@ -32,11 +32,11 @@ data:
     #   deployment/<release>-jobs-manager      api                       (tracebloc/jobs-manager)
     #                                          wait-for-mysql (init)     (tracebloc/jobs-manager)
     #                                          pods-monitor-container    (tracebloc/pods-monitor)
-    #   deployment/<release>-requests-proxy    proxy                     (tracebloc/jobs-manager)
+    #   deployment/<release>-egress-gate       gate, record              (tracebloc/jobs-manager)
     #   daemonset/<release>-resource-monitor   tracebloc-resource-monitor
     #                                          in NODE_AGENTS_NAMESPACE  (tracebloc/resource-monitor)
     #
-    # requests-proxy runs the SAME tracebloc/jobs-manager image, so it follows
+    # The egress gate runs the SAME tracebloc/jobs-manager image, so it follows
     # the jobs-manager digest resolved in this tick — no second registry HEAD.
     # Before #569 it was not reconciled at all: it stayed on its old build
     # until some unrelated restart, then jumped to whatever the floating tag
@@ -161,7 +161,7 @@ data:
     # next chart bump renders the `:tag` the workload is already running and rolls
     # nothing. The first-observation tick therefore genuinely costs nothing until
     # something actually `set image`s the workload; the roll it used to schedule
-    # onto the next bump — jobs-manager (Recreate), requests-proxy and the
+    # onto the next bump — jobs-manager (Recreate), the egress gate and the
     # resource-monitor DaemonSet, for byte-identical content, under auto-upgrade's
     # `--atomic --wait` — cannot occur on this head. What the live-spec seed does
     # preserve is a pin that already exists: see the COST note above for the price
@@ -515,18 +515,19 @@ data:
       esac
     }
 
-    # The requests-proxy is a SEPARATE deployment that runs the SAME
-    # tracebloc/jobs-manager image (container `proxy`). `workload_image_for_repo`
-    # above reads only the jobs-manager `api` container, so the no-op decision
-    # below cannot see the proxy on its own. Read it here so a proxy left on
-    # `:tag` -- a tick that pinned `api` then died before the rp rollout, or a
-    # helm re-render that reverted only the proxy -- is still re-pinned instead
+    # The egress gate is a SEPARATE deployment that runs the SAME
+    # tracebloc/jobs-manager image (containers `gate` and `record`, one patch).
+    # `workload_image_for_repo` above reads only the jobs-manager `api`
+    # container, so the no-op decision below cannot see the gate on its own.
+    # Read it here so a gate left on `:tag` -- a tick that pinned `api` then died
+    # before the rp rollout, or a helm re-render that reverted only the gate --
+    # is still re-pinned instead
     # of being declared "unchanged" forever because `api` happens to match
     # (Bugbot on #1008). Empty (read error / absent) makes the caller SKIP this
     # tick, same fail-closed stance as `workload_image_for_repo`.
     requests_proxy_image() {
       kubectl get deployment -n "$RELEASE_NAMESPACE" "$REQUESTS_PROXY_DEPLOYMENT" \
-        -o jsonpath='{.spec.template.spec.containers[?(@.name=="proxy")].image}' \
+        -o jsonpath='{.spec.template.spec.containers[?(@.name=="gate")].image}' \
         --request-timeout=15s 2>/dev/null
     }
 
@@ -607,7 +608,7 @@ data:
     # deliberately non-fatal; leaving the WRITE fatal under `set -e` was an
     # asymmetry, not a decision -- and it aborted the tick BEFORE Pass 1, so a
     # transient API error on a bookkeeping annotation froze the refresh of
-    # requests-proxy and resource-monitor on the very tick that proved the
+    # the egress gate and resource-monitor on the very tick that proved the
     # deployment had recovered. That is #1964's own recovery path failing the
     # same way #1964 did, only red instead of green. Nothing below reads
     # SKIP_KEY, so a stale value costs exactly one thing: the NEXT unsettled
@@ -640,17 +641,17 @@ data:
     #                      restart block, and they survive even a latched tick.
     #   jm_deploy_annotate written after the jobs-manager Deployment rollout --
     #                      the pods-monitor image (only there), and the
-    #                      jobs-manager image WHEN requests-proxy does not follow
+    #                      jobs-manager image WHEN the egress gate does not follow
     #                      it (pinned separately).
-    #   rp_deploy_annotate the jobs-manager image record WHEN requests-proxy
+    #   rp_deploy_annotate the jobs-manager image record WHEN the egress gate
     #                      follows it: that Deployment is the LAST workload
     #                      carrying the image, so the record must wait for it or a
     #                      next tick reads `recorded == latest` and leaves
-    #                      requests-proxy on the old image.
+    #                      the egress gate on the old image.
     #   rm_daemon_annotate the resource-monitor image record, after its DaemonSet
     #                      rollout.
     # WHY split rather than one final annotate (the pre-backend#3575 shape): the
-    # rollout calls are unguarded under `set -e`, so a timeout on requests-proxy
+    # rollout calls are unguarded under `set -e`, so a timeout on the egress gate
     # or the resource-monitor DaemonSet exited the tick BEFORE the batched
     # annotate, leaving live=`@D1` while all three records still said `@D0` --
     # and from client#1013 the chart renders `last-refreshed`, so Helm-3.16
@@ -682,7 +683,7 @@ data:
     # resets it on a settled one; a rollout that times out exits the tick under
     # set -e with the counter still raised. `kubectl set image` has by then
     # updated the SPEC to repo@digest, so the live-image check reads "on digest"
-    # even though the rollout never completed -- and requests-proxy /
+    # even though the rollout never completed -- and the egress gate /
     # resource-monitor sit OUTSIDE the top-of-tick settled guard, so a stuck
     # rollout on either would no-op here forever, the counter raised and stale
     # :tag pods still running. Read the counter once up front: a raised value
@@ -927,7 +928,7 @@ data:
         # digest for `repo@sha256:...`, the whole ref otherwise) still mismatches a
         # bare `sha256:...` and re-pins.
         have="$(workload_image_for_repo "$repo" || true)"
-        # jobs-manager: the requests-proxy runs this SAME image as its own
+        # jobs-manager: the egress gate runs this SAME image as its own
         # deployment. When it follows this digest (not operator-pinned) it must
         # ALSO be on it, or a partial re-pin (api pinned, proxy still on :tag) is
         # declared no-op forever off the api match alone and never retried (Bugbot
@@ -950,7 +951,7 @@ data:
           continue
         fi
         if [ "$proxy_follows" = "1" ] && [ -z "$rp_have" ]; then
-          log "  digest unchanged, but the live requests-proxy image is unreadable (API read error / container absent) -- skipping re-pin this tick, will retry when readable"
+          log "  digest unchanged, but the live egress gate image is unreadable (API read error / container absent) -- skipping re-pin this tick, will retry when readable"
           continue
         fi
         api_on_digest=1
@@ -974,7 +975,7 @@ data:
             # The SPEC reads on-digest, but a prior re-image attempt never reached
             # its success-reset (ATTEMPT_KEY is raised): its rollout timed out and
             # `set image` had already moved the spec, so this "on digest" can be a
-            # rollout that never settled -- and for requests-proxy / resource-monitor
+            # rollout that never settled -- and for the egress gate / resource-monitor
             # nothing else would catch it (they are outside the settled guard).
             # Re-enter the re-image path so `rollout status` runs again: a settled
             # workload resets the counter, a stuck one advances it to the #563 flap
@@ -1003,7 +1004,7 @@ data:
         elif [ "$api_on_digest" = "1" ]; then
           log "  digest unchanged and jobs-manager already on the pinned digest, but"
           log "        deployment/${REQUESTS_PROXY_DEPLOYMENT} runs '${rp_have}', not digest ${latest}"
-          log "        -- re-pinning the requests-proxy digest"
+          log "        -- re-pinning the egress gate's digest"
         else
           # The workload is fully on :tag, not the digest. THREE shapes reach
           # here, and the skip must fire only on the fresh-install one (#1008):
@@ -1084,7 +1085,7 @@ data:
 
       # Map the image onto the workload+container(s) that run it. Container
       # names are contractual with the templates; keep them in sync with
-      # jobs-manager-deployment.yaml, requests-proxy-deployment.yaml and
+      # jobs-manager-deployment.yaml, egress-gate-deployment.yaml and
       # resource-monitor-daemonset.yaml. EVERY container in a workload that
       # renders this image must be listed, init containers included: since
       # #1013 `tracebloc.controlPlaneSeedDigest` reads the LIVE `api` digest and
@@ -1098,20 +1099,20 @@ data:
           # The wait-for-mysql init container runs THIS image too
           # (jobs-manager-deployment.yaml), so it is pinned in the SAME patch.
           jm_set_args="$jm_set_args wait-for-mysql=${ref}"
-          # requests-proxy runs this SAME image. It follows the jobs-manager
+          # The egress gate runs this SAME image. It follows the jobs-manager
           # digest unless the operator pinned it separately via
           # images.requestsProxy.digest, which is a per-workload override.
           if [ "$REQUESTS_PROXY_PINNED" = "1" ]; then
-            log "  requests-proxy is pinned by images.requestsProxy.digest; not following this digest"
+            log "  the egress gate is pinned by images.requestsProxy.digest; not following this digest"
             # Not followed: this Deployment is the only workload carrying the
             # jobs-manager image, so its record may land after that rollout.
             jm_deploy_annotate="$jm_deploy_annotate $img_record"
           else
-            rp_set_args="$rp_set_args proxy=${ref}"
-            # Followed: requests-proxy also runs this image and rolls AFTER the
+            rp_set_args="$rp_set_args gate=${ref} record=${ref}"
+            # Followed: the egress gate also runs this image and rolls AFTER the
             # jobs-manager Deployment, so the record must wait for THAT rollout --
             # otherwise a next tick reads `recorded == latest` and never re-images
-            # a requests-proxy left behind (backend#3575).
+            # an egress gate left behind (backend#3575).
             rp_deploy_annotate="$rp_deploy_annotate $img_record"
           fi
           ;;
@@ -1211,7 +1212,7 @@ data:
         exit 0
       fi
 
-      # Re-imaging jobs-manager or requests-proxy replaces its pod, so it waits
+      # Re-imaging jobs-manager or the egress gate replaces its pod, so it waits
       # while the edge trains (tracebloc.trainingGateSh). A deferral leaves every
       # counter above as it was: nothing was attempted.
       if [ -n "$jm_set_args" ] || [ -n "$rp_set_args" ]; then
@@ -1253,8 +1254,8 @@ data:
         # Record the images this rollout carried, NOW -- before the next two
         # rollouts, either of which can time out and exit the tick under set -e
         # (backend#3575). Covers pods-monitor (only here) and the jobs-manager
-        # image WHEN requests-proxy is pinned and does not follow it; when it does
-        # follow, the jobs-manager record is deferred to the requests-proxy
+        # image WHEN the egress gate is pinned and does not follow it; when it does
+        # follow, the jobs-manager record is deferred to the egress gate
         # rollout below.
         write_digest_records "$jm_deploy_annotate"
       fi
@@ -1266,10 +1267,10 @@ data:
         kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${REQUESTS_PROXY_DEPLOYMENT}" \
           --timeout="$ROLLOUT_TIMEOUT"
         log "  deployment/${REQUESTS_PROXY_DEPLOYMENT} rollout complete"
-        # requests-proxy is the LAST workload carrying the jobs-manager image, so
+        # The egress gate is the LAST workload carrying the jobs-manager image, so
         # its record lands only now that BOTH it and the jobs-manager Deployment
         # have settled -- writing it earlier would let a next tick read
-        # `recorded == latest` and leave a still-old requests-proxy unrolled
+        # `recorded == latest` and leave a still-old egress gate unrolled
         # (backend#3575).
         write_digest_records "$rp_deploy_annotate"
       fi
@@ -1335,7 +1336,7 @@ spec:
       # MUST exceed (number of reconciled workloads) x imageRefresh.rolloutTimeout.
       # A legitimate tick does `set image` and then waits on `rollout status` for up
       # to rolloutTimeout — and since #569 it may do so for up to THREE workloads IN
-      # SEQUENCE (jobs-manager, requests-proxy, resource-monitor).
+      # SEQUENCE (jobs-manager, egress gate, resource-monitor).
       #
       # This was a hardcoded 1800 (30m), which with the default 10m rolloutTimeout is
       # EXACTLY 3 x 10m — zero headroom (Bugbot). Blowing the deadline is not a benign
@@ -1417,7 +1418,7 @@ spec:
                   value: {{ printf "%s-jobs-manager" (include "tracebloc.fullname" .) | quote }}
                 # #569: the two additional workloads reconciled by `set image`.
                 - name: TRACEBLOC_REQUESTS_PROXY_DEPLOYMENT
-                  value: {{ include "tracebloc.requestsProxyName" . | quote }}
+                  value: {{ include "tracebloc.egressGateName" . | quote }}
                 - name: TRACEBLOC_RESOURCE_MONITOR_DAEMONSET
                   value: {{ include "tracebloc.resourceMonitorName" . | quote }}
                 - name: TRACEBLOC_NODE_AGENTS_NAMESPACE
@@ -1511,7 +1512,7 @@ spec:
                   value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinIgnored" (dict "image" "podsMonitor" "root" $)))) | quote }}
                 - name: TRACEBLOC_RESOURCE_MONITOR_PIN_IGNORED
                   value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinIgnored" (dict "image" "resourceMonitor" "root" $)))) | quote }}
-                # requests-proxy follows the jobs-manager digest by default;
+                # The egress gate follows the jobs-manager digest by default;
                 # this flag is the per-workload override that opts it out -- an
                 # HONOURED own pin (tracebloc.pinFor). An ignored one is not an
                 # override: the proxy follows jobs-manager as if it were empty,

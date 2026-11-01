@@ -777,8 +777,9 @@ _wipe_leftover_data() {
   local d rc=0 storage=""
   local -a as_root=()
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+    # Stopping k3s is this refusal's own end: the install command alone is refused again.
     _leftover_k3s_service_stopped \
-      || error "Refusing to wipe while the k3s service may be running: its volumes are in use. Stop it with 'sudo systemctl stop k3s', check 'systemctl is-active k3s' says inactive, then re-run."
+      || { TB_EXIT_REFUSED=1; error "Refusing to wipe while the k3s service may be running: its volumes are in use. Stop it with 'sudo systemctl stop k3s', check 'systemctl is-active k3s' says inactive, then re-run."; }
     local src=0
     storage="$(_native_k3s_storage_path)" || src=$?
     if [[ "$src" -eq 3 ]]; then   # needs the password: ask once, retry once
@@ -954,6 +955,8 @@ guard_leftover_data() {
       local wipe_line="
   --wipe-data                     delete it and start fresh"
       [[ -n "$wipe" ]] || wipe_line=""
+      # The choices are this refusal's own end: the install command alone is refused again.
+      TB_EXIT_REFUSED=1
       error "Existing data found under ${where} and no choice was given (no terminal). Re-run with one of:
   --reuse-data                    ${reuse_desc}${wipe_line}${newdir_line}
   (or TRACEBLOC_SKIP_LEFTOVER_GUARD=1 to bypass this guard entirely)"

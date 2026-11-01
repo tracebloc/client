@@ -607,5 +607,6 @@ detect_gpu() {
     return
   fi
 
-  info "No GPU detected. Your environment will run in CPU mode."
+  tb_machine_lines info "No GPU detected. Your environment will run in CPU mode."
+  info "No GPU found · training will use the CPU"
 }

@@ -250,7 +250,7 @@ _native_k3s_fw_apply() {
     error "$_NATIVE_K3S_FW_UNIT ran, but the rule is not live -- the k3s API would listen unfenced"
   fi
   IFS=$'\t' read -r aid apath < <(_native_k3s_fw_artefact "$tool")
-  success "Firewall rule loaded: $aid ($apath)"
+  tb_machine_lines success "Firewall rule loaded: $aid ($apath)"
   log "firewall-rule $aid $apath"
 }
 

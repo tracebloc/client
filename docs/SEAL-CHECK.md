@@ -331,8 +331,10 @@ since chart 1.9.119 it **must carry the registry it was resolved on**
 resolved on; another registry may never have held them, and a pod told to pull
 a digest its registry does not have never starts. So a pin is honoured **only
 when `digestRegistry` equals the registry the release pulls from**; otherwise
-it is ignored — the workload renders the channel tag, `image-refresh` re-pins
-from the live registry, and `helm install/upgrade` prints a NOTES warning
+it is ignored — the workload renders the channel tag (on dev and staging
+`image-refresh` re-pins it from the live registry; on prod, where
+`image-refresh` is off, it moves when its pod restarts), and
+`helm install/upgrade` prints a NOTES warning
 naming the image and both registries. A pin with `digest` set and
 `digestRegistry` empty is read as resolved on `docker.io` (the only registry
 these images were pulled from before the key existed). The chart refuses

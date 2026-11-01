@@ -565,7 +565,7 @@ print_summary() {
       fi
       echo ""
       kc="$(_summary_kubeconfig_lines)"
-      if [[ -n "$kc" ]]; then printf '%s\n\n' "$kc"; fi
+      if [[ -n "$kc" ]]; then tb_machine_lines printf '%s\n\n' "$kc"; fi
       _kube_context_note
       tb_rule
       # Where the logs and data are, and how it comes back after a restart: the log's.

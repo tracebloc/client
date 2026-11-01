@@ -4,7 +4,7 @@
 
 The runtime that keeps your data where it belongs — on your infrastructure.
 
-The tracebloc client deploys inside your Kubernetes cluster and executes all model training, fine-tuning, and inference locally. It connects to the tracebloc backend for orchestration only. No data, no model weights, no artifacts ever leave your environment.
+The tracebloc client deploys inside your Kubernetes cluster and executes all model training, fine-tuning, and inference locally. Your raw data never leaves your infrastructure. Trained model weights do: after each training cycle they leave encrypted, over an outbound-only connection, for federated averaging on the tracebloc platform, and are stored encrypted there. Everything else that leaves (results, dataset metadata, opt-out telemetry) is listed in [Security & data handling](https://docs.tracebloc.io/environment-setup/security).
 
 ## About this repository
 
@@ -12,6 +12,7 @@ This is a **publish-only mirror**. It holds the released Helm charts (`client/`,
 
 - **Pull requests are not accepted here.** Anything merged into this repository would be overwritten by the next publish.
 - **Deployment problems and bugs in a released chart or installer are welcome** as [issues](https://github.com/tracebloc/client/issues) or by mail to [support@tracebloc.io](mailto:support@tracebloc.io) — include the chart version (`helm list -n tracebloc`), your platform, and what you ran. Roadmap and internal work are tracked privately.
+- **Security vulnerabilities go privately, never as an issue:** see [docs/SECURITY.md](docs/SECURITY.md#12-questions-or-reports).
 - **Releases are cosign-signed and the installers verify before they run** — see [docs/SUPPLY_CHAIN.md](docs/SUPPLY_CHAIN.md) for the integrity model and how to verify a release by hand.
 
 ## Architecture
@@ -28,19 +29,22 @@ Your infrastructure
 │   │  training,        │      │  ● Your datasets      │   │
 │   │  enforces budgets │      │  ● Fine-tuned weights │   │
 │   └────────┬──────────┘      │                       │   │
-│            │                 │  Everything stays here │   │
+│            │                 │  Your data stays here  │   │
 │            │                 └───────────────────────┘   │
 └────────────┼────────────────────────────────────────────┘
              │
-             │ Encrypted (orchestration only — no data)
+             │ Encrypted, outbound only: orchestration, results,
+             │ trained weights. Never your data.
              ▼
     ┌─────────────────┐
     │  tracebloc       │
-    │  backend         │
+    │  platform        │
     │                  │
     │  Coordinates     │
     │  experiments,    │
-    │  serves web UI   │
+    │  averages the    │
+    │  weights, serves │
+    │  the web UI      │
     └─────────────────┘
 ```
 

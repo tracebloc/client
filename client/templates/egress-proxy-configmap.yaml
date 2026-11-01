@@ -5,7 +5,7 @@
   once the training NetworkPolicy drops the 0.0.0.0/0:443 rule, a locked-down
   training pod can still reach the tracebloc backend through this
   gateway — and nothing else. Service Bus is NOT here; it stays on the
-  requests-proxy:8888 path. The allowlist falls CLOSED: an empty list renders no
+  egress gate's 8888 path. The allowlist falls CLOSED: an empty list renders no
   allow rule, so everything is denied.
 
   The list is the release's own environment's `allowlistByEnv` entry plus the

@@ -4,6 +4,8 @@
 
 **Scope:** the defenses that protect a customer cluster against malicious code submitted by external data scientists who train models on that cluster.
 
+> **Found a vulnerability?** Report it privately, never in a public issue: see [§12](#12-questions-or-reports).
+
 ## TL;DR
 
 The tracebloc platform lets external data scientists upload **Python code, model weights, and training plans** that run inside a customer's Kubernetes cluster. Everything submitted by the data scientist is treated as **untrusted** — it executes only inside an ephemeral "training pod" that is isolated from the rest of the customer environment by multiple layers:
@@ -14,7 +16,7 @@ The tracebloc platform lets external data scientists upload **Python code, model
 | Runtime | Non-root, no privileges, no capabilities, seccomp-default | Pod + container `securityContext` |
 | Filesystem | Read-only root filesystem for every training image | `readOnlyRootFilesystem: true` + scoped `emptyDir` mounts |
 | Storage | Dataset volume mounted read-only | `readOnly: true` on the shared PVC mount |
-| Network | Default-deny ingress; egress only to cluster DNS, the in-cluster MySQL, the requests-proxy and the egress gateway, so external HTTPS goes only through the gateway's FQDN allowlist | Kubernetes `NetworkPolicy` + squid egress gateway |
+| Network | Default-deny ingress; egress only to cluster DNS, the in-cluster MySQL, the outbound gate and the egress gateway, so external HTTPS goes only through the gateway's FQDN allowlist | Kubernetes `NetworkPolicy` + squid egress gateway |
 | Admission | Namespace-level Pod Security Admission tripwire | `pod-security.kubernetes.io/warn` + `audit` labels |
 
 Every layer is implemented at the pod spec / chart level — no change to training code is required to benefit, and there is nothing the customer must configure beyond installing the chart on a cluster whose CNI enforces NetworkPolicy.
@@ -128,7 +130,7 @@ The target model is least-privilege, one identity per job, with `edgeuser` retir
 |---|---|---|---|
 | **per-experiment user** | `SELECT` on one experiment's physical table(s) only | training pods (injected via per-job Secret as `MYSQL_USER`/`MYSQL_PASSWORD`) | Shipped (RFC-0003 D10, backend#1181). On for `dev`/`stg`/`prod` via `perExperimentDbCredsByEnv` — baked once staging and prod DROPped edgeuser (backend#2776/#2800) |
 | **`tb_credmgr`** | `CREATE USER` + `SELECT … WITH GRANT OPTION` on `training_test_datasets.*` — mints the per-experiment users, nothing else | jobs-manager | Shipped with `perExperimentDbCreds` |
-| **`tb_meta`** | `ALL PRIVILEGES` on `metadata.*` only (no `*.*`, no `GRANT OPTION`) | jobs-manager + requests-proxy metadata work | **Consumed** since S2 (client-runtime#305/#308, client#664). On for `dev`/`stg`/`prod` via `serviceDbAccountsByEnv` (prod baked after backend#2800) |
+| **`tb_meta`** | `ALL PRIVILEGES` on `metadata.*` only (no `*.*`, no `GRANT OPTION`) | jobs-manager + outbound gate metadata work | **Consumed** since S2 (client-runtime#305/#308, client#664). On for `dev`/`stg`/`prod` via `serviceDbAccountsByEnv` (prod baked after backend#2800) |
 | **`tb_ingest`** | `ALL PRIVILEGES` on `training_test_datasets.*` only (no `*.*`, no `GRANT OPTION`) | jobs-manager dataset work + spawned ingestion Jobs | **Consumed** since S2 (client-runtime#305/#308, client#664). On for `dev`/`stg`/`prod` via `serviceDbAccountsByEnv` (prod baked after backend#2800) |
 | **`edgeuser`** | `ALL PRIVILEGES ON *.*` — root-equivalent | **existing un-migrated edges only** — a fresh install on any of `dev`/`stg`/`prod` now authenticates as `tb_meta`/`tb_ingest` | Legacy; retirement in progress (§8.10) |
 
@@ -205,7 +207,7 @@ spec:
 **What this still allows:**
 
 - DNS lookups to the cluster DNS — **and the cluster DNS forwards any name it does not own to the internet**, so a pod can leak data by encoding it into query names (`<chunk>.attacker.example`), with no TCP connection at all. Closed by `restrictedDns.enabled` (default off; on for the macOS node, §5.5; see [DNS exfiltration](#dns-exfiltration-restricteddns) below).
-- In-cluster egress to MySQL (3306), the requests-proxy (8888), and the egress gateway (3128)
+- In-cluster egress to MySQL (3306), the outbound gate (8888, never its record port), and the egress gateway (3128)
 - Outbound HTTPS/443 to the public internet — **dropped by default as of 1.9.96 (`networkPolicy.training.allowExternalHttps: false`, deny-by-default).** Training pods reach external services only through the in-cluster egress gateway; set `allowExternalHttps: true` to opt a fleet back out (see §8.2).
 
 #### DNS exfiltration (`restrictedDns`)
@@ -421,7 +423,7 @@ A Mac installed before this layout keeps its job data in the node's volume until
 A Mac whose GPU meets [PREREQUISITES.md § The Mac's GPU](PREREQUISITES.md#the-macs-gpu) also trains on it. The tracebloc runner, part of the tracebloc CLI, joins the cluster from the Mac and starts each GPU training as a process on the Mac itself, outside the VM. The pod-level defenses above therefore do not wrap a GPU training. The runner puts its own walls around the same untrusted code, and gives it no more reach than a training pod has. Every wall is measured from inside the sandbox, with the same probe succeeding outside it, so that a refusal is the sandbox's and not a probe that fails anyway.
 
 - **A sandbox per training, applied before its code loads.** The runner renders one macOS Seatbelt profile per training from a single tested template, and the training's own process applies it to itself before any contributor code loads. A training whose sandbox does not apply stops. The profile denies everything it does not list: the training reads the GPU engine, its own code, its one dataset and macOS's own libraries, writes only its own folder and its writable mounts, and reaches no other file, the keychain, the clipboard, the window server or another process. It cannot start another process or program, listen or bind.
-- **The network a training pod has.** For each training the runner opens three forwards from random loopback ports to MySQL, the requests-proxy and the egress gateway inside the VM, and closes them when the training ends. Those three ports are its whole network: the same three places a training pod's NetworkPolicy allows, so the egress gateway's allowlist applies on the Mac too. It has no DNS, no UDP and no internet.
+- **The network a training pod has.** For each training the runner opens three forwards from random loopback ports to MySQL, the outbound gate and the egress gateway inside the VM, and closes them when the training ends. Those three ports are its whole network: the same three places a training pod's NetworkPolicy allows, so the egress gateway's allowlist applies on the Mac too. It has no DNS, no UDP and no internet.
 - **Its own credentials and nothing else.** A training gets its per-experiment MySQL user and its job token, which the runner reads from the cluster. The runner's cluster credentials, its kubeconfig and the Mac user's environment stay outside: the training's environment is cleared, the runner keeps no secret in its own command line or environment, and each training leads a session of its own, so the kernel refuses it the arguments and environment of its parent and of every other process.
 - **The shape of a training pod.** Before it starts a training, the runner checks the pod against the shape jobs-manager produces: the training label, the known volumes, the dataset path, and no privileged fields. Anything else is refused and the pod marked Failed. Inside the VM, Pod Security and NetworkPolicy do this; on the Mac, the runner does.
 - **A verified engine.** The GPU engine is a Python build tracebloc publishes with each engine release, pinned by digest. The runner checks its digest and its Sigstore cosign signature before unpacking it, refuses any file that carries macOS's quarantine flag and fetches it again instead, and checks the engine before every training. The training cannot write it.
@@ -732,7 +734,7 @@ Known gaps between the current state and a fully-hardened setup, with the owner 
 
 **Mitigation plan:** backend endpoint that mints short-TTL, entity-scoped, send-only SAS tokens per experiment. Backend team owns the design and implementation.
 
-**Interim mitigation:** with the §8.2 egress lockdown enabled (`networkPolicy.training.allowExternalHttps: false`), a training pod can no longer reach Azure Service Bus directly — SB traffic goes through the in-cluster requests-proxy (which holds the connection strings), and the conn-strings are no longer injected into the pod. Until a fleet enables the lockdown the NetworkPolicy still allows direct outbound HTTPS. The scoped/short-TTL SAS-token plan above remains the durable fix. See §8.2.
+**Interim mitigation:** with the §8.2 egress lockdown enabled (`networkPolicy.training.allowExternalHttps: false`), a training pod can no longer reach Azure Service Bus directly — SB traffic goes through the in-cluster outbound gate (which holds the connection strings), and the conn-strings are no longer injected into the pod. Until a fleet enables the lockdown the NetworkPolicy still allows direct outbound HTTPS. The scoped/short-TTL SAS-token plan above remains the durable fix. See §8.2.
 
 ### 8.2 Training-pod outbound HTTPS (G2) — **deny-by-default shipped (1.9.96); tracebloc template fleets sealed + probe-verified (2026-09-08)**
 
@@ -879,7 +881,7 @@ If a specific training run is suspected of malicious behavior:
    ```bash
    # Depends on cluster audit policy configuration
    ```
-5. **Report the model to the tracebloc security team** with the job name, experiment ID, and pod logs so the model file can be quarantined on the backend and the data scientist's submission blocked.
+5. **Report the model to the tracebloc security team** ([§12](#12-questions-or-reports)) with the job name, experiment ID, and pod logs so the model file can be quarantined on the backend and the data scientist's submission blocked.
 
 ---
 
@@ -919,9 +921,17 @@ Cross-reference for reviewers and contributors.
 - **2026-10-26** — §4.1.1: the drift watch re-verifies each new ingestor release on the prod line and opens the service-DB pin PR itself; a failed check keeps it red and opens nothing. `prodDigest`, its `ackDrift` hold and the ordering constraint stay human-only.
 - **2026-10-28** — §8.2: the egress gateway allowlist is per environment (`egressProxy.allowlistByEnv`). A client's gateway permits only its own environment's API host, so a prod client no longer reaches the dev or staging API; `scripts/tests/egress-allowlist-env.sh` holds each environment's render to the installer's backend host for that environment.
 - **2026-10-29** — §8.3: the per-run ingestion token is on for `stg` as well as `dev`, since the staging ingestor and the staging backend both support it. `prod` stays off while its pinned ingestor predates the per-run token.
+- **2026-10-31** — §12: report a vulnerability through GitHub's private reporting or to security@tracebloc.io, with the times we answer in; the address it named before could not receive mail. A pointer to §12 at the top and in §9.
 
 ---
 
 ## 12. Questions or reports
 
-For questions about this document, issues with a specific defense, or to report a suspected vulnerability, contact the tracebloc security team at **security@tracebloc.com**. Do not file public issues for security-relevant reports.
+Report a suspected vulnerability privately, never in a public issue:
+
+- **On GitHub:** the `tracebloc/client` repository's **Security** tab, then **Report a vulnerability** ([open the form](https://github.com/tracebloc/client/security/advisories/new)).
+- **By email:** [security@tracebloc.io](mailto:security@tracebloc.io).
+
+We confirm that we have your report within 2 working days, and within 7 days we tell you how we assess it. We fix it, release the fix and publish a security advisory, which credits you unless you ask us not to. Please wait 90 days, or until the fix is released if that comes first, before you disclose it; if it is being exploited, we agree a shorter time with you.
+
+For questions about this document or a specific defense, write to the same address.

@@ -10,8 +10,8 @@
   report it. This comment used to say the DaemonSet "crash-loops with 404s",
   which would at least be visible in a restart count. What actually happens is
   quieter — client-runtime's Node-deploy/resource_monitor.py constructs
-  NodeUtilisation as the first statement inside its `while True:` body and that
-  constructor reads metrics.k8s.io outside any try; the loop's handler catches
+  NodeUtilisation (node_utilisation.py) as the first statement inside its
+  `while True:` body and that constructor reads metrics.k8s.io outside any try; the loop's handler catches
   Exception, logs, and sleeps 5 s. With no liveness or readiness probe on this
   DaemonSet, the pod stays Running and healthy-looking forever while
   send_heartbeat is never reached. Node telemetry stops and nothing says so.
@@ -195,7 +195,7 @@ spec:
             # as the two mounts above do.
             #
             # The mount point is FIXED, and pairs with `HOST_ROOT_PATH` in
-            # resource_monitor.py. Only the HOST side below is configurable:
+            # client-runtime's Node-deploy/node_utilisation.py. Only the HOST side below is configurable:
             # which disk gets measured is a per-cluster fact, where it lands
             # inside the pod is not, and making both adjustable would let the
             # two drift apart into a mount the collector never looks at.

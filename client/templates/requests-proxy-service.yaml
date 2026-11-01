@@ -1,3 +1,6 @@
+{{- /* The requests-proxy's in-cluster name, kept as an alias of the egress gate
+     so a pod spawned before the upgrade keeps posting. Send port only: the
+     record port is on egress-gate-service.yaml. */}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -5,10 +8,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
-    app: requests-proxy
+    app: egress-gate
 spec:
   selector:
-    app: requests-proxy
+    app: egress-gate
   ports:
     - name: http
       port: 8888

@@ -390,7 +390,7 @@ client-pvc
     hostpath       hostPath.enabled: every claim, MySQL's included, on a static
                    PV under hostPath.root.
     job-data       jobData.path: data, logs and resume on the Mac's folder,
-                   MySQL on the storage class.
+                   MySQL and the egress record on the storage class.
     storage-class  neither: every claim on the storage class.
   The two settings are refused together (tracebloc.jobDataRefusal). Nil-guarded
   for `--reuse-values` upgrades predating either key.
@@ -408,13 +408,14 @@ storage-class
 {{/*
   The hostPath a release claim's chart PV names, or "" when the claim has no
   chart PV and is on the storage class. Called as
-  (dict "root" $ "claim" "data|logs|resume|mysql"); the claim's word is also its
-  folder's name.
+  (dict "root" $ "claim" "data|logs|resume|mysql|egress-record"); the claim's
+  word is also its folder's name.
     hostPath.enabled  every claim: data on tracebloc.clientDataHostPath, the rest
                       on <hostPath.root>/<release>/<claim> (bare metal and
                       native k3s), as before.
     jobData.path      data, logs and resume on <jobData.path>/<release>/<claim>
-                      (the macOS node); mysql stays on the storage class.
+                      (the macOS node); mysql and egress-record, each with one
+                      writer the chart owns, stay on the storage class.
   The two are refused together (tracebloc.jobDataRefusal).
 */}}
 {{- define "tracebloc.claimHostPath" -}}
@@ -426,7 +427,7 @@ storage-class
 {{- else -}}
 {{- printf "%s/%s/%s" (include "tracebloc.hostPathRoot" $r) $r.Release.Name .claim -}}
 {{- end -}}
-{{- else if and $jd (ne .claim "mysql") -}}
+{{- else if and $jd (not (has .claim (list "mysql" "egress-record"))) -}}
 {{- printf "%s/%s/%s" $jd $r.Release.Name .claim -}}
 {{- end -}}
 {{- end -}}
@@ -473,6 +474,19 @@ ReadWriteOnce
 {{- .root.Values.pvcAccessMode | default (ternary "ReadWriteOnce" "ReadWriteMany" ((default dict .root.Values.hostPath).enabled | default false)) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+  The egress gate's record: the gate's own claim, one writer.
+  2Gi holds egress_record's cap (KEEP_BYTES, 1 GiB, kept to within one
+  PART_BYTES part of 64 MiB) with room for the filesystem's own overhead.
+*/}}
+{{- define "tracebloc.egressRecordPvc" -}}
+{{ include "tracebloc.fullname" . }}-egress-record
+{{- end }}
+
+{{- define "tracebloc.egressRecordPvName" -}}
+{{ include "tracebloc.fullname" . }}-egress-record-pv
+{{- end }}
 
 {{- define "tracebloc.clientLogsPvc" -}}
 client-logs-pvc
@@ -762,30 +776,33 @@ read it here, so the monitor can only ever get the plugin's class. Nil-safe for
 {{- end }}
 
 {{/*
-  Name of the requests-proxy Deployment. ONE definition, because #569 gave it a
-  second consumer: image-refresh reconciles it by name with `kubectl set image`,
-  so a rename that reached only the Deployment would leave the CronJob patching
-  a workload that does not exist — failing the tick, freezing the digest record,
-  and eventually tripping the shared flap lockout for every control-plane image.
+  Name of the egress gate's Deployment, which took over the
+  requests-proxy's workload. ONE definition: image-refresh reconciles it by name
+  with `kubectl set image` and tracebloc.controlPlaneSeedDigest reads it back, so
+  a rename that reached only the Deployment would leave the CronJob patching a
+  workload that does not exist, freezing the digest record and tripping the
+  shared flap lockout for every control-plane image.
 
-  This is the third instance on #569 of one side of a two-sided contract moving
-  without the other (the requests-proxy digest pin and the resource-monitor pin
-  signal were the first two, both found in review). Same remedy: collapse to a
-  single definition rather than keep two literals in sync by hand.
-
-  The jobs-manager Deployment has the same shape — image-refresh's
-  DEPLOYMENT_NAME re-derives `<release>-jobs-manager` with its own printf, and
-  five other call sites spell it out too (NOTES.txt, the PDB,
-  tracebloc.serviceAccountName, ...). Unifying THAT is a mechanical refactor
-  across templates this change does not otherwise touch, so it is deliberately
-  left for its own PR; a contract test pins the two sides here in the meantime.
+  The gate keeps the requests-proxy's image key (`images.requestsProxy`,
+  `resources.requestsProxy`, the image-refresh REQUESTS_PROXY_* settings), so an
+  override stored by `--reuse-values` keeps applying to the workload it meant.
 */}}
-{{- define "tracebloc.requestsProxyName" -}}
-{{ include "tracebloc.fullname" . }}-requests-proxy
+{{- define "tracebloc.egressGateName" -}}
+{{ include "tracebloc.fullname" . }}-egress-gate
 {{- end }}
 
 {{/*
-  Whether the image-refresh CronJob has anything to do. When ALL THREE
+  The egress gate's read-only record port (egress_record.create_record_app).
+  Reached only through the Kubernetes API's service proxy: the gate's
+  NetworkPolicy admits no pod to it (egress-gate-network-policy.yaml).
+*/}}
+{{- define "tracebloc.egressRecordPort" -}}
+8889
+{{- end }}
+
+{{/*
+  Whether the image-refresh CronJob renders: chosen for this edge
+  (tracebloc.imageRefreshChosen) and something left to do. When ALL THREE
   managed images (jobs-manager, pods-monitor, resource-monitor) are
   digest-pinned, the operator has explicitly opted into reproducible
   pinning for every image this CronJob would refresh, so we render
@@ -842,8 +859,33 @@ true
 {{- end -}}
 {{- end }}
 
-{{- define "tracebloc.imageRefreshEnabled" -}}
+{{/*
+tracebloc.imageRefreshChosen -- "true" when imageRefresh.enabled asks for the
+CronJob on this edge, over the vocabulary values.schema.json admits:
+
+  true / "true"     on, any stage
+  false / "false"   off, any stage
+  "" / absent       AUTO: on iff tracebloc.clientEnv is not prod
+
+A prod edge never re-images its control plane from a floating tag: its images
+are the chart's pins (images.prodDigests), and a new build arrives as the next
+chart. Anything the schema does not admit reads as AUTO.
+*/}}
+{{- define "tracebloc.imageRefreshChosen" -}}
 {{- $ir := default dict .Values.imageRefresh -}}
+{{- $choice := "" -}}
+{{- if and (hasKey $ir "enabled") (not (kindIs "invalid" $ir.enabled)) -}}
+{{- $choice = $ir.enabled | toString | trim | lower -}}
+{{- end -}}
+{{- if eq $choice "true" -}}
+true
+{{- else if eq $choice "false" -}}
+{{- else if ne (include "tracebloc.clientEnv" .) "prod" -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{- define "tracebloc.imageRefreshEnabled" -}}
 {{/*
   Per-image pin signal (means "skip auto-refresh for this image"):
   jobs-manager / pods-monitor are pinned when tracebloc.pinFor HONOURS their
@@ -877,7 +919,7 @@ true
   requests-proxy must get its own entry in this test.
 */}}
 {{- $rmPinned := include "tracebloc.resourceMonitorRefreshPinned" . -}}
-{{- if not $ir.enabled -}}
+{{- if not (include "tracebloc.imageRefreshChosen" .) -}}
 {{- else if and $jmPinned $pmPinned $rmPinned -}}
 {{- else -}}
 true
@@ -923,9 +965,10 @@ true
     3. Otherwise -> Always. No reconcile, no pin, so a floating tag plus a
        restart is the ONLY way that edge can ever move. This is exactly the
        pre-#569 behaviour, kept for exactly the edges that still depend on it:
-       mirror installs (sync the mirror, restart) and `imageRefresh.enabled:
-       false` (restart manually), which is what values.schema.json has always
-       promised those operators.
+       mirror installs (sync the mirror, restart) and edges where image-refresh
+       is off -- prod by default, or `imageRefresh.enabled: false` -- (restart
+       manually), which is what values.schema.json has always promised those
+       operators.
 
   The trade is deliberate and worth stating plainly: offline-restart safety is
   delivered precisely where the digest reconcile can deliver updates. An edge
@@ -1902,7 +1945,7 @@ Args: (dict "image" <jobsManager|podsMonitor|requestsProxy|resourceMonitor> "roo
 {{- $name := printf "%s-jobs-manager" (include "tracebloc.fullname" $root) -}}
 {{- $container := "api" -}}
 {{- if eq $imgKey "podsMonitor" -}}{{- $container = "pods-monitor-container" -}}{{- end -}}
-{{- if eq $imgKey "requestsProxy" -}}{{- $name = include "tracebloc.requestsProxyName" $root -}}{{- $container = "proxy" -}}{{- end -}}
+{{- if eq $imgKey "requestsProxy" -}}{{- $name = include "tracebloc.egressGateName" $root -}}{{- $container = "gate" -}}{{- end -}}
 {{- if eq $imgKey "resourceMonitor" -}}{{- $kind = "DaemonSet" -}}{{- $name = include "tracebloc.resourceMonitorName" $root -}}{{- $ns = $root.Values.nodeAgents.namespace.name -}}{{- $container = "tracebloc-resource-monitor" -}}{{- end -}}
 {{- $wl := lookup "apps/v1" $kind $ns $name -}}
 {{- if $wl -}}

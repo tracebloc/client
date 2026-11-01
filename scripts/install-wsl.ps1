@@ -2329,7 +2329,6 @@ $CoreSettingsNotUsed = [ordered]@{
   TRACEBLOC_STORAGE_MODE      = 'the tracebloc WSL distro keeps datasets inside its node'
   TRACEBLOC_HOST_DATA_DIR     = "tracebloc keeps its data on the tracebloc WSL distro's own disk"
   TRACEBLOC_HOST_DATASET_DIR  = 'a separate dataset folder is not supported on Windows yet'
-  TRACEBLOC_ALLOW_NETWORK_FS  = "tracebloc keeps its data on the tracebloc WSL distro's own disk"
   TRACEBLOC_SKIP_REBOOT_PROMPT = 'nothing installs a GPU driver in the tracebloc WSL distro, so there is no reboot to skip'
 }
 
@@ -2916,7 +2915,12 @@ function ConvertTo-SanitizedInput {
 # answer that was only residue counts as no answer.
 function Get-ClientName {
   $name = (ConvertTo-SanitizedInput -Value "$env:TRACEBLOC_CLIENT_NAME").Trim()
-  if ($name) { return $name }
+  if ($name) {
+    if (Test-AllDigitName $name) {
+      throw "A name needs at least one letter. Set TRACEBLOC_CLIENT_NAME to a name that has one, then run this installer again."
+    }
+    return $name
+  }
   if (-not (Test-BootstrapCanPrompt)) {
     throw "A name for this machine is needed to register it, and nobody at this console can be asked. Set TRACEBLOC_CLIENT_NAME, then run this installer again."
   }
@@ -2928,6 +2932,10 @@ function Get-ClientName {
   for ($i = 0; $i -lt 3; $i++) {
     Write-Host $ask -NoNewline
     $name = (ConvertTo-SanitizedInput -Value "$(Read-Host)").Trim()
+    if ($name -and (Test-AllDigitName $name)) {
+      Write-Host "  A name needs at least one letter."
+      continue
+    }
     if ($name) { return $name }
     if ($default) { return $default }
   }
@@ -2941,11 +2949,26 @@ function Get-HostComputerName { [Environment]::MachineName }
 # read, the CLI's slug.Slugify (NFKD to ASCII, lowercase, every run of other characters
 # one '-', none at either end, 63 at most); provision.sh's _client_name_default.
 function Get-DefaultClientName {
-  $n = "$(Get-HostComputerName)".Normalize([Text.NormalizationForm]::FormKD)
+  $n = ConvertTo-ClientNameSlug "$(Get-HostComputerName)"
+  if ($n -and (Test-AllDigitName $n)) { $n = ConvertTo-ClientNameSlug "machine-$n" }
+  return $n
+}
+
+# The CLI's slug.Slugify of a name, as provision.sh's _name_slug.
+function ConvertTo-ClientNameSlug {
+  param([string]$Name)
+  $n = $Name.Normalize([Text.NormalizationForm]::FormKD)
   $n = -join @($n.ToCharArray() | Where-Object { [int]$_ -lt 128 })
   $n = ($n.ToLowerInvariant() -replace '[^a-z0-9]+', '-').Trim('-')
   if ($n.Length -gt 63) { $n = $n.Substring(0, 63).TrimEnd('-') }
   return $n
+}
+
+# True when the name's slug is only digits: its namespace would be a number, which the
+# chart's labels render unquoted and Kubernetes refuses. provision.sh's _name_all_digits.
+function Test-AllDigitName {
+  param([string]$Name)
+  return ((ConvertTo-ClientNameSlug $Name) -match '^[0-9]+$')
 }
 
 # provision.sh's _machine_labels: TRACEBLOC_MACHINE_NAME / TRACEBLOC_CLIENT_PROVIDER,
@@ -3266,7 +3289,7 @@ function Get-HostClientCredential {
       Write-Host ""
       throw "Refusing to register this machine without verifying what's already on it. Run this installer again."
     }
-    $name = (ConvertTo-SanitizedInput -Value "$env:TRACEBLOC_CLIENT_NAME").Trim()
+    $name = ''
     if ($plan.Action -ne 'mint' -and $plan.Namespace) {
       if ($plan.Action -eq 'adopt') {
         Info "Found your secure environment '$($plan.Name)' - it's already registered for this machine."
@@ -3274,8 +3297,10 @@ function Get-HostClientCredential {
         Info "Found your secure environment '$($plan.Name)' - reconnecting it to this machine's new cluster."
       }
       # The name only satisfies the required --name: a reuse keeps the registered one.
+      $name = (ConvertTo-SanitizedInput -Value "$env:TRACEBLOC_CLIENT_NAME").Trim()
       if (-not $name) { $name = $plan.Namespace }
     }
+    # A name a client is minted under meets Get-ClientName's refusals, TRACEBLOC_CLIENT_NAME too.
     if (-not $name) { $name = Get-ClientName }
     $labels = Get-MachineLabels -Action $plan.Action
 

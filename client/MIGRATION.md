@@ -2,6 +2,70 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## The outbound gate replaces the requests-proxy
+
+**What changed.** The `<release>-requests-proxy` Deployment is gone. In its place
+the `<release>-egress-gate` Deployment runs the outbound gate: the one service a
+training sends its results through. It checks each message against the list of
+what may leave and keeps a record on the machine of every message, in a new 2Gi
+claim, `<release>-egress-record`. It runs in report mode
+(`egressGate.mode: report`): nothing is refused yet, and a message that is not on
+the list is sent and recorded.
+
+The Service `requests-proxy-service` stays, and now selects the gate's pods, so a
+training that was running during the upgrade keeps sending. The new Service
+`egress-gate` carries the same port and the record's read-only port, `record`.
+No pod can connect to the record port: the gate's NetworkPolicy admits only its
+send port, and the owner reads the record through the Kubernetes API.
+
+`images.requestsProxy` and `resources.requestsProxy` keep their names and now
+pin and size the gate's `gate` container. `egressGate.record.resources` sizes the
+`record` container, which requests nothing by default.
+
+**What you have to do: nothing.** On a cluster where the Kubernetes API server
+does not run on the node of the gate's pod and the CNI enforces NetworkPolicy,
+the API server cannot reach the record port either: reading the record needs an
+ingress rule for the API server's addresses.
+
+**Upgrading with plain `--reuse-values`** works too: when the stored values have
+no `egressGate` keys, the chart renders the same defaults.
+
+## The image-refresh CronJob is off on prod
+
+**What changed.** `imageRefresh.enabled` is now `""`, which means: off where
+`env.TRACEBLOC_ENV` (or the legacy `env.CLIENT_ENV`) resolves to prod, every
+spelling of it included (`prod`, `production`, or unset), and on for `dev` and
+`stg`. `true` and `false` still switch it on or off on any stage.
+
+A prod secure environment runs the control-plane images its chart version names
+(`images.prodDigests`), and nothing re-images them between chart releases: a new
+build reaches it as the next chart. On a published chart with the digests in
+place, nothing changes, because the CronJob had nothing to refresh there and was
+not rendered.
+
+**Where you notice it on prod.** An image no digest pin covers: an
+`images.<image>.digest` pin the chart ignores (resolved on another registry),
+`images.prodDigests=null`, or a chart packaged from git. Before, the CronJob
+came back and re-pinned that image from the live registry every 15 minutes. Now
+the image runs its tag with `imagePullPolicy: Always` and moves when its pod
+restarts, and `helm install/upgrade` says so in its notes.
+
+**What you have to do: nothing.** `dev` and `stg` secure environments keep the
+CronJob.
+
+**To keep the CronJob on a prod secure environment**, set
+`imageRefresh.enabled: true`. It is user-supplied, so the hourly auto-upgrade
+keeps it:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> \
+  --reset-then-reuse-values --set imageRefresh.enabled=true
+```
+
+**Upgrading with plain `--reuse-values`** keeps the value the release already
+stored, so the CronJob stays where it rendered. `--reset-then-reuse-values`,
+which the auto-upgrade runs, picks up the new default.
+
 ## `ingestRunToken` is on for `stg`
 
 **What changed.** `ingestRunTokenByEnv.stg` is now `true`; `dev` stays `true`
@@ -543,9 +607,10 @@ helm upgrade <release> tracebloc/client -n <namespace> --reset-then-reuse-values
 ```
 
 **Break-glass: float one edge again.** `images.prodDigests=null` clears the map:
-every control-plane image floats on its tag and the `image-refresh` CronJob comes
-back. It is user-supplied, so the hourly auto-upgrade keeps it until you remove
-it:
+every control-plane image floats on its tag. The `image-refresh` CronJob comes
+back only with `imageRefresh.enabled=true` as well (it is off on prod; see "The
+image-refresh CronJob is off on prod"). It is user-supplied, so the hourly
+auto-upgrade keeps it until you remove it:
 
 ```bash
 helm upgrade <release> tracebloc/client -n <namespace> \

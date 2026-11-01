@@ -116,18 +116,19 @@ spec:
       ports:
         - port: 3306
           protocol: TCP
-    # 4. requests-proxy — training pods POST epoch results / FLOPs to the
-    #    in-namespace requests-proxy on 8888 (so they never hold Service Bus
-    #    credentials). Rule 2 blocks this ClusterIP egress, so re-permit it
-    #    explicitly, exactly like MySQL above. Without this rule every
-    #    experiment CrashLoopBackOffs at the first epoch finalize with
-    #    "requests-proxy-service:8888 ... Connection refused" (client#196).
-    #    Service selector + port: templates/requests-proxy-service.yaml
-    #    (app=requests-proxy, 8888).
+    # 4. the egress gate — training pods POST epoch results / FLOPs to the
+    #    in-namespace gate on 8888, through its requests-proxy-service alias (so
+    #    they never hold Service Bus credentials). Rule 2 blocks this ClusterIP
+    #    egress, so re-permit it explicitly, exactly like MySQL above. Without
+    #    this rule every experiment CrashLoopBackOffs at the first epoch
+    #    finalize with "requests-proxy-service:8888 ... Connection refused"
+    #    (client#196). The send port only, never the record port.
+    #    Service selector + port: templates/egress-gate-service.yaml
+    #    (app=egress-gate, 8888).
     - to:
         - podSelector:
             matchLabels:
-              app: requests-proxy
+              app: egress-gate
       ports:
         - port: 8888
           protocol: TCP
@@ -135,7 +136,7 @@ spec:
     # 5. egress gateway — training pods reach the in-cluster squid egress gateway
     #    (egress-proxy-service) for allowlisted external HTTPS, used once the
     #    external-HTTPS rule (rule 2) is dropped. Re-permitted explicitly like MySQL /
-    #    requests-proxy above (rule 2's `except` blocks ClusterIP egress).
+    #    the egress gate above (rule 2's `except` blocks ClusterIP egress).
     - to:
         - podSelector:
             matchLabels:

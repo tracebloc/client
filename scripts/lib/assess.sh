@@ -43,10 +43,10 @@ TB_FORCE_REINSTALL="${TRACEBLOC_FORCE_REINSTALL:-${TB_FORCE_REINSTALL:-0}}"
 # _assess_workload_ready NS — are ALL the client's core workloads Ready in
 # namespace NS? "Ready" MUST match the installer's OWN definition, so this
 # iterates the SAME deployment set as wait_for_client_ready (summary.sh) via the
-# shared _client_workloads — mysql-client + jobs-manager + requests-proxy, READ
+# shared _client_workloads — mysql-client + jobs-manager + egress-gate, READ
 # from the release rather than rebuilt from the namespace (backend#2888), so an
 # overridden release is judged on its real Deployments. A machine with
-# jobs-manager up but requests-proxy (training egress) or mysql-client down is
+# jobs-manager up but egress-gate (training egress) or mysql-client down is
 # NOT healthy, and must reconcile rather than be told "already set up".
 # Read-only + bounded via kubectl --request-timeout, so a stopped/unreachable API
 # returns quickly instead of hanging. A Deployment is Ready when it reports >=1
@@ -506,8 +506,9 @@ assess_existing_install() {
       # Only the truly-empty machine gets a first-time header; a cluster that
       # merely lacks a release proceeds without ceremony.
       if [[ "$INSTALL_STATE_REASON" == "no-cluster" ]]; then
-        info "Setting up your secure environment on this machine for the first time."
-        echo ""; echo ""
+        # e2e reads it on a re-run's repair (tb_machine_lines); a person sees step a begin.
+        tb_machine_lines info "Setting up your secure environment on this machine for the first time."
+        tb_machine_lines echo ""; tb_machine_lines echo ""
       fi
       return 0               # today's normal flow
       ;;

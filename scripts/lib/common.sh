@@ -375,6 +375,69 @@ tb_machine_lines() {
     "$@"
   fi
 }
+
+# The command a person types to install, and to run the installer again;
+# TRACEBLOC_INSTALL_CMD (the tuning knob TB_INSTALL_CMD) replaces it where it is set.
+_TB_RERUN_CMD='bash <(curl -fsSL https://tracebloc.io/i.sh)'
+
+# ── How a failed run ends ────────────────────────────────────────────────────
+#  install_cleanup ends every failed run with one block (tb_end_failed): the ✖ line,
+#  what to do with its command on its own line, and where the log is. The site that
+#  decides the failure says what to do, right before it ends the run:
+#    tb_fail_next TEXT [CMD]  TEXT (lines split on \n), then CMD under it: the install
+#                             command when CMD is not given, none when it is "".
+#    tb_fail_head TEXT        the ✖ line, in place of "Setup didn't finish".
+#    tb_fail_firm             the remedy set stands where a later stop would say its own
+#                             (preflight_sudo's no sudo).
+#  A refusal that says nothing (TB_EXIT_REFUSED, no tb_fail_next) ends with its own line.
+_TB_FAIL_HEAD=""; _TB_FAIL_NEXT=""; _TB_FAIL_CMD=""; _TB_FAIL_SET=""; _TB_FAIL_FIRM=""
+tb_fail_next() {
+  _TB_FAIL_NEXT="$1"; _TB_FAIL_SET=1
+  if [[ $# -ge 2 ]]; then _TB_FAIL_CMD="$2"; else _TB_FAIL_CMD="${TB_INSTALL_CMD:-$_TB_RERUN_CMD}"; fi
+}
+tb_fail_head()  { _TB_FAIL_HEAD="$1"; }
+tb_fail_firm()  { _TB_FAIL_FIRM=1; }
+tb_fail_clear() { _TB_FAIL_HEAD=""; _TB_FAIL_NEXT=""; _TB_FAIL_CMD=""; _TB_FAIL_SET=""; _TB_FAIL_FIRM=""; }
+tb_end_failed() {
+  # The defaults sit in variables: an apostrophe inside "${v:-…}" breaks bash 3.2's parse.
+  local head="Setup didn't finish" next="It's safe to run the installer again:" cmd="${TB_INSTALL_CMD:-$_TB_RERUN_CMD}" l logf
+  [[ -z "$_TB_FAIL_HEAD" ]] || head="$_TB_FAIL_HEAD"
+  [[ -z "$_TB_FAIL_NEXT" ]] || next="$_TB_FAIL_NEXT"
+  [[ -z "$_TB_FAIL_SET" ]] || cmd="$_TB_FAIL_CMD"
+  # Two blank lines before the rule, as before every section. Before the first step and
+  # any ✖ line, the download block's own two are the last thing on screen (_TB_END_GAP).
+  [[ -z "${_TB_END_GAP:-}" ]] || { echo ""; echo ""; }
+  tb_rule
+  echo ""
+  echo -e "  ${TB_ERR}✖${RESET} ${head}"
+  echo ""
+  next="${next//\\n/$'\n'}"
+  while IFS= read -r l; do if [[ -n "$l" ]]; then printf '  %s\n' "$l"; else echo ""; fi; done <<<"$next"
+  [[ -z "$cmd" ]] || echo -e "    ${TB_CMD}${cmd}${RESET}"
+  if [[ -n "${LOG_FILE:-}" && -f "$LOG_FILE" ]]; then
+    logf="$LOG_FILE"
+    if [[ -n "${HOME:-}" && "$logf" == "$HOME"/* ]]; then logf="~${logf#"$HOME"}"; fi
+    echo ""
+    echo -e "  ${TB_LABEL}Log:${RESET} ${logf}"
+  fi
+  echo ""
+  tb_rule
+}
+
+# error_said PERSON MACHINE -- error, said twice: PERSON is the ✖ line a person reads
+# (none when empty: the lines that say why are on screen already), MACHINE the whole
+# reason, the one recorded, which machines and the install log read (tb_machine_lines).
+error_said() {
+  if declare -F _record_err >/dev/null 2>&1; then
+    _record_err "${BASH_SOURCE[1]:-?}:${BASH_LINENO[0]:-?}" "error: $2" 1
+  fi
+  tb_live_stop
+  tb_machine_lines _tb_err_line "$2"
+  if [[ -n "$1" ]]; then _tb_err_line "$1"; _TB_END_GAP=1; fi
+  exit 1
+}
+_tb_err_line() { echo -e "  ${TB_ERR}✖ $*${RESET}" >&2; }
+_TB_END_GAP=""
 # error MESSAGE — print and exit 1.
 #
 # It records itself first, and that is not decoration. `exit` fires NO ERR trap,
@@ -393,6 +456,7 @@ error() {
   fi
   tb_live_stop
   echo -e "  ${TB_ERR}✖ $*${RESET}" >&2
+  _TB_END_GAP=1
   exit 1
 }
 step()           { echo -e "\n${TB_HEADING}Step $1/$2${RESET}  ${BOLD}$3${RESET}"; }
@@ -583,6 +647,8 @@ step_header()    {
     telemetry_phase_begin "$letter" || true
   fi
   n=$(( $(printf '%d' "'$letter") - 96 ))
+  # From the first step on, a failed run's end block opens with the gap a section has.
+  _TB_END_GAP=1
   if [[ "$total" == 1 ]]; then
     echo -e "  ${TB_HEADING}$2${RESET}"; echo ""
   else
@@ -938,7 +1004,7 @@ _chart_version() {
 # scripts/tests/client-workloads-read-not-built.sh holds each right-hand side to
 # exactly one Deployment in the rendered chart, with and without an override.
 # Keep this on ONE line of role=app words.
-_TB_CLIENT_WORKLOAD_ROLES="mysql-client=mysql-client jobs-manager=manager requests-proxy=requests-proxy"
+_TB_CLIENT_WORKLOAD_ROLES="mysql-client=mysql-client jobs-manager=manager egress-gate=egress-gate"
 
 # _client_workloads_from_rows ROWS — the pure half: pick each role's Deployment
 # out of `APP NAME` rows (what the kubectl read below prints) and print
@@ -963,7 +1029,7 @@ _client_workloads_from_rows() {
 
 # _client_workloads NS [TIMEOUT] [RELEASE] — the client's core workload
 # Deployments in namespace NS, as `ROLE NAME` lines in role order (mysql-client,
-# jobs-manager, requests-proxy). RELEASE defaults to NS: the installer names the
+# jobs-manager, egress-gate). RELEASE defaults to NS: the installer names the
 # release after the namespace (scripts/tests/release-name-equals-namespace.sh).
 # ONE bounded read (TIMEOUT, default 10s); a failed or unanswered read returns 1,
 # the same as a missing role. custom-columns rather than jsonpath: the retired
@@ -1476,8 +1542,10 @@ export -f sudo _real_sudo _have_sudo_bin tb_root tb_root_n tb_root_as tb_root_pl
 #  Call once at the start of install_macos / install_linux. Establishes that the
 #  privileged steps below can run, and (when a password is needed) primes the
 #  sudo credential once so later steps behind spinners don't re-prompt.
-# preflight_sudo [PURPOSE] -- PURPOSE finishes "tracebloc needs your password once
-# to ...": by default, setting up native k3s and the system tools it needs.
+# preflight_sudo [PURPOSE [REMEDY]] -- PURPOSE finishes "tracebloc needs your password
+# once to ...": by default, setting up native k3s and the system tools it needs.
+# REMEDY is what the machine line of a refusal (no sudo, or a failed password) says
+# to do.
 preflight_sudo() {
   # --print runs nothing as root, so it asks for no password.
   if tb_root_planning; then
@@ -1490,9 +1558,11 @@ preflight_sudo() {
     return 0
   fi
   # Not root AND no sudo binary — the honest, actionable failure (previously
-  # conflated with "no sudo access").
+  # conflated with "no sudo access"). The caller's REMEDY joins the machine line:
+  # native k3s's names prepare-host, the way forward for a user who cannot sudo.
   if ! _have_sudo_bin; then
-    error "This machine needs administrator rights to install k3s and system tools, but you are not root and sudo isn't installed. Re-run as root, or install sudo (e.g. apt-get install sudo) and try again."
+    [[ -n "$_TB_FAIL_FIRM" ]] || tb_fail_next "Install sudo, or run the installer as root:"
+    error_said "sudo isn't installed on this machine" "This machine needs administrator rights to install k3s and system tools, but you are not root and sudo isn't installed. Re-run as root, or install sudo (e.g. apt-get install sudo) and try again.${2:+ $2}"
   fi
   # Sudo present and already usable without a password (cached / NOPASSWD).
   if _tb_root_credential cached; then
@@ -1500,9 +1570,14 @@ preflight_sudo() {
   fi
   # Prompt once, then keep the credential warm. One line, then the system's own
   # "Password:" prompt.
-  hint "tracebloc needs your password once to ${1:-set up k3s and a few tools}."
+  hint "tracebloc needs your password once to ${1:-install system tools}."
   echo ""
-  _tb_root_credential prime || error "Could not obtain administrator privileges (sudo authentication failed). ${2:-Re-run as a user allowed to sudo, or as root.}"
+  if ! _tb_root_credential prime; then
+    # The caller may have said what to do already (tb_fail_next), as native k3s does.
+    [[ -n "$_TB_FAIL_SET" ]] || tb_fail_next "Run the installer again as a user who can use sudo:"
+    error_said "Couldn't get administrator rights" "Could not obtain administrator privileges (sudo authentication failed). ${2:-Re-run as a user allowed to sudo, or as root.}"
+  fi
+  echo ""
   _tb_root_credential keepalive
 }
 
@@ -2191,6 +2266,36 @@ tb_exit_rc() {
   if [[ "$1" -eq 0 && "${_tb_done:-0}" != 1 ]]; then echo 1; else echo "$1"; fi
 }
 
+# _tb_failed_footer -- a failed run's end as machines and the install log read it:
+# the failing site (the command text stays in the log, never on screen: #577), the
+# log, and the support bundle. A person reads tb_end_failed.
+_tb_failed_footer() {
+  echo ""
+  warn "Installation did not complete."
+  if [[ -n "${TB_ERR_CODE:-}" ]]; then
+    hint "Stopped at ${TRACEBLOC_ERR_LOC} (exit ${TB_ERR_CODE})."
+  fi
+  [[ -z "${LOG_FILE:-}" ]] || hint "Check the install log: $LOG_FILE"
+  hint "This installer is safe to re-run — just try again."
+  hint "If it keeps failing, re-run with --diagnose and send the bundle to tracebloc support."
+}
+
+# tb_end_of_run RC -- how a run that exits RC ends on screen. A failure ends with
+# tb_end_failed, unless print_summary already reported the outcome
+# (TRACEBLOC_CLIENT_STATE). A refusal (TB_EXIT_REFUSED) ends with it only when it said
+# what to do (tb_fail_next): "run the installer again" would send the user straight
+# back into the same refusal.
+tb_end_of_run() {
+  [[ "$1" -ne 0 && -z "${TRACEBLOC_CLIENT_STATE:-}" ]] || return 0
+  if [[ -z "${TB_EXIT_REFUSED:-}" ]]; then
+    tb_machine_lines _tb_failed_footer
+    tb_end_failed
+  elif [[ -n "$_TB_FAIL_SET" ]]; then
+    tb_end_failed
+  fi
+  return 0
+}
+
 # ── Cleanup on exit ──────────────────────────────────────────────────────────
 # install-k8s.sh wires it as `trap 'install_cleanup; exit "${_TB_EXIT_RC:-1}"' EXIT`:
 # the explicit exit is what makes the status tb_exit_rc's on bash 3.2 too.
@@ -2244,23 +2349,7 @@ install_cleanup() {
     [[ -n "${LOG_FILE:-}" ]] && hint "Log: $LOG_FILE"
     hint "Nothing is broken — this installer is safe to re-run."
   elif [[ $exit_code -ne 0 ]]; then
-    # If print_summary already reported a specific outcome (TRACEBLOC_CLIENT_STATE set),
-    # don't tack on a second, generic "did not complete" message. Nor after a
-    # refusal (TB_EXIT_REFUSED): its own line says what to change, and "just try
-    # again" would send the user straight back into the same refusal.
-    if [[ -z "${TRACEBLOC_CLIENT_STATE:-}" && -z "${TB_EXIT_REFUSED:-}" ]]; then
-      echo ""
-      warn "Installation did not complete."
-      # Name the failing site on screen too. The command text stays in the log
-      # only: it is unexpanded, but it is still installer internals, and the
-      # user is shown a reason, never a stack trace (#577).
-      if [[ -n "${TB_ERR_CODE:-}" ]]; then
-        hint "Stopped at ${TRACEBLOC_ERR_LOC} (exit ${TB_ERR_CODE})."
-      fi
-      [[ -n "${LOG_FILE:-}" ]] && hint "Check the install log: $LOG_FILE"
-      hint "This installer is safe to re-run — just try again."
-      hint "If it keeps failing, re-run with --diagnose and send the bundle to tracebloc support."
-    fi
+    tb_end_of_run "$exit_code"
   fi
 
   # One structured outcome event per install (backend#1907). Emitted LAST, from
@@ -2608,7 +2697,18 @@ refuse_unsupported_mac() {
     exit 0
   fi
   TB_EXIT_REFUSED=1
-  error "$why"
+  case "$verdict" in
+    intel)
+      tb_fail_head "This Mac has an Intel processor · tracebloc needs Apple silicon"
+      tb_fail_next "Nothing was changed on this Mac." "" ;;
+    old\ *)
+      tb_fail_head "This Mac runs macOS ${verdict#old } · tracebloc needs macOS ${TB_MACOS_FLOOR_MAJOR}"
+      tb_fail_next "Update macOS, then run the installer again:" ;;
+    *)
+      tb_fail_head "This installer couldn't read this Mac's macOS version"
+      tb_fail_next "tracebloc needs Apple silicon and macOS ${TB_MACOS_FLOOR_MAJOR} or later.\nNothing was changed on this Mac." "" ;;
+  esac
+  error_said "" "$why"
 }
 
 # ── Re-run resolution (1.1f) ─────────────────────────────────────────────────
@@ -3278,54 +3378,44 @@ print_banner() {
 # ── Help ─────────────────────────────────────────────────────────────────────
 print_help() {
   cat <<'HELP'
-tracebloc — client setup
+tracebloc installer
 
-  Set up a secure compute environment on your machine
-  and connect it to the tracebloc network.
+  Sets up your secure environment on this machine
+  and connects it to tracebloc.
 
 Usage:
-  curl -fsSL https://tracebloc.io/i.sh | bash
-  ./install-k8s.sh [--help] [--diagnose] [--force] [--reuse-data|--wipe-data|--data-dir=PATH]
+  bash <(curl -fsSL https://tracebloc.io/i.sh) [options]
+  ./install-k8s.sh [options]
 
-Commands:
-  --diagnose     Collect a redacted support bundle (logs + cluster/host status)
-                 into ~/.tracebloc/tracebloc-diagnose-<timestamp>.tgz and exit.
-                 Run this if something went wrong, then send the file to support
-                 (passwords and proxy credentials are removed before it is written).
-  --force        Skip the "already set up" check and re-run every step. Use this
-  --reinstall    to force a full reinstall on a machine that is already set up.
-                 (Same effect as TRACEBLOC_FORCE_REINSTALL=1 for curl | bash.)
+Options:
+  --diagnose      Save a support bundle to ~/.tracebloc and exit.
+                  Send it to tracebloc support if something went wrong.
+                  Passwords are removed before it is written.
+  --force         Run every step again on a machine that is already set up.
+  --reinstall     The same as --force.
 
-Leftover data (a new install onto a machine that still holds old data):
-  By default the installer STOPS and asks rather than silently adopting it.
-  --reuse-data   Keep and adopt the existing data (non-interactive).
-  --wipe-data    Delete the existing data and start fresh (non-interactive).
-  --data-dir=P   Install into directory P instead (leaves old data untouched).
-                 (Bypass the guard entirely with TRACEBLOC_SKIP_LEFTOVER_GUARD=1.)
+Data from an earlier install:
+  The installer stops and asks what to do with it, unless you say:
+  --reuse-data    Keep it.
+  --wipe-data     Delete it and start fresh.
+  --data-dir=DIR  Install into DIR and leave it alone.
 
-Advanced configuration (environment variables; each one's older name without
-the TRACEBLOC_ prefix -- TB_STORAGE_MODE for TRACEBLOC_STORAGE_MODE -- still works):
-  TRACEBLOC_CLUSTER_NAME   Cluster name     (default: tracebloc)
-  TRACEBLOC_NAMESPACE  Secure-environment name  (default: tracebloc; legacy: TB_NAMESPACE)
-  TRACEBLOC_HELM_VERSION   Helm release tag (default: v4.2.3; "latest" resolves at install time)
-  TRACEBLOC_STORAGE_MODE   node-local (default) or hostpath
-  TRACEBLOC_HOST_DATASET_DIR  Separate dataset directory, e.g. a network mount (hostpath only)
-  TRACEBLOC_HOST_DATA_DIR  Persistent data directory  (default: ~/.tracebloc; legacy: HOST_DATA_DIR)
-                 Must be on a LOCAL disk — NFS/CIFS/SMB is rejected (the database
-                 corrupts on network storage). TRACEBLOC_ALLOW_NETWORK_FS=1 overrides.
-
-Example use case:
-  After a connected install, the tracebloc CLI you signed in with sets up your
-  account's example use case, once per account. Set TRACEBLOC_SKIP_EXAMPLE=1 to
-  skip it.
+Advanced settings (environment variables; the older names without
+the TRACEBLOC_ prefix still work):
+  TRACEBLOC_HOST_DATA_DIR     Where your data lives (default: ~/.tracebloc).
+                              A local disk: network storage is refused.
+  TRACEBLOC_HOST_DATASET_DIR  A separate folder for datasets (hostpath only)
+  TRACEBLOC_STORAGE_MODE      node-local (default) or hostpath
+  TRACEBLOC_NAMESPACE         Secure environment name (default: tracebloc)
+  TRACEBLOC_CLUSTER_NAME      Cluster name (default: tracebloc)
+  TRACEBLOC_HELM_VERSION      Helm release (default: v4.2.3)
+  TRACEBLOC_SKIP_EXAMPLE      Set to 1 to skip the example use case.
 
 Usage reporting:
-  This installer records ONE outcome event per run so we can see failures without
-  waiting for someone to report them: which step it reached, how long each step
-  took, the exit code, an error class, your OS and architecture, and the version.
-  It cannot record your arguments, any path, any file name, your username, your
-  hostname or your credentials — every field is a number or a value from a fixed
-  list, so there is nowhere for those to go.
+  Each run reports one event: the step it reached, how long each step
+  took, the exit code, an error class, your OS, architecture and the
+  installer version. Never your arguments, paths, file names, username,
+  hostname or credentials.
   TRACEBLOC_SKIP_TELEMETRY=1  Turn it off.
   TRACEBLOC_NO_TELEMETRY=1    Also turns it off (legacy name).
   DO_NOT_TRACK=1              Also turns it off.

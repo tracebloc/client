@@ -35,26 +35,31 @@ _nvidia_driver_not_installed() {
   fi
 }
 
-# _nvidia_driver_offered_pick FLOOR_MAJOR DEVICES -- from `ubuntu-drivers devices`
-# output, the driver to install for THIS machine's GPU, in ubuntu-drivers' own spelling
-# (`595-open`, `580-server`), or nothing (client-dev#2880). The archive can carry a
-# series ubuntu-drivers does not offer for the card, or offers only in another flavour:
-# on Ubuntu 26.04 with an RTX 4050 the archive's newest was 615, offered only as
-# 615-open and 615-server-open, so asking for nvidia:615-server and nvidia:615 installed
-# nothing. In order, at or above the floor's series:
-#   1. the driver ubuntu-drivers marks `recommended`;
-#   2. else the newest -server or -server-open (-server first within a series);
-#   3. else the newest of any flavour.
-# Below the floor only when nothing reaches it: the newest offered. Pure.
+# _nvidia_driver_offered_pick FLOOR_MAJOR DEVICES [desktop|headless] -- from
+# `ubuntu-drivers devices` output, the driver to install for THIS machine's GPU, in
+# ubuntu-drivers' own spelling (`595-open`, `580-server`), or nothing (client-dev#2880).
+# The archive can carry a series ubuntu-drivers does not offer for the card, or offers
+# only in another flavour: on Ubuntu 26.04 with an RTX 4050 the archive's newest was
+# 615, offered only as 615-open and 615-server-open, so asking for nvidia:615-server and
+# nvidia:615 installed nothing. In order, at or above the floor's series:
+#   desktop (the default): 1. the driver ubuntu-drivers marks `recommended`; 2. else
+#     the newest -server or -server-open; 3. else the newest of any flavour.
+#   headless: 1. the newest -server or -server-open (the compute driver with the long
+#     support branch and no X stack, as before #2880); 2. else `recommended`; 3. else
+#     the newest of any flavour.
+# -server comes before -server-open within a series. Below the floor only when
+# nothing reaches it: the newest offered. Pure.
 _nvidia_driver_offered_pick() {
-  printf '%s\n' "$2" | awk -v floor="$1" '
+  printf '%s\n' "$2" | awk -v floor="$1" -v mode="${3:-desktop}" '
     $1 == "driver" && $3 ~ /^nvidia-driver-[0-9]+(-server)?(-open)?$/ {
       name = $3; sub(/^nvidia-driver-/, "", name)
       n = name; sub(/-.*/, "", n); n = n + 0
       tier = 0
       if (n >= floor + 0) {
-        if ($0 ~ / recommended/) tier = 3
-        else if (name ~ /-server/) tier = 2
+        rec = ($0 ~ / recommended/); srv = (name ~ /-server/)
+        if (mode == "headless") tier = srv ? 3 : (rec ? 2 : 1)
+        else if (rec) tier = 3
+        else if (srv) tier = 2
         else tier = 1
       }
       key = tier * 100000 + n * 10 + (name ~ /-open$/ ? 0 : 1)
@@ -63,43 +68,60 @@ _nvidia_driver_offered_pick() {
     END { if (pick != "") print pick }'
 }
 
-# _nvidia_ubuntu_drivers_cmd NAME -- the ubuntu-drivers install that puts NAME in (no
-# sudo): a -server driver is asked for with --gpgpu (the headless compute install),
-# any other by its plain name.
-_nvidia_ubuntu_drivers_cmd() {
-  case "$1" in
-    *-server*) printf 'ubuntu-drivers install --gpgpu nvidia:%s' "$1" ;;
-    *)         printf 'ubuntu-drivers install nvidia:%s' "$1" ;;
-  esac
+# _nvidia_host_is_desktop -- 0 when this machine boots to a desktop: systemd's default
+# target is graphical.target (Ubuntu Desktop, a laptop), 1 otherwise (Ubuntu Server, a
+# cloud GPU VM: multi-user.target), and 1 when systemd cannot say. It decides between
+# ubuntu-drivers' recommended desktop driver and the -server compute driver
+# (_nvidia_driver_offered_pick); an unknown machine keeps the server driver, the choice
+# before client-dev#2880. Bounded: systemctl on a wedged bus must not hang the install.
+_nvidia_host_is_desktop() {
+  local target
+  has systemctl || return 1
+  target="$(_bounded "${TB_PROBE_TIMEOUT:-5}" systemctl get-default 2>/dev/null)" || return 1
+  [[ "${target%%$'\n'*}" == graphical.target ]]
 }
 
-# _nvidia_driver_went_in -- 0 when an NVIDIA driver is on this machine after the install
-# step: dpkg holds a driver package (nvidia-driver-N*, or the nvidia-headless-N* that
-# `ubuntu-drivers install --gpgpu` puts in), or the kernel has an nvidia module to load.
-# `ubuntu-drivers install` exits 0 on "No drivers found for installation"
-# (client-dev#2880), so its exit code alone never says a driver went in.
+# _nvidia_driver_went_in NAME... -- 0 when one of the drivers NAME (ubuntu-drivers'
+# spelling, `595-open`, `580-server`, `575`) is on this machine after the install step:
+# dpkg holds exactly its package, nvidia-driver-NAME, or the
+# nvidia-headless(-no-dkms)-NAME that `ubuntu-drivers install --gpgpu` puts in; or the
+# kernel's nvidia module is of NAME's series. `ubuntu-drivers install` exits 0 on "No
+# drivers found for installation" (client-dev#2880), so its exit code never says a
+# driver went in; and an older driver already on the machine (a 535 not loaded) is not
+# the one just asked for, so any other series is no answer either.
 _nvidia_driver_went_in() {
-  local pkgs=""
+  local pkgs="" name ver=""
   if has dpkg-query; then
     # dpkg-query exits 1 when one pattern matches nothing, after printing what the other
     # matched: the output is the answer, never the code.
     pkgs="$(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 'nvidia-driver-*' 'nvidia-headless-*' 2>/dev/null || true)"
-    if grep -Eq '^ii +nvidia-(driver|headless(-no-dkms)?)-[0-9]' <<<"$pkgs"; then return 0; fi
+    for name in "$@"; do
+      if grep -Eq "^ii +nvidia-(driver|headless|headless-no-dkms)-${name}\$" <<<"$pkgs"; then return 0; fi
+    done
   fi
-  has modinfo && modinfo nvidia >/dev/null 2>&1
+  if has modinfo; then
+    ver="$(modinfo -F version nvidia 2>/dev/null)" || ver=""
+    for name in "$@"; do
+      [[ -n "$ver" && "${ver%%.*}" == "${name%%-*}" ]] && return 0
+    done
+  fi
+  return 1
 }
 
 # _nvidia_ubuntu_drivers_install NAME -- ubuntu-drivers installs NAME. A -server driver
 # is asked for with --gpgpu first, then, when that put nothing in, by its plain name,
-# which `ubuntu-drivers devices` listed. Its exit code is not the verdict: the caller
+# which `ubuntu-drivers devices` listed. Each ask is added to the caller's `tried` and
+# becomes its `cmd` (the hint's command). Its exit code is not the verdict: the caller
 # reads _nvidia_driver_went_in.
 _nvidia_ubuntu_drivers_install() {
   if [[ "$1" == *-server* ]]; then
-    if tb_root ubuntu-drivers install --gpgpu "nvidia:${1}" && { tb_root_planning || _nvidia_driver_went_in; }; then
+    cmd="ubuntu-drivers install --gpgpu nvidia:${1}"; tried="'${cmd}'"
+    if tb_root ubuntu-drivers install --gpgpu "nvidia:${1}" && { tb_root_planning || _nvidia_driver_went_in "$1"; }; then
       return 0
     fi
     log "ubuntu-drivers install --gpgpu nvidia:${1} put no driver in; asking for nvidia:${1} without --gpgpu."
   fi
+  cmd="ubuntu-drivers install nvidia:${1}"; tried="${tried:+${tried} and }'${cmd}'"
   tb_root ubuntu-drivers install "nvidia:${1}"
 }
 
@@ -126,7 +148,8 @@ install_nvidia_drivers() {
   # asked, a driver must be on the machine afterwards (_nvidia_driver_went_in).
   # if/else, never `a && b || c`: a FAILED install of the package found must
   # fail here, not quietly fall through to another driver.
-  local floor_series="${TB_NVIDIA_DRIVER_FLOOR%%.*}" search pkg series failed="" offered="" devices="" cmd=""
+  local floor_series="${TB_NVIDIA_DRIVER_FLOOR%%.*}" search pkg series failed="" offered="" devices="" cmd="" tried="" mode=headless
+  local -a want=()
   # Only apt-get, dnf and pacman have a driver install here. yum and zypper hosts
   # (setup-linux.sh knows both) are told so, never told a driver went in.
   if ! has apt-get && ! has dnf && ! has pacman; then
@@ -150,16 +173,18 @@ install_nvidia_drivers() {
         (( $? == 124 )) && warn "ubuntu-drivers did not list this GPU's drivers within ${TRACEBLOC_UBUNTU_DRIVERS_TIMEOUT:-120}s — choosing the series from the package archive instead."
         devices=""
       }
-      offered="$(_nvidia_driver_offered_pick "$floor_series" "$devices")"
+      # A desktop gets ubuntu-drivers' recommended driver; a server, the -server one.
+      if _nvidia_host_is_desktop; then mode=desktop; fi
+      offered="$(_nvidia_driver_offered_pick "$floor_series" "$devices" "$mode")"
     fi
     if [[ -n "$offered" ]]; then
       series="${offered%%-*}"
-      cmd="$(_nvidia_ubuntu_drivers_cmd "$offered")"
-      log "ubuntu-drivers offers nvidia:${offered} for this GPU; installing it."
+      want=("$offered")
+      log "ubuntu-drivers offers nvidia:${offered} for this GPU (${mode} machine); installing it."
       if (( series < floor_series )); then
         warn "No NVIDIA driver ${floor_series} or newer is offered for this GPU — installing nvidia:${offered}, older than the driver tracebloc's GPU training images need (CUDA 13), so GPU training will not work on it: update it to ${floor_series} or newer when one is available, then re-run the installer."
       fi
-      _nvidia_ubuntu_drivers_install "$offered" || failed="'${cmd}' failed"
+      _nvidia_ubuntu_drivers_install "$offered" || failed="${tried} failed"
     else
       search="$(apt-cache search "^nvidia-driver-[0-9]" 2>/dev/null || true)"
       pkg="$(_nvidia_driver_pkg_pick "$floor_series" "$search")"
@@ -170,27 +195,28 @@ install_nvidia_drivers() {
         fi
       fi
       series="${pkg#nvidia-driver-}"; series="${series%%-*}"; series="${series:-$floor_series}"
-      if has ubuntu-drivers; then
-        cmd="ubuntu-drivers install --gpgpu nvidia:${series}-server"
-      else
-        cmd="apt-get install ${pkg:-nvidia-driver-${floor_series}}"
-      fi
       # The first ask's errors stay on the screen and in the log (client-dev#2880): a
-      # series it does not offer is said, not swallowed.
+      # series it does not offer is said, not swallowed. `tried` names each ask, `cmd`
+      # the last one (the hint's command), `want` the drivers they put in.
       if has ubuntu-drivers; then
+        want=("${series}-server" "$series")
+        cmd="ubuntu-drivers install --gpgpu nvidia:${series}-server"; tried="'${cmd}'"
         if ! tb_root ubuntu-drivers install --gpgpu "nvidia:${series}-server"; then
+          cmd="ubuntu-drivers install nvidia:${series}"; tried="${tried} and '${cmd}'"
           tb_root ubuntu-drivers install "nvidia:${series}"
         fi
       elif [[ -n "$pkg" ]]; then
+        cmd="apt-get install ${pkg}"; tried="'${cmd}'"; want=("${pkg#nvidia-driver-}")
         $PM_INSTALL "$pkg"
       else
+        cmd="apt-get install nvidia-driver-${floor_series}"; tried="'${cmd}'"; want=("$floor_series")
         $PM_INSTALL "nvidia-driver-${floor_series}"
       fi || failed="the NVIDIA driver package did not install"
     fi
     # An install that "succeeded" over nothing (ubuntu-drivers exits 0 on "No drivers
     # found for installation") is no install: the GPU stays off, said, with the command.
-    if [[ -z "$failed" ]] && ! tb_root_planning && ! _nvidia_driver_went_in; then
-      failed="no NVIDIA driver package is installed after '${cmd}'"
+    if [[ -z "$failed" ]] && ! tb_root_planning && ! _nvidia_driver_went_in ${want[@]+"${want[@]}"}; then
+      failed="no NVIDIA driver package is installed after ${tried}"
     fi
   elif has dnf; then
     tb_root dnf install -y epel-release 2>/dev/null || true

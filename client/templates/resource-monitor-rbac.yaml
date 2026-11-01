@@ -15,11 +15,11 @@ metadata:
   Per-node monitoring is INTRINSICALLY cluster-scoped, so the resource-monitor
   always needs a ClusterRole -- it is deliberately NOT gated on .Values.clusterScope.
   The code path that requires it:
-    * resource_monitor.py uses core_v1_api.list_pod_for_all_namespaces(
+    * TrainingInfo (training_info.py) uses core_v1_api.list_pod_for_all_namespaces(
         field_selector="spec.nodeName=<node>") to enumerate every pod on the node.
       list_pod_for_all_namespaces is a CLUSTER-SCOPED list verb that a namespaced
       Role can never satisfy (it 403s -> CrashLoopBackOff).
-    * It also read_namespaced_pod()s its OWN pod, which lives in
+    * NodeConfig (node_config.py) also read_namespaced_pod()s its OWN pod, which lives in
       .Values.nodeAgents.namespace.name (NOT .Release.Namespace), so a Role scoped
       to the release namespace would miss it too.
   This ClusterRole is strictly READ-ONLY (get/list/watch on pod/node metadata +
@@ -42,8 +42,10 @@ metadata:
     app: {{ include "tracebloc.resourceMonitorName" . }}
 {{/*
   Keep this rule matched to what the DaemonSet image actually calls. The image
-  (Node-deploy/Dockerfile) ships exactly resource_monitor.py, resource_utils.py,
-  constants.py and proxy_config.py, whose entire Kubernetes surface is:
+  (Node-deploy/Dockerfile) ships resource_monitor.py, its sibling modules
+  gpu_monitor.py, node_config.py, node_utilisation.py, training_info.py and
+  monitor_settings.py, and the shared helpers that Dockerfile lists, whose
+  entire Kubernetes surface is:
     read_namespaced_pod            -> pods            get
     list_pod_for_all_namespaces    -> pods            list
     read_node / read_node_status   -> nodes, nodes/status  get

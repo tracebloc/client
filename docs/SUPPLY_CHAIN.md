@@ -64,6 +64,7 @@ the pinned tag:
 | `manifest.sha256.sig` | `cosign sign-blob` (keyless) | authenticity of the manifest |
 | `manifest.sha256.cert` | `cosign sign-blob` (keyless) | the cert the sig verifies against |
 | `manifest.sha256.bundle` | `cosign sign-blob --bundle` | offline Sigstore bundle (sig+cert+Rekor proof) |
+| `client-<version>.tgz.bundle`, `ingestor-<version>.tgz.bundle` | `cosign sign-blob --bundle` over each packaged chart | the chart itself, beside it on the release (§2b) |
 | the ~20 sub-scripts | attached flat by basename from `gen-manifest.sh --print-files` | the privileged code the manifest hashes |
 
 Sub-script **content** is served as **release assets** too, one flat asset per
@@ -106,6 +107,22 @@ when it passes, so a release without the bundles will fail that check closed.
 `gen-manifest.sh --check` refuses a release workflow that attaches a bootstrap
 (any `.sh` / `.ps1` among the attach step's literal files) without
 `<bootstrap>.bundle`, signs it before its stamp, or never verifies the bundle.
+
+### 2b. The charts are signed too
+
+The installer and the hourly auto-upgrade install a chart from the Helm
+repository, not from the manifest, so each chart carries a signature of its own:
+`client-<version>.tgz.bundle` and `ingestor-<version>.tgz.bundle`, offline Sigstore
+bundles from the same keyless identity, attached to the release beside the chart.
+The release job signs each chart after it is packaged and checked, so the bundle
+covers the bytes the release serves, then verifies each bundle `--offline` and
+checks that a copy with one extra byte fails. Neither the installer nor the
+auto-upgrade checks the bundle yet; verify a chart yourself with the recipe in §6.
+
+`scripts/tests/release-upload-scope.bats` refuses a release workflow that attaches
+a chart without its bundle, signs a chart before the last `helm package` or after
+the chart artifact is uploaded, never verifies a bundle `--offline`, or verifies
+against an identity other than the one `install.sh` checks.
 
 ## 3. Why cosign keyless (and not minisign / gpg)
 
@@ -295,6 +312,24 @@ cosign verify-blob \
 
 Releases cut before the bootstraps were signed carry no `install.sh.bundle` or
 `install.ps1.bundle`.
+
+Verify a chart before you install it (§2b):
+
+```bash
+VERSION=${TAG#v}
+curl -fsSLO "$BASE/client-$VERSION.tgz"
+curl -fsSLO "$BASE/client-$VERSION.tgz.bundle"
+cosign verify-blob \
+  --bundle "client-$VERSION.tgz.bundle" \
+  --certificate-identity-regexp \
+    '^https://github\.com/tracebloc/(client|client-dev)/\.github/workflows/release-helm-chart\.yaml@refs/tags/v.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  --offline \
+  "client-$VERSION.tgz"
+# → "Verified OK"; then install that file: helm upgrade --install <release> "./client-$VERSION.tgz" ...
+```
+
+Releases cut before the charts were signed carry no `client-<version>.tgz.bundle`.
 
 On Windows the same `cosign verify-blob` invocation works verbatim (cosign ships
 a Windows binary); compare a sub-script's digest with

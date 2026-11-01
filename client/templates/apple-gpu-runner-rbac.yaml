@@ -14,7 +14,7 @@
   wherever the name is fixed; three cannot be:
     nodes create                  a create carries no name to pin
     pods/portforward create       a job's forwards reach whichever pod backs
-                                  MySQL, requests-proxy and the egress proxy
+                                  MySQL, the egress gate and the egress proxy
     persistentvolumes get         a job's volume names a PV made per dataset
 
   NO SECRETS. A GPU job's MySQL user comes by secretKeyRef from a Secret whose
@@ -121,7 +121,7 @@ rules:
   - apiGroups: [""]
     resources: ["pods/status"]
     verbs: ["update"]
-  # A job's three forwards, to MySQL, requests-proxy and the egress proxy:
+  # A job's three forwards, to MySQL, the egress gate and the egress proxy:
   # their pods change when a pod is replaced, so there is no name to pin.
   - apiGroups: [""]
     resources: ["pods/portforward"]

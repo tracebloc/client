@@ -493,13 +493,15 @@ _mac_ct_refuse_foreign() {
   else
     where="installed at ${theirs}, whose files are gone"
   fi
-  # A refusal: re-running changes nothing until the user stops that system, so no "try again" footer.
+  # A refusal: re-running changes nothing until the user stops that system, so the end
+  # block names the stop, never a bare "try again".
   # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
   TB_EXIT_REFUSED=1
-  warn "Another Apple container system is already running for this user, ${where}."
-  echo "  This installer does not stop a container system it did not start. To stop it and its containers, run${how}:"
-  echo "    \"${cli}\" system stop"
-  error "Stop that container system, then re-run this installer."
+  tb_machine_lines warn "Another Apple container system is already running for this user, ${where}."
+  tb_machine_lines echo "  This installer does not stop a container system it did not start. To stop it and its containers, run${how}:"
+  tb_machine_lines echo "    \"${cli}\" system stop"
+  tb_fail_next "Stop it, then run the installer again:" "\"${cli}\" system stop"
+  error_said "Another Apple container system is running on this Mac" "Stop that container system, then re-run this installer."
 }
 
 # _mac_ct_start_system -- the runtime from _mac_ct_ensure_runtime, started on our kernel
@@ -838,6 +840,23 @@ _mac_ct_job_data_none_why() {
   d="$(_mac_ct_job_data_decision)"
   [[ "$d" == "none "* ]] || return 1
   printf '%s' "${d#none }"
+}
+
+# _mac_ct_job_data_none_said WHY -- the sentence a person reads for _mac_ct_job_data_none_why's
+# WHY (the GPU warning's second line): each of _mac_ct_job_data_decision's reasons, short.
+# A reason with no short form is said whole.
+_mac_ct_job_data_none_said() {
+  case "$1" in
+    *"(TRACEBLOC_VALUES_FILE) turns on hostPath"*)
+      printf 'Your values file %s turns on hostPath storage.' "${TRACEBLOC_VALUES_FILE:-}" ;;
+    *"keeps its data in hostPath volumes"*)
+      printf 'This secure environment keeps its data in hostPath storage.' ;;
+    "this secure environment was installed before version 1.12"*)
+      printf 'This secure environment was installed before version 1.12.' ;;
+    "the VM that runs tracebloc on this Mac was made before version 1.12"*)
+      printf 'The VM that runs tracebloc on this Mac was made before version 1.12.' ;;
+    *) printf '%s.' "$(printf '%s' "${1:0:1}" | tr '[:lower:]' '[:upper:]')${1:1}" ;;
+  esac
 }
 
 # _mac_ct_job_data_private DIR -- DIR is a folder of this user's at mode 0700, or prints

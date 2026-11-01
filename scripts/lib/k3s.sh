@@ -576,7 +576,7 @@ _native_k3s_kubeconfig_grant() {
 # a kubectl without sudo needs the user's own kubeconfig named. Main shell only.
 _native_k3s_kubeconfig_shared_notice() {
   log "native k3s: no group grant on k3s.yaml: $(id -un 2>/dev/null)'s primary group $(id -gn 2>/dev/null) is not confirmed private to them, so k3s.yaml and config.yaml stay root's (0600)."
-  hint "To run kubectl without sudo here, name your own kubeconfig: export KUBECONFIG=~/.kube/config"
+  tb_machine_lines hint "To run kubectl without sudo here, name your own kubeconfig: export KUBECONFIG=~/.kube/config"
 }
 
 # _native_k3s_cgroup_v1_notice -- on a cgroup v1 host k3s runs with the kubelet's
@@ -1840,15 +1840,26 @@ _native_k3s_install_linux() {
       _native_k3s_adopt_tools
       return 0
     fi
-    _have_sudo_bin \
-      || error "Native k3s runs as root, so installing it needs administrator rights once, and you are not root and this machine has no sudo. $(_native_k3s_prepare_host_remedy "$why")"
   fi
   # shellcheck disable=SC2034  # consumed cross-file (common.sh's root copy, setup-linux.sh's tools target, diagnose.sh)
   INSTALL_TIER=2
   # shellcheck disable=SC2034  # consumed cross-file by diagnose.sh
   INSTALL_TIER_REASON="native-k3s"
   log "step b: native k3s: tier 2 (k3s runs as root; administrator rights once)"
-  _native_k3s_host_prereqs "set up k3s and a few tools" "Re-run as a user allowed to sudo, or as root. $(_native_k3s_prepare_host_remedy "$why")"
+  # A password that fails is an administrator's prepare-host to answer (the helper
+  # ends this remedy once the password is in). With no sudo at all, preflight_sudo
+  # says so in its own words; the prepare-host way forward goes to its machine line.
+  # On a host prepared for this user, what it still lacks and its own way forward
+  # are the remedy, sudo or none (tb_fail_firm).
+  if [[ -n "$why" ]]; then
+    local next cmd
+    next="$(_native_k3s_prepared_reason "$why" next)"; cmd="$(_native_k3s_prepared_reason "$why" cmd)"
+    if [[ -n "$cmd" ]]; then tb_fail_next "$next" "$cmd"; else tb_fail_next "$next"; fi
+    tb_fail_firm
+  else
+    tb_fail_next "Ask an administrator to run this once, then run the installer again:" "$(_native_k3s_prepare_host_cmd)"
+  fi
+  _native_k3s_host_prereqs "install system tools" "Re-run as a user allowed to sudo, or as root. $(_native_k3s_prepare_host_remedy "$why")"
   _set_tools_target
   local saved_umask
   saved_umask="$(umask)"
@@ -1867,10 +1878,14 @@ _native_k3s_install_linux() {
 
 # _native_k3s_host_prereqs WHAT [REMEDY] -- the privileged half of step b, which
 # prepare-host runs too: administrator rights once (WHAT is what the password line
-# says they are for, REMEDY what a failed password says to do), the package
+# says they are for, REMEDY what a refusal's machine line says to do), the package
 # manager, the system tools, and a firewall tool.
 _native_k3s_host_prereqs() {
   preflight_sudo "$1" "${2:-}"
+  # The caller's remedy for the password (tb_fail_next) ends with it: a package or
+  # firewall failure past it is not an administrator's to fix, and ends with the
+  # default block (client-dev#2612).
+  tb_fail_clear
   # tracebloc's WSL distro: its image carries what this would install
   # (scripts/spec/wsl-distro.env), nftables included; were nft ever missing there,
   # the firewall step refuses a host it cannot fence.
@@ -2187,6 +2202,8 @@ _native_k3s_create_cluster() {
 
   # 1. The firewall.
   _native_k3s_fw_apply
+  # The live lines are the Mac's (_mac_ct_create_cluster).
+  tb_live "Preparing local container runtime..."
   tool="$(_native_k3s_fw_tool)"
   IFS=$'\t' read -r aid apath < <(_native_k3s_fw_artefact "$tool")
   tb_record_write firewall-rule "$aid" "$apath"
@@ -2227,7 +2244,8 @@ _native_k3s_create_cluster() {
   fi
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3s-sh-XXXXXX")" || error "native k3s: could not create a temporary directory for k3s's install script."
   _native_k3s_stage_install_script "${tmp}/install.sh"
-  _native_k3s_run_install_script "${tmp}/install.sh" \
+  # Its own lines are for the log: what it creates is in the install record.
+  tb_machine_lines _native_k3s_run_install_script "${tmp}/install.sh" \
     || { rm -rf "$tmp"; error "k3s's install script failed. 'sudo journalctl -u k3s' says why; it's safe to re-run this installer."; }
   rm -rf "$tmp"
   tb_record_write k3s-install "$CLUSTER_NAME" "$TB_K3S_UNINSTALL_PATH"
@@ -2252,9 +2270,11 @@ _native_k3s_create_cluster() {
   # 4. The kubeconfig, the API and the node password. Prepared mode finishes on its
   # own path (_native_k3s_prepared_finish): the administrator's kubeconfig is not
   # the user's, so it merges nothing and records no context.
+  tb_live_next "Configuring your secure environment..."
   _native_k3s_wait_for_kubeconfig
   if [[ "${TB_K3S_PREPARED:-}" == 1 ]]; then
     _native_k3s_prepared_finish "$name"
+    tb_live_stop
     return 0
   fi
   _native_k3s_merge_kubeconfig
@@ -2268,6 +2288,8 @@ _native_k3s_create_cluster() {
 
   # 6. This process's NO_PROXY: the RFC1918 defaults cover both range pairs.
   _export_host_no_proxy
+  # No line of its own: its result is step c's "✔ Secure environment created".
+  tb_live_stop
 }
 
 # ── The prepared host (1.1g) ──────────────────────────────────────────────────
@@ -2282,11 +2304,12 @@ _native_k3s_create_cluster() {
 # in prepared_for (prepare-host writes it; tracebloc delete reads the same field), the
 # prepared group lists them (root's, so a record they edit alone does not count), k3s
 # is active, and this user can read k3s.yaml. Otherwise 1; on a host prepared for
-# this user (the record names them), stdout then says what is missing, for the
-# refusal to name: k3s itself, gone after an administrator's offboard (their delete
-# cannot edit this user's record, so it still names them); k3s not running; or
-# k3s.yaml. A record prepare-host wrote before prepared_for existed names no one: the
-# remedy, prepare-host again, writes it.
+# this user (the record names them), stdout then names what is missing, a key of
+# _native_k3s_prepared_reason: k3s itself, gone after an administrator's offboard
+# (their delete cannot edit this user's record, so it still names them); k3s not
+# running; k3s.yaml unreadable; or a login older than the group. A record prepare-host
+# wrote before prepared_for existed names no one: the remedy, prepare-host again,
+# writes it.
 _native_k3s_prepared_for_me() {
   local rec me members
   rec="$(tb_record_path)"
@@ -2294,7 +2317,7 @@ _native_k3s_prepared_for_me() {
   me="$(id -un 2>/dev/null)" || return 1
   [[ -n "$me" && "$(_tb_record_prior prepared_for "$(cat "$rec" 2>/dev/null)")" == "$(_tb_json "$me")" ]] || return 1
   if [[ ! -e "$TB_K3S_BIN_PATH" ]]; then
-    printf 'the k3s they set up is gone from it (no %s)' "$TB_K3S_BIN_PATH"
+    printf 'gone'
     return 1
   fi
   # The record is this user's to edit; the prepared group is root's, and only prepare-host
@@ -2306,26 +2329,60 @@ _native_k3s_prepared_for_me() {
     *) return 1 ;;
   esac
   if ! _bounded "${TB_PROBE_TIMEOUT:-5}" systemctl is-active --quiet k3s 2>/dev/null; then
-    printf 'k3s is not running on it (systemctl is-active k3s)'
+    printf 'stopped'
     return 1
   fi
   if [[ ! -r "$TB_K3S_KUBECONFIG_PATH" ]]; then
     case " $(id -Gn 2>/dev/null) " in
-      *" ${TB_K3S_PREPARED_GROUP} "*) printf 'you cannot read %s' "$TB_K3S_KUBECONFIG_PATH" ;;
-      *) printf 'this session started before you joined the %s group, so you cannot read %s yet: log out and back in, then re-run' "$TB_K3S_PREPARED_GROUP" "$TB_K3S_KUBECONFIG_PATH" ;;
+      *" ${TB_K3S_PREPARED_GROUP} "*) printf 'unreadable' ;;
+      *) printf 'relogin' ;;
     esac
     return 1
   fi
   return 0
 }
 
-# _native_k3s_prepare_host_remedy [WHY] -- the way forward for a user who cannot
-# sudo: an administrator prepares the host for them once. WHY, when given, is what
-# is missing on a host already prepared for them.
+# _native_k3s_prepared_reason KEY WHAT -- what is missing on a host prepared for this
+# user (KEY, from _native_k3s_prepared_for_me), said for WHAT: why (the log's clause
+# after "An administrator prepared this machine for you, but"), next (a person's end
+# block: the reason line, then what to do, as tb_fail_next takes it) or cmd (the
+# command under it; none where it is the install command). An unknown KEY says nothing.
+_native_k3s_prepared_reason() {
+  local line remedy="Ask an administrator to run this once, then run the installer again:" cmd
+  cmd="$(_native_k3s_prepare_host_cmd)"
+  case "$1:$2" in
+    gone:why)       printf 'the k3s they set up is gone from it (no %s)' "$TB_K3S_BIN_PATH"; return 0 ;;
+    stopped:why)    printf 'k3s is not running on it (systemctl is-active k3s)'; return 0 ;;
+    unreadable:why) printf 'you cannot read %s' "$TB_K3S_KUBECONFIG_PATH"; return 0 ;;
+    relogin:why)    printf 'this session started before you joined the %s group, so you cannot read %s yet: log out and back in, then re-run' "$TB_K3S_PREPARED_GROUP" "$TB_K3S_KUBECONFIG_PATH"; return 0 ;;
+    gone:*)         line="This machine was prepared for you, but k3s has been deleted since." ;;
+    stopped:*)      line="This machine was prepared for you, but k3s isn't running on it." ;;
+    unreadable:*)   line="This machine was prepared for you, but you can't read ${TB_K3S_KUBECONFIG_PATH}." ;;
+    relogin:*)      line="This machine was prepared for you, but this login started before you joined the ${TB_K3S_PREPARED_GROUP} group."
+                    remedy="Log out and back in, then run the installer again:"; cmd="" ;;
+    *)              return 0 ;;
+  esac
+  case "$2" in
+    next) printf '%s\\n%s' "$line" "$remedy" ;;
+    cmd)  printf '%s' "$cmd" ;;
+  esac
+}
+
+# _native_k3s_prepare_host_cmd -- the command an administrator runs, once, to prepare
+# this machine for this user: what a person reads (tb_fail_next).
+_native_k3s_prepare_host_cmd() {
+  local me
+  me="$(id -un 2>/dev/null)" || me=""
+  printf 'curl -fsSL https://tracebloc.io/i.sh | TB_PREPARE_USER=%s bash -s -- prepare-host' "${me:-<your-username>}"
+}
+
+# _native_k3s_prepare_host_remedy [KEY] -- the way forward for a user who cannot
+# sudo: an administrator prepares the host for them once. KEY, when given, is what
+# is missing on a host already prepared for them (_native_k3s_prepared_reason).
 _native_k3s_prepare_host_remedy() {
   local me
   me="$(id -un 2>/dev/null)" || me=""
-  [[ -z "${1:-}" ]] || printf 'An administrator prepared this machine for you, but %s. ' "$1"
+  [[ -z "${1:-}" ]] || printf 'An administrator prepared this machine for you, but %s. ' "$(_native_k3s_prepared_reason "$1" why)"
   printf 'An administrator can prepare this machine for you once: export TRACEBLOC_SUBSTRATE=k3s TB_PREPARE_USER=%s && curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host -- then re-run this installer, with no sudo.' "${me:-<your-username>}"
 }
 

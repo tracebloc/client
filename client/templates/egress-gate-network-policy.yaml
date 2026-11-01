@@ -1,0 +1,24 @@
+{{- /*
+  Who may connect to the egress gate's pod. The send port stays as open as the
+  requests-proxy's was. The record port has no rule, so no pod may reach it:
+  Kubernetes always admits traffic from the pod's own node, which is where the
+  API server's service proxy comes from on a single-machine client. Inert
+  without a CNI that enforces NetworkPolicy.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tracebloc.egressGateName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: egress-gate
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8888

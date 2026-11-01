@@ -149,7 +149,8 @@ install_system_deps() {
     done
     log "Dependencies installed: ${MISSING_PKGS[*]}"  # set-u-safe: inside the non-empty check
   fi
-  success "System dependencies"
+  # One line for step b's tools on screen: the tools step's "System tools ready".
+  tb_machine_lines success "System dependencies"
 }
 
 # ── kubectl ──────────────────────────────────────────────────────────────────

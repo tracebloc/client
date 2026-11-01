@@ -44,9 +44,9 @@
 
 {{ "\033[1;31m" }}WARNING: digest pin(s) IGNORED -- resolved on a registry this release does not pull from:{{ "\033[0m" }}
 {{- $ignoredPins }}
-  {{ "\033[0;90m" }}A digest names bytes on the registry it was resolved on; another registry may never have held them, and a pod told to pull a digest its registry does not have never starts. Each pin above is therefore NOT rendered: the workload runs the channel tag (requests-proxy: the honoured jobs-manager pin, if any) and image-refresh re-pins it from {{ include "tracebloc.tbRegistry" . }}. To keep a pin, either
+  {{ "\033[0;90m" }}A digest names bytes on the registry it was resolved on; another registry may never have held them, and a pod told to pull a digest its registry does not have never starts. Each pin above is therefore NOT rendered: the workload runs the channel tag (the outbound gate: the honoured jobs-manager pin, if any){{ if include "tracebloc.imageRefreshEnabled" . }} and image-refresh re-pins it from {{ include "tracebloc.tbRegistry" . }}{{ else }}, and image-refresh is off here, so it moves only when its pod restarts{{ end }}. To keep a pin, either
     1. re-resolve the digest on {{ include "tracebloc.tbRegistry" . }} and set images.<image>.digestRegistry: "{{ include "tracebloc.tbRegistry" . }}", or
-    2. drop the pin (images.<image>.digest: "") and let image-refresh pin from the live registry.{{ "\033[0m" }}
+    2. drop the pin (images.<image>.digest: ""){{ if include "tracebloc.imageRefreshEnabled" . }} and let image-refresh pin from the live registry{{ else }}: on prod the chart's own pin (images.prodDigests) then applies where its registry matches{{ end }}.{{ "\033[0m" }}
 {{- end }}
 
 {{- /* The same rule for the third-party images (tracebloc.thirdPartyPinDecision):

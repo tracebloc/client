@@ -1327,7 +1327,7 @@
             "digest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",
-              "description": "Optional image digest (sha256:...) for the requests-proxy Deployment, which runs the tracebloc/jobs-manager image. Leave EMPTY (default) and it follows the HONOURED images.jobsManager pin, so the two pods cannot run different builds of the same image; an own pin that is IGNORED (see digestRegistry) is not an override and follows jobs-manager the same way. Set it, with digestRegistry, only to pin requests-proxy independently of jobs-manager."
+              "description": "Optional image digest (sha256:...) for the egress gate Deployment (the key is the requests-proxy's, whose workload the gate took over), which runs the tracebloc/jobs-manager image in both its containers. Leave EMPTY (default) and it follows the HONOURED images.jobsManager pin, so the two pods cannot run different builds of the same image; an own pin that is IGNORED (see digestRegistry) is not an override and follows jobs-manager the same way. Set it, with digestRegistry, only to pin the gate independently of jobs-manager."
             },
             "digestRegistry": {
               "type": "string",
@@ -2016,9 +2016,15 @@
       "description": "Image-refresh CronJob (issue tracebloc/client#154; reworked by #569). Polls the registry the chart pulls the tracebloc images from (global.imageRegistry, else images.traceblocRegistry, else ghcr.io — the default since the GHCR migration in 1.9.113; it resolves anonymously on docker.io and ghcr.io only, and goes inert on any other mirror) for the jobs-manager, pods-monitor and resource-monitor digests under the floating CLIENT_ENV tag and, on a change, pins the new digest onto the running workloads with `kubectl set image` (jobs-manager + requests-proxy Deployments and the resource-monitor DaemonSet). It used to `kubectl rollout restart` a single Deployment; the reference change is what lets those pods run imagePullPolicy=IfNotPresent and survive an offline restart. Disable to keep the running image in place until manual restart — the chart then renders imagePullPolicy=Always on the unpinned control-plane images, because a floating tag plus a restart is the only update path left.",
       "properties": {
         "enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "When false, no CronJob, ServiceAccount, Role, or RoleBinding is rendered. The control-plane workloads will not auto-refresh on new image pushes, and the unpinned ones fall back to imagePullPolicy=Always so a manual restart still picks up a new build (see tracebloc.controlPlanePullPolicy)."
+          "enum": [
+            "",
+            "true",
+            "false",
+            true,
+            false
+          ],
+          "default": "",
+          "description": "\"\" (auto: off where CLIENT_ENV resolves to prod, on for dev and stg), or an explicit true/false override. When off, no CronJob, ServiceAccount, Role, or RoleBinding is rendered. The control-plane workloads will not auto-refresh on new image pushes, and the unpinned ones fall back to imagePullPolicy=Always so a manual restart still picks up a new build (see tracebloc.controlPlanePullPolicy)."
         },
         "schedule": {
           "type": "string",
@@ -2365,6 +2371,55 @@
           "type": "integer",
           "minimum": 0,
           "description": "0 = retry forever, so the byte cap is the ONLY bound. Any positive value silently overrides it."
+        }
+      }
+    },
+    "egressGate": {
+      "type": "object",
+      "description": "The egress gate, which checks each message the client sends against the declaration of what may leave and keeps a record on this machine. Its `gate` container is pinned and sized by images.requestsProxy and resources.requestsProxy.",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "report"
+          ],
+          "description": "TRACEBLOC_EGRESS_GATE_MODE. report: a message the declaration does not allow is sent and recorded as would-refuse. enforce is not offered until the client stores the owner's data mark: until then the gate checks every run as patient data, so enforce would refuse every open-data run's losses and scores."
+        },
+        "record": {
+          "type": "object",
+          "properties": {
+            "resources": {
+              "type": "object",
+              "properties": {
+                "requests": {
+                  "type": "object",
+                  "properties": {
+                    "cpu": {
+                      "type": "string",
+                      "pattern": "^[0-9]+m?$"
+                    },
+                    "memory": {
+                      "type": "string",
+                      "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                    }
+                  }
+                },
+                "limits": {
+                  "type": "object",
+                  "properties": {
+                    "cpu": {
+                      "type": "string",
+                      "pattern": "^[0-9]+m?$"
+                    },
+                    "memory": {
+                      "type": "string",
+                      "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
