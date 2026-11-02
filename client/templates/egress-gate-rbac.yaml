@@ -1,0 +1,50 @@
+{{- /*
+  The egress gate's ServiceAccount, and its one right: `create` on
+  tokenreviews, to have the Kubernetes API review the service-account token a
+  control-plane sender presents (RFC-0324 D2). TokenReview is cluster-scoped,
+  so a namespace Role cannot grant it: with clusterScope: false the gate cannot
+  name such a sender and refuses it, as jobs-manager's ingestion endpoint does.
+*/ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "tracebloc.egressGateName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+# The gate's pod projects the token into its `gate` container alone.
+automountServiceAccountToken: false
+{{- if ne .Values.clusterScope false }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "tracebloc.egressGateName" . }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "tracebloc.egressGateName" . }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.egressGateName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "tracebloc.egressGateName" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

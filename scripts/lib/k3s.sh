@@ -1439,9 +1439,23 @@ TB_K3S_GPU_TOOLKIT_FLOOR="1.18.0"
 # (the schema's x-tracebloc-artefact-paths); k3s's own uninstall removes it too.
 TB_K3S_GPU_MARKER_PATH="${TB_K3S_ETC_DIR}/tracebloc-gpu-wired"
 
+# _native_k3s_gpu_legacy_rm -- the marker's legacy path goes, if it is there: hosts an
+# older installer wired keep it unrecorded, so delete never removes it. Prepared mode:
+# beside the named user's root copy, root's. Own mode: in the data dir, this user's.
+_native_k3s_gpu_legacy_rm() {
+  if [[ "${TB_K3S_PREPARED:-}" == 1 && -n "${TB_RECORD_FOR_USER:-}" ]]; then
+    local root; root="$(_tb_record_root_path "$TB_RECORD_FOR_USER")"
+    tb_root rm -f "${root%/*}/.gpu-k3s-wired" 2>/dev/null || true
+    return 0
+  fi
+  local dir="${HOST_DATA_DIR:-${HOME:+${HOME}/.tracebloc}}"
+  [[ -z "$dir" ]] || rm -f "${dir}/.gpu-k3s-wired" 2>/dev/null || true
+}
+
 # _native_k3s_gpu_mark SIG -- a gate that passed: the marker holds SIG, and the record
 # lists it once. Best-effort: a marker root could not write is not recorded.
 _native_k3s_gpu_mark() {
+  _native_k3s_gpu_legacy_rm
   { tb_root mkdir -p "${TB_K3S_GPU_MARKER_PATH%/*}" \
       && printf '%s' "$1" | tb_root tee "$TB_K3S_GPU_MARKER_PATH" >/dev/null; } 2>/dev/null || return 0
   tb_record_write file gpu-wired "$TB_K3S_GPU_MARKER_PATH"
@@ -1450,6 +1464,7 @@ _native_k3s_gpu_mark() {
 # _native_k3s_gpu_unmark -- the marker goes, so the next run asks again, and its record
 # line with it; a marker root could not remove stays recorded.
 _native_k3s_gpu_unmark() {
+  _native_k3s_gpu_legacy_rm
   tb_root rm -f "$TB_K3S_GPU_MARKER_PATH" 2>/dev/null || return 0
   tb_record_drop file gpu-wired "$TB_K3S_GPU_MARKER_PATH"
 }

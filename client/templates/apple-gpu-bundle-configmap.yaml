@@ -24,8 +24,9 @@
   namespace by a reader outside this chart that cannot know the release name.
 
   WHEN IT RENDERS. Only where tracebloc.appleGpuBundle holds: the digest map
-  renders (tracebloc.trainingPins) AND the bundle is set. The same helper gates
-  jobs-manager's env, so the two never disagree.
+  renders (tracebloc.trainingPins), the bundle is set AND appleGpuRunner.gpuTraining
+  is on (tracebloc.appleGpuTraining). The same helper gates jobs-manager's env,
+  so the two never disagree.
 */ -}}
 {{- $training := default dict (default dict .Values.images).training }}
 {{- if and $training.macosBundle (not $training.digests) }}

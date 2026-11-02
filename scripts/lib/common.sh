@@ -488,7 +488,7 @@ _tb_live_begin() {
   _TB_LIVE_MSG="$1"; _TB_LIVE_QUIET="$2"; _TB_LIVE_DETAIL=""; _TB_LIVE_T0=$SECONDS; _TB_LIVE_SHOWN=""
   _TB_LIVE_LEVEL="${BASH_SUBSHELL:-0}"
   if _tb_animate; then
-    tput civis 2>/dev/null || true
+    _tb_tty tput civis 2>/dev/null || true
     _tb_live_tick
   fi
   return 0
@@ -508,8 +508,8 @@ tb_live_done() {
     if _tb_live_here; then
       if _tb_animate; then
         _tb_live_kill
-        printf '\r\033[K'
-        tput cnorm 2>/dev/null || true
+        _tb_tty printf '\r\033[K'
+        _tb_tty tput cnorm 2>/dev/null || true
       fi
       [[ -n "${1:-}" || -n "$quiet" || -n "$shown" ]] || printf '  · %s\n' "$msg"
     fi
@@ -529,7 +529,7 @@ tb_live_stop() {
   [[ -n "${_TB_LIVE_MSG:-}" ]] || return 0
   if _tb_live_here && _tb_animate; then
     _tb_live_kill
-    printf '\r\033[K'; tput cnorm 2>/dev/null || true
+    _tb_tty printf '\r\033[K'; _tb_tty tput cnorm 2>/dev/null || true
   fi
   _TB_LIVE_MSG=""; _TB_LIVE_QUIET=""; _TB_LIVE_DETAIL=""; _TB_LIVE_SHOWN=""; _TB_LIVE_PID=""
   return 0
@@ -552,7 +552,7 @@ _tb_live_tick() {
     trap - ERR; set +e
     frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏'); i=0
     while kill -0 "$parent" 2>/dev/null; do
-      printf "\r\033[K  ${CYAN}%s${RESET} %s${detail:+  %s}  ${DIM}%s${RESET}" "${frames[i]}" "$msg" ${detail:+"$detail"} "$(_tb_elapsed $(( SECONDS - t0 )))"
+      _tb_tty printf "\r\033[K  ${CYAN}%s${RESET} %s${detail:+  %s}  ${DIM}%s${RESET}" "${frames[i]}" "$msg" ${detail:+"$detail"} "$(_tb_elapsed $(( SECONDS - t0 )))"
       i=$(( (i + 1) % 10 ))
       sleep 0.12
     done
@@ -575,7 +575,7 @@ _tb_live_hold() {
   [[ -n "${_TB_LIVE_MSG:-}" ]] && _tb_live_here || return 0
   if [[ -n "${_TB_LIVE_PID:-}" ]]; then
     _tb_live_kill
-    printf '\r\033[K'
+    _tb_tty printf '\r\033[K'
   fi
   if [[ -z "$_TB_LIVE_QUIET" && -z "$_TB_LIVE_SHOWN" ]]; then
     printf '  · %s\n' "$_TB_LIVE_MSG"
@@ -1120,10 +1120,20 @@ _resource_monitor_daemonset() {
 # draw and clear as before; plain, _tb_progress_start prints the message ONCE as a
 # static line (the Go CLI's `  · msg` form) and the rest print nothing.
 _tb_animate() { [[ "${_tb_mode:-none}" != "none" ]]; }
+# _tb_tty CMD... -- run CMD with its stdout on the terminal itself. After setup_log_file
+# stdout is tee'd into the install log, and animation frames must never reach it: a
+# frame glued to the next line hides helm's error. Fixed fd 7: bash 3.2 has no {var}>.
+_tb_tty() {
+  if [[ -n "${_TB_TTY_FD:-}" ]]; then
+    "$@" >&7
+  else
+    "$@"
+  fi
+}
 # _tb_progress_start MSG — hide the cursor (animating) or print MSG once (plain).
 _tb_progress_start() {
   if _tb_animate; then
-    tput civis 2>/dev/null || true
+    _tb_tty tput civis 2>/dev/null || true
   else
     printf '  · %s\n' "$1"
   fi
@@ -1133,21 +1143,21 @@ _tb_progress_start() {
 _tb_progress_frame() {
   _tb_animate || return 0
   if [[ -n "${3:-}" ]]; then
-    printf "\r\033[K  ${CYAN}%s${RESET} %s  ${DIM}%s${RESET}" "$1" "$2" "$(_tb_elapsed "$3")"
+    _tb_tty printf "\r\033[K  ${CYAN}%s${RESET} %s  ${DIM}%s${RESET}" "$1" "$2" "$(_tb_elapsed "$3")"
   else
-    printf "\r  ${CYAN}%s${RESET} %s" "$1" "$2"
+    _tb_tty printf "\r  ${CYAN}%s${RESET} %s" "$1" "$2"
   fi
 }
 # _tb_progress_clear — wipe the line in place (more output follows); nothing when plain.
 _tb_progress_clear() {
   _tb_animate || return 0
-  printf "\r\033[K"
+  _tb_tty printf "\r\033[K"
 }
 # _tb_progress_end — wipe the line and restore the cursor; nothing when plain.
 _tb_progress_end() {
   _tb_animate || return 0
-  printf "\r\033[K"
-  tput cnorm 2>/dev/null || true
+  _tb_tty printf "\r\033[K"
+  _tb_tty tput cnorm 2>/dev/null || true
 }
 
 # _tb_proc_tree PID — PID and every descendant, one per line, parents first.
@@ -1642,6 +1652,8 @@ _choose_log_file() {
 
 setup_log_file() {
   LOG_FILE="$(_choose_log_file)"
+  # Fd 7 keeps the terminal for the live line's frames (_tb_tty); the log gets lines only.
+  exec 7>&1 && _TB_TTY_FD=7
   exec > >(tee -a "$LOG_FILE") 2>&1
   log "Install log: $LOG_FILE"
   # The substrate line printed before the log existed goes into it too, verbatim

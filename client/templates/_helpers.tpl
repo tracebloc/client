@@ -801,6 +801,46 @@ read it here, so the monitor can only ever get the plugin's class. Nil-safe for
 {{- end }}
 
 {{/*
+  The egress gate's sender map, TRACEBLOC_EGRESS_GATE_SENDERS (RFC-0324 D2):
+  "<namespace>/<service account>" of each chart workload that sends through the
+  gate, to the identities it may send as, for the workloads this release
+  renders. Never engine or ingestor: they prove themselves with a per-job token,
+  and the gate refuses a map that names them. scripts/tests/egress_door_chart.py
+  holds this to the door config's senders over every render.
+*/}}
+{{- define "tracebloc.egressGateSenders" -}}
+{{- $senders := dict (printf "%s/%s" .Release.Namespace (include "tracebloc.serviceAccountName" .)) (list "jobs-manager" "pods-monitor") -}}
+{{- if (include "tracebloc.resourceMonitorEnabled" .) -}}
+{{- $_ := set $senders (printf "%s/%s" .Values.nodeAgents.namespace.name (include "tracebloc.resourceMonitorName" .)) (list "resource-monitor") -}}
+{{- end -}}
+{{- if eq (include "tracebloc.telemetryCollectorState" .) "enabled" -}}
+{{- $_ := set $senders (printf "%s/%s" .Values.nodeAgents.namespace.name (include "tracebloc.telemetryCollectorName" .)) (list "collector") -}}
+{{- end -}}
+{{- toJson $senders -}}
+{{- end }}
+
+{{/*
+  The proxy settings jobs-manager's `.Values.env` passthrough hands it, for the
+  egress gate, which reaches the API the way jobs-manager does: the names
+  client-runtime's ProxyConfig.from_env reads, and requests' URL-form and
+  NO_PROXY names. With HTTP_PROXY_HOST set, tracebloc.proxyEnv owns the legacy
+  names (the $proxyKeys exclusion in jobs-manager-deployment.yaml).
+  scripts/tests/egress_door_chart.py holds the gate's to jobs-manager's.
+*/}}
+{{- define "tracebloc.egressGateProxyPassthrough" -}}
+{{- $owned := list -}}
+{{- if .Values.env.HTTP_PROXY_HOST -}}
+{{- $owned = list "HTTP_PROXY_HOST" "HTTP_PROXY_PORT" "HTTP_PROXY_USERNAME" "HTTP_PROXY_PASSWORD" "NO_PROXY" "no_proxy" "HTTP_PROXY" "HTTPS_PROXY" "http_proxy" "https_proxy" -}}
+{{- end -}}
+{{- $read := list "TRACEBLOC_HTTP_PROXY_HOST" "TRACEBLOC_HTTP_PROXY_PORT" "TRACEBLOC_HTTP_PROXY_USERNAME" "TRACEBLOC_HTTP_PROXY_PASSWORD" "HTTP_PROXY_HOST" "HTTP_PROXY_PORT" "HTTP_PROXY_USERNAME" "HTTP_PROXY_PASSWORD" "HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy" "ALL_PROXY" "all_proxy" "NO_PROXY" "no_proxy" -}}
+{{- range $key, $value := .Values.env -}}
+{{- if and (has $key $read) (not (has $key $owned)) $value }}
+{{ include "tracebloc.envPassthroughEntry" (dict "key" $key "value" $value "env" $.Values.env) | trim }}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
   Whether the image-refresh CronJob renders: chosen for this edge
   (tracebloc.imageRefreshChosen) and something left to do. When ALL THREE
   managed images (jobs-manager, pods-monitor, resource-monitor) are
@@ -1753,7 +1793,8 @@ empty otherwise. ONE decision for both sites: whether
 templates/apple-gpu-bundle-configmap.yaml renders, and whether jobs-manager
 gets TRACEBLOC_APPLE_GPU_BUNDLE_DIGEST.
 
-It holds exactly where tracebloc.trainingPins holds and the bundle is set.
+It holds exactly where tracebloc.trainingPins holds, the bundle is set and
+tracebloc.appleGpuTraining is on.
 RFC-0185 D2's version agreement sends a GPU job to the Mac only when the bundle
 the runner holds is the one "its engine release names", and only a pinned edge
 runs a named release. A floating edge (dev/staging in auto, pinned=false, a
@@ -1772,9 +1813,25 @@ Call with the ROOT context: {{ include "tracebloc.appleGpuBundle" . }}
 {{- define "tracebloc.appleGpuBundle" -}}
 {{- $training := default dict (default dict .Values.images).training -}}
 {{- $bundle := default dict $training.macosBundle -}}
-{{- if and $bundle.digest (include "tracebloc.trainingPins" .) -}}
+{{- if and $bundle.digest (include "tracebloc.trainingPins" .) (include "tracebloc.appleGpuTraining" .) -}}
 {{- $bundle.digest -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.appleGpuTraining — "true" when appleGpuRunner.gpuTraining is true, so
+GPU trainings may go to the tracebloc runner on a Mac; empty otherwise. The
+switch that keeps them off without a CLI update: while it is off the chart names
+the runner no bundle (tracebloc.appleGpuBundle), the runner advertises no GPU,
+and jobs-manager trains every Mac GPU job on the CPU and moves any still waiting
+for the Apple GPU there. The chart default is false. Read defensively, as
+tracebloc.appleGpuRunner is.
+
+Call with the ROOT context: {{ include "tracebloc.appleGpuTraining" . }}
+*/}}
+{{- define "tracebloc.appleGpuTraining" -}}
+{{- $r := default dict .Values.appleGpuRunner -}}
+{{- if eq (toString $r.gpuTraining) "true" -}}true{{- end -}}
 {{- end -}}
 
 {{/*

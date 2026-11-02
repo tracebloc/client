@@ -22,6 +22,13 @@ send port, and the owner reads the record through the Kubernetes API.
 pin and size the gate's `gate` container. `egressGate.record.resources` sizes the
 `record` container, which requests nothing by default.
 
+The `gate` container reads the client's credential from the release's Secret and
+runs as its own ServiceAccount, `<release>-egress-gate`. A ClusterRole and
+ClusterRoleBinding of the same name let it create TokenReviews and nothing else,
+so it can check which of the client's own services is sending. Only the `gate`
+container holds that account's token. With `clusterScope: false` the chart
+creates neither, as for jobs-manager.
+
 **What you have to do: nothing.** On a cluster where the Kubernetes API server
 does not run on the node of the gate's pod and the CNI enforces NetworkPolicy,
 the API server cannot reach the record port either: reading the record needs an

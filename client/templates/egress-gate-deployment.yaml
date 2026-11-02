@@ -8,6 +8,10 @@
   Container `gate` serves the send port and is the record's only writer;
   container `record` serves the record read-only on its own port. One replica
   and `Recreate`, so two gates never write the record at once.
+
+  Only `gate` holds a credential (RFC-0324 D2): the client Secret, to log in
+  and send under its own login, and its service-account token, to have the
+  Kubernetes API review the tokens the control plane's senders present.
 */}}
 apiVersion: apps/v1
 kind: Deployment
@@ -28,6 +32,9 @@ spec:
       labels:
         app: egress-gate
     spec:
+      serviceAccountName: {{ include "tracebloc.egressGateName" . }}
+      # The token is projected into `gate` alone (the gate-token volume), so
+      # `record` and the init container hold none.
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -157,6 +164,28 @@ spec:
               memory: {{ $rpLim.memory | default "512Mi" | quote }}
           env:
           {{- include "tracebloc.proxyEnv" . | nindent 12 }}
+          {{- with include "tracebloc.egressGateProxyPassthrough" . }}
+          {{- . | nindent 12 }}
+          {{- end }}
+            {{- /* The gate's own login (egress_gate.Login), read as jobs-manager
+                 reads it. Held down with jobs-manager (jobsManagerReplicas: 0):
+                 no run exists then, and send and fetch answer 503. */}}
+            {{- if gt (int (include "tracebloc.jobsManagerReplicas" .)) 0 }}
+            - name: TRACEBLOC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: TRACEBLOC_CLIENT_ID
+            - name: TRACEBLOC_CLIENT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: TRACEBLOC_CLIENT_PASSWORD
+            {{- end }}
+            - name: TRACEBLOC_ENV
+              value: {{ include "tracebloc.clientEnv" . | quote }}
+            - name: TRACEBLOC_EGRESS_GATE_SENDERS
+              value: {{ include "tracebloc.egressGateSenders" . | quote }}
             - name: TRACEBLOC_EGRESS_GATE_MODE
               value: {{ (default dict .Values.egressGate).mode | default "report" | quote }}
             - name: TRACEBLOC_EGRESS_RECORD_DIR
@@ -203,6 +232,10 @@ spec:
           volumeMounts:
             - name: egress-record
               mountPath: /var/lib/tracebloc/egress-record
+            # Where the Kubernetes client's in-cluster config reads the token.
+            - name: gate-token
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
         - name: record
           # The same image as `gate`, so one pin and one image-refresh patch
           # move both. It holds no credential and sends nothing.
@@ -253,6 +286,23 @@ spec:
         - name: egress-record
           persistentVolumeClaim:
             claimName: {{ include "tracebloc.egressRecordPvc" . }}
+        # What automountServiceAccountToken would mount, for `gate` only.
+        - name: gate-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
       {{- if include "tracebloc.useImagePullSecrets" . }}
       imagePullSecrets:
         - name: {{ include "tracebloc.registrySecretName" . }}
