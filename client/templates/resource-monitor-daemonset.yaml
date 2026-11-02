@@ -242,6 +242,9 @@ spec:
               value: {{ .Release.Namespace | quote }}
             - name: TRACEBLOC_MONITOR_INTERVAL
               value: "30"
+            # The egress gate, which the heartbeat goes through (RFC-0324 D2).
+            - name: TRACEBLOC_REQUESTS_PROXY_URL
+              value: {{ include "tracebloc.egressGateSendUrl" . | quote }}
             {{- if $datasetPath }}
             # Rendered ONLY with the mount above, and that pairing is the whole
             # contract: the collector adds this path to the set it measures, so

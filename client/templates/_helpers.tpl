@@ -801,6 +801,17 @@ read it here, so the monitor can only ever get the plugin's class. Nil-safe for
 {{- end }}
 
 {{/*
+  The egress gate's send address for the monitors (RFC-0324 D2): its own
+  Service, egress-gate-service.yaml, by its namespaced name, so it resolves from
+  the node agents' namespace too. Not requests-proxy-service: that alias is kept
+  for pods spawned before the upgrade. scripts/tests/gate-address.sh holds every
+  sender's address to the render.
+*/}}
+{{- define "tracebloc.egressGateSendUrl" -}}
+http://egress-gate.{{ .Release.Namespace }}.svc:8888
+{{- end }}
+
+{{/*
   The egress gate's sender map, TRACEBLOC_EGRESS_GATE_SENDERS (RFC-0324 D2):
   "<namespace>/<service account>" of each chart workload that sends through the
   gate, to the identities it may send as, for the workloads this release

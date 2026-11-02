@@ -1208,6 +1208,10 @@ spec:
               key: TRACEBLOC_CLIENT_PASSWORD
         - name: TRACEBLOC_CLIENT_LOGS_PVC
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
+        # The egress gate, which pods-monitor's messages to tracebloc go through
+        # (RFC-0324 D2).
+        - name: TRACEBLOC_REQUESTS_PROXY_URL
+          value: {{ include "tracebloc.egressGateSendUrl" . | quote }}
         # See the api container's JOB_IMAGE_HOST note (#585): rendered from
         # tracebloc.tbRegistry, so a global.imageRegistry mirror wins, then
         # images.traceblocRegistry, then the chart default (ghcr.io).
