@@ -30,7 +30,7 @@
 # When none of them says so, Docker answers (_reinstall_k3d_live).
 _reinstall_k3d_said() {
   local rec dst text="" f ctx kc rc
-  TB_REINSTALL_SAID=""; TB_REINSTALL_REMEDY=""; TB_REINSTALL_RECORD=""; TB_REINSTALL_CTX=""
+  TB_REINSTALL_SAID=""; TB_REINSTALL_REMEDY=""; TB_REINSTALL_RECORD=""; TB_REINSTALL_CTX=""; TB_REINSTALL_VIA_DOCKER=""
   rec="$(tb_record_path)"
   if [[ -e "$rec" ]]; then
     text="$(cat "$rec" 2>/dev/null)" || text=""
@@ -79,6 +79,7 @@ _reinstall_k3d_live() {
     IFS= read -r first <<<"$out" || true
     [[ -n "$first" ]] || return 1
     TB_REINSTALL_SAID="Docker has the containers of the k3d cluster '${1}' (${first})"
+    TB_REINSTALL_VIA_DOCKER=1
     TB_REINSTALL_CTX="k3d-${1}"
     return 0
   fi
@@ -243,7 +244,90 @@ refuse_k3d_machine() {
   TB_EXIT_REFUSED=1
   _native_k3s_refuse_host
   _reinstall_k3d_said || rc=$?
+  if [[ "$rc" -eq 0 ]] && _reinstall_k3d_unreachable && _reinstall_k3d_clear; then rc=1; fi
   _reinstall_refuse "$rc"
+}
+
+# _reinstall_k3d_unreachable -- 0 when what said k3d is a file (the record or a
+# kubeconfig context, not Docker's containers) and Docker is absent: no docker command,
+# or one that answers with a failure. A docker that does not answer in time (124) is
+# not gone: it may be a live cluster behind a wedged daemon, so the refusal stands.
+_reinstall_k3d_unreachable() {
+  local rc=0
+  [[ -z "${TB_REINSTALL_VIA_DOCKER:-}" ]] || return 1
+  has docker || return 0
+  _bounded 15 docker ps -q >/dev/null 2>&1 || rc=$?
+  [[ "$rc" -ne 0 && "$rc" -ne 124 ]]
+}
+
+# _reinstall_k3d_stamp -- the timestamp the moved-aside record's name carries.
+_reinstall_k3d_stamp() { date -u +%Y%m%dT%H%M%SZ; }
+
+# _reinstall_k3d_clear -- remove every k3d-* context from each kubeconfig file and
+# move the install record aside to <record>.k3d-<timestamp>, then say so in one line,
+# naming the cluster the record or the context named (TB_REINSTALL_CTX).
+# 0 when done; 1 when a file cannot be changed, which leaves the refusal to stand.
+# The cluster side is never touched. A root copy of the record is not ours to move.
+# A failure puts every file back as it was, so the refusal's "Nothing was changed" holds.
+_reinstall_k3d_clear() {
+  local rec aside f kc tmp="" bak cluster="${TB_REINSTALL_CTX#k3d-}"
+  local saved=""   # one "backup<TAB>file" line per kubeconfig this run has touched
+  rec="$(tb_record_path)"
+  if [[ -n "$TB_REINSTALL_RECORD" && "$TB_REINSTALL_RECORD" != "$rec" ]]; then return 1; fi
+  kc="${KUBECONFIG:-${HOME:-}/.kube/config}"
+  local IFS=:
+  for f in $kc; do
+    [[ -n "$f" && -e "$f" ]] || continue
+    tmp="$(mktemp "${f}.tb-XXXXXX" 2>/dev/null)" || { _reinstall_k3d_undo "$saved"; return 1; }
+    bak="$(mktemp "${f}.tb-bak-XXXXXX" 2>/dev/null)" && cat "$f" >"$bak" 2>/dev/null || { rm -f "$tmp" "$bak"; _reinstall_k3d_undo "$saved"; return 1; }
+    saved+="${bak}"$'\t'"${f}"$'\n'
+    if ! { _reinstall_drop_k3d_contexts <"$f" >"$tmp" 2>/dev/null && cat "$tmp" >"$f" 2>/dev/null; }; then rm -f "$tmp"; _reinstall_k3d_undo "$saved"; return 1; fi
+    rm -f "$tmp"
+  done
+  IFS=$' \t\n'
+  if [[ -e "$rec" ]]; then
+    aside="${rec}.k3d-$(_reinstall_k3d_stamp)"
+    mv "$rec" "$aside" 2>/dev/null || { _reinstall_k3d_undo "$saved"; return 1; }
+    info "Docker is not available on this machine, so its old k3d secure environment '${cluster}' is left as it is: this installer deleted the k3d-* contexts from your kubeconfig and moved ${rec} to ${aside}. It stays listed on tracebloc as Offline."
+  else
+    info "Docker is not available on this machine, so its old k3d secure environment '${cluster}' is left as it is: this installer deleted the k3d-* contexts from your kubeconfig. It stays listed on tracebloc as Offline."
+  fi
+  _reinstall_k3d_drop_backups "$saved"
+  return 0
+}
+
+# _reinstall_k3d_undo SAVED -- write each backup in SAVED back over its file and
+# delete it; a file that cannot be restored keeps its backup beside it.
+_reinstall_k3d_undo() {
+  local b f
+  while IFS=$'\t' read -r b f; do
+    [[ -n "$b" ]] || continue
+    cat "$b" >"$f" 2>/dev/null && rm -f "$b"
+  done <<<"$1"
+}
+
+# _reinstall_k3d_drop_backups SAVED -- delete the backups of a clear that held.
+_reinstall_k3d_drop_backups() {
+  local b f
+  while IFS=$'\t' read -r b f; do [[ -z "$b" ]] || rm -f "$b"; done <<<"$1"
+}
+
+# _reinstall_drop_k3d_contexts -- the kubeconfig text on stdin, less each item under
+# contexts: named k3d-*, and a current-context that names one. Block layout only,
+# which is the one kubectl and k3d write.
+_reinstall_drop_k3d_contexts() {
+  awk '
+    function flush() { if (n > 0 && !drop) for (i = 1; i <= n; i++) print buf[i]; n = 0; drop = 0 }
+    function nm(l,  q) { q = "[\\042\\047]?"; sub(/^[ \t]*(-[ \t]+)?/, "", l); if (l !~ ("^" q "name" q "[ \t]*:")) return ""; sub(("^" q "name" q "[ \t]*:[ \t]*" q), "", l); return l }
+    /^[^ \t#-]/ { flush(); sec = $0; sub(/[ \t]*:.*/, "", sec); if ($0 ~ /^current-context[ \t]*:[ \t]*[\042\047]?k3d-/) next; print; next }
+    sec == "contexts" {
+      if ($0 ~ /^[ \t]*-[ \t]/ || $0 ~ /^[ \t]*-$/) { flush() }
+      v = nm($0); if (v ~ /^k3d-/) drop = 1
+      buf[++n] = $0; next
+    }
+    { print }
+    END { flush() }
+  '
 }
 
 # refuse_k3d_for_user USER HOME -- prepare-host's refusal: stop by name when the

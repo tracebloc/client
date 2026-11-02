@@ -2,6 +2,24 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## The log Collector no longer waits for the telemetry token
+
+**What changed.** The chart decides whether to run the telemetry Collector
+without looking for the telemetry token Secret, which the Collector no longer
+reads. With `telemetryCollector.enabled` unset, the Collector runs from the first
+install. With `telemetryCollector.enabled: true`, an install no longer fails when
+that Secret is missing.
+
+- The `<release>-telemetry-status` ConfigMap records `enabled`,
+  `disabled-by-operator` or `skipped-incomplete-values`. It no longer records
+  `skipped-no-token`.
+- The auto-upgrade CronJob upgrades only to a newer published chart. It no
+  longer runs `helm upgrade` on the chart version already installed when the
+  Secret appears.
+- jobs-manager still writes the telemetry token Secret. Nothing reads it.
+
+**What you have to do: nothing.**
+
 ## The outbound gate replaces the requests-proxy
 
 **What changed.** The `<release>-requests-proxy` Deployment is gone. In its place
@@ -36,6 +54,27 @@ ingress rule for the API server's addresses.
 
 **Upgrading with plain `--reuse-values`** works too: when the stored values have
 no `egressGate` keys, the chart renders the same defaults.
+
+## The log Collector sends through the outbound gate
+
+**What changed.** The telemetry Collector DaemonSet no longer sends its records
+to tracebloc itself. It sends them to the outbound gate's `egress-gate` Service
+in the release namespace, which checks each batch against the list of what may
+leave, keeps it in the outbound record and sends it on with the client's
+credential. The Collector proves who it is with its own ServiceAccount token,
+which Kubernetes mounts into the pod and renews every hour. It no longer reads
+the telemetry token for that, and no longer uses the proxy settings: the gate's
+requests carry them.
+
+- `telemetryCollector.authScheme` is gone. A value stored in an existing release
+  is ignored.
+- jobs-manager still writes the telemetry token Secret.
+- A container's log line is free text, which the list does not cover. In report
+  mode, the default, the gate sends it and the outbound record marks it as
+  would be refused. With `egressGate.mode: enforce` the gate refuses it, and the
+  Collector's records no longer leave your secure environment.
+
+**What you have to do: nothing.**
 
 ## The image-refresh CronJob is off on prod
 

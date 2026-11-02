@@ -2348,14 +2348,6 @@
             }
           }
         },
-        "authScheme": {
-          "type": "string",
-          "enum": [
-            "Token",
-            "Bearer"
-          ],
-          "description": "`Token` for the secure environment's DRF user token, which the ingest endpoint accepts via TokenAuthentication. `Bearer` is the ClientAccessToken type and 401s silently — a CLOSED set so a typo cannot pick a third."
-        },
         "buffer": {
           "type": "object",
           "properties": {

@@ -1045,33 +1045,27 @@ telemetryCollector:
   # THE KEY'S ABSENCE IS A THIRD STATE. `tracebloc.telemetryCollectorState`
   # (_helpers.tpl) reads three cases, not two:
   #
-  #   enabled: true    an operator chose this. A missing token Secret REFUSES the
-  #                    release, naming the Secret — they are watching, and that is
+  #   enabled: true    an operator chose this. Incomplete Class A lists REFUSE the
+  #                    release, naming the list — they are watching, and that is
   #                    actionable.
   #   enabled: false   an operator opted out. Nothing is collected, permanently.
-  #   (absent)         nobody chose. The chart decides: collect if the token
-  #                    Secret is there, and if it is not, SKIP — recording why in
-  #                    <release>-telemetry-collector-status — rather than fail.
+  #   (absent)         nobody chose. The chart decides: collect when the Class A
+  #                    lists are complete, and if they are not, SKIP — recording
+  #                    why in <release>-telemetry-status — rather than fail.
   #
-  # WHY THE THIRD CASE EXISTS. Auto-upgrade runs unattended, hourly, and
-  # `--reset-then-reuse-values` takes new chart defaults fresh. So a default that
-  # refuses on a missing Secret does not inform anybody — it fails at RENDER time,
-  # before `--atomic` can roll anything back, and the edge stops receiving every
-  # future upgrade including security fixes. On an edge whose jobs-manager predates
-  # backend#2400 nothing will ever write the Secret that would unwedge it. That is
-  # a permanent stop delivered by a checklist item, which is why the unattended
-  # path skips and the attended path refuses.
+  # WHY THE THIRD CASE EXISTS. Auto-upgrade runs unattended, hourly. A default
+  # that refuses fails at RENDER time, before `--atomic` can roll anything back,
+  # and the edge stops receiving every future upgrade including security fixes,
+  # which is why the unattended path skips and the attended path refuses.
   #
   # An absent key is what makes the two distinguishable: `--reset-then-reuse-values`
   # preserves operator CHOICES and drops old chart DEFAULTS, so `kindIs "bool"` is
   # precisely "somebody chose this". Measured on a real cluster, not assumed — see
   # the helper's comment.
   #
-  # THE TOKEN SECRET IS PROVISIONED REGARDLESS (backend#2400): jobs-manager always
-  # receives its coordinates and always holds the RBAC to write it, so an edge
-  # becomes eligible on its own once it re-authenticates. That asymmetry is what
-  # broke the original deadlock, in which the Secret could not exist until the flag
-  # was set and the flag could not be set until the Secret existed.
+  # NO SECRET DECIDES IT. The Collector sends through the egress gate with its own
+  # projected service-account token, so it renders without waiting for anything
+  # on the cluster (tracebloc/tracebloc-engine#2065).
   #
   # enabled: <unset>
 
@@ -1168,9 +1162,9 @@ telemetryCollector:
   hostLogsPath: /var/log/pods
 
   # The Secret jobs-manager writes the ingest token into, and the key inside it.
-  # Read through `bearertokenauth`'s `filename`, which watches the projected file
-  # (credentialsfile.ValueResolver + WithOnChange upstream), so a rotated token is
-  # picked up without restarting the Collector.
+  # The Collector no longer reads it (it sends to the egress gate with its own
+  # service-account token); TODO(tracebloc/tracebloc-engine#2065) removes it with
+  # its writer.
   #
   # `name` IS DELIBERATELY UNSET (backend#2625). The effective default is
   # release-scoped — `<release>-telemetry-token` — computed in
@@ -1182,14 +1176,6 @@ telemetryCollector:
   # `tracebloc-telemetry-token` as "migrate me", not as a chosen override.
   tokenSecret:
     key: token
-
-  # `Token`, NOT `Bearer`. The edge authenticates to the backend with a DRF user
-  # token (`Authorization: Token <key>`, see client-runtime jobs_manager.py), and
-  # the ingest endpoint accepts it via `TokenAuthentication` under
-  # `IsAuthenticatedEdge`. The extension's default scheme is `Bearer`, which is
-  # the OTHER credential type (`ClientAccessToken`) — sending the wrong keyword
-  # 401s silently, so this is set explicitly rather than defaulted.
-  authScheme: Token
 
   # D7's bounds. ONE bound: the byte cap.
   buffer:
@@ -2105,12 +2091,10 @@ resources:
   # and the smallest training envelope needs 1000m / 3072Mi. Every task on
   # staging was refused NEVER_STEADY_STATE (e2e-test-agent fleet 34473120598).
   #
-  # THE FOOTPRINT COUNTS THE COLLECTOR. `helm template` cannot look up the token
-  # Secret, so the render -- and therefore control-plane-footprint.sh, the
-  # installer embed and this derivation -- carries the telemetry collector's
-  # 100m / 128Mi. That is the right worst case: on a real edge the collector IS
-  # rendered once jobs-manager has written the token Secret (backend#2274), so an
-  # edge that trains on install must still train after that. With it counted the
+  # THE FOOTPRINT COUNTS THE COLLECTOR. The render -- and therefore
+  # control-plane-footprint.sh, the installer embed and this derivation --
+  # carries the telemetry collector's 100m / 128Mi, because a real edge renders
+  # it too. With it counted the
   # render was 650m / 2272Mi (now 1792Mi, see above), and the node above left 1050m / 3126Mi (was
   # 900m / 2390Mi): 50m and 54Mi over the envelope. Thin, and honest.
   #
@@ -2400,18 +2384,6 @@ autoUpgrade:
   # Hourly at :23. The off-hour minute spreads load across the
   # tracebloc.github.io/client GitHub Pages origin.
   schedule: "23 * * * *"
-  # A tick with NO newer chart to install is not idle (backend#3550): when the
-  # deployed release recorded the telemetry Collector as `skipped-no-token`
-  # (nobody set telemetryCollector.enabled and jobs-manager had not yet written
-  # the token Secret), the tick asks a server-side dry-run of the DEPLOYED chart
-  # version what it would decide now, and if the answer is `enabled` it re-runs
-  # `helm upgrade` at that same version so the Collector renders. The `lookup`
-  # that decides the three-state rule runs only inside an upgrade, so without
-  # this the Secret appearing changed nothing until the next chart release — the
-  # <release>-telemetry-status ConfigMap names this tick as the trigger. It needs
-  # the deployed version to be one `repoUrl` serves; an edge running a version
-  # AHEAD of that index (a dev chart) cannot be re-rendered and waits for the next
-  # published chart, which the tick says every hour rather than guessing.
   # Helm chart repo to poll. Override only when mirroring internally.
   repoUrl: "https://tracebloc.github.io/client"
   repoName: "tracebloc"

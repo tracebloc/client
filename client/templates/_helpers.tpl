@@ -801,7 +801,8 @@ read it here, so the monitor can only ever get the plugin's class. Nil-safe for
 {{- end }}
 
 {{/*
-  The egress gate's send address for the monitors (RFC-0324 D2): its own
+  The egress gate's send address for the monitors and the telemetry Collector
+  (RFC-0324 D2): its own
   Service, egress-gate-service.yaml, by its namespaced name, so it resolves from
   the node agents' namespace too. Not requests-proxy-service: that alias is kept
   for pods spawned before the upgrade. scripts/tests/gate-address.sh holds every
@@ -3010,12 +3011,9 @@ can be kept above 2 x the configured helm timeout (an --atomic upgrade plus its 
 
 {{/*
   tracebloc.telemetryStatusName — the ConfigMap that records what the Collector
-  decided, and why (templates/telemetry-collector-status.yaml). ONE resolver for
-  its two readers: the status template that writes it and the auto-upgrade
-  CronJob that reads it back out of the stored release manifest to decide whether
-  a same-version re-render is due (backend#3550). Deliberately NOT under the
-  `telemetry-collector` prefix — see the status template for why five shell gates
-  depend on that.
+  decided, and why (templates/telemetry-collector-status.yaml). Deliberately NOT
+  under the `telemetry-collector` prefix — see the status template for why five
+  shell gates depend on that.
 */}}
 {{- define "tracebloc.telemetryStatusName" -}}
 {{- printf "%s-telemetry-status" (include "tracebloc.fullname" .) | trunc 63 | trimSuffix "-" -}}
@@ -3023,9 +3021,8 @@ can be kept above 2 x the configured helm timeout (an --atomic upgrade plus its 
 
 {{/*
   tracebloc.telemetryStateAnnotation — the annotation key the status ConfigMap
-  carries its resolved state under. Shared by the writer (status template) and the
-  reader (auto-upgrade script, which greps it out of `helm get manifest` and out of
-  a server-side dry-run render) so the two cannot disagree about the spelling.
+  carries its resolved state under, and the column the status template's
+  `kubectl get configmap` line reads.
 */}}
 {{- define "tracebloc.telemetryStateAnnotation" -}}
 tracebloc.io/telemetry-collector-state
@@ -3034,23 +3031,9 @@ tracebloc.io/telemetry-collector-state
 {{/*
   tracebloc.telemetryTokenLegacyName — the pre-backend#2625 fixed Secret name.
 
-  It has TWO temporary jobs, and it is the single source for both so they cannot
-  drift apart: it is the sentinel that tracebloc.telemetryTokenSecretName rewrites
-  to a release-scoped name (below), and it is the name the daemonset's pre-flight
-  ALSO accepts while an edge is mid-migration and jobs-manager has not yet written
-  the release-scoped Secret (telemetry-collector-daemonset.yaml).
-
-  REMOVAL CONDITION — this helper AND the daemonset's legacy acceptance are deleted
-  together, once no edge still holds a Secret under this name: every collecting edge
-  has upgraded past the chart that introduced the release-scoped write (backend#2625)
-  AND jobs-manager has re-authenticated at least once on each, populating the
-  release-scoped Secret. That state is observable as the absence of any
-  `tracebloc-telemetry-token` Secret across the fleet's node-agents namespaces
-  (`kubectl get secret -A --field-selector metadata.name=tracebloc-telemetry-token`).
-  Deleting it before then re-wedges exactly the edge acceptance (b) protects — the
-  backend#2400 deadlock in a new costume: the pre-flight would look only for the
-  release-scoped name, find nothing (jobs-manager has not written it yet), and
-  refuse the upgrade on the one edge already collecting.
+  The sentinel that tracebloc.telemetryTokenSecretName rewrites to a
+  release-scoped name (below). It goes with that helper, the writer's env and
+  telemetry-token-rbac.yaml (tracebloc/tracebloc-engine#2065).
 */}}
 {{- define "tracebloc.telemetryTokenLegacyName" -}}
 tracebloc-telemetry-token
@@ -3058,10 +3041,10 @@ tracebloc-telemetry-token
 
 {{/*
   tracebloc.telemetryTokenSecretName — the name of the Secret jobs-manager writes
-  the edge Collector's ingest token into, and that the Collector then mounts and
-  reads (backend#2274). The one resolver behind all four consumers — the writer's
-  env, the reader's guard and volume, and the RBAC resourceName — so they cannot
-  disagree about which Secret they mean (scripts/tests/telemetry-token-agreement.sh).
+  the edge Collector's ingest token into (backend#2274), which nothing reads any
+  more. The one resolver behind the writer's env and the RBAC resourceName, so
+  they cannot disagree about which Secret they mean
+  (scripts/tests/telemetry-token-agreement.sh).
 
   RELEASE-SCOPED (backend#2625). The name used to be a fixed
   `tracebloc-telemetry-token` in the SHARED node-agents namespace, so two releases
@@ -3089,128 +3072,58 @@ tracebloc-telemetry-token
 {{- end -}}
 
 {{/*
-  tracebloc.telemetryTokenPresent — "yes" / "no" / "unknown".
-
-  "unknown" IS A THIRD ANSWER, not a tidier "no". `lookup` returns empty during
-  `helm template` (no cluster to ask), and treating that as absence would make
-  offline rendering disagree with what a real install does — the silent-zero shape
-  this whole epic keeps finding. Callers must branch on all three.
-
-  Accepts the legacy fixed name as well as the release-scoped one, for the reason
-  telemetryTokenSecretName sets out: an edge mid-migration holds only the old one
-  until jobs-manager next re-authenticates, and refusing it would wedge exactly the
-  edge that is already collecting.
-*/}}
-{{/*
-  The token Secret's name BEFORE `fullnameOverride` was set — i.e. what a release
-  installed without one is still carrying (Bugbot, Medium, on client#911).
-
-  `telemetryTokenSecretName` follows the override, so on a renamed release the
-  lookup below missed the live Secret and `telemetryCollectorState` hard-FAILED
-  for an operator who had explicitly enabled the Collector: the token exists, it
-  is simply under `<release>-telemetry-token`. The legacy fallback did not cover
-  it either — that is a different, FIXED name (`tracebloc-telemetry-token`), not
-  the release-scoped one.
-
-  Accepted rather than refused, and that is deliberately the opposite call from
-  the credentials Secret. There, a name miss means SILENTLY MINTING a new
-  password against a datadir that holds the old one, so refusing is the only safe
-  answer. Here the token is server-side and re-derivable — jobs-manager writes it
-  (backend#2274) — so finding the existing one is both safe and what the operator
-  meant. Same reasoning as the legacy name this sits beside.
-*/}}
-{{- define "tracebloc.telemetryTokenPreOverrideName" -}}
-{{- printf "%s-telemetry-token" .Release.Name -}}
-{{- end -}}
-
-{{- define "tracebloc.telemetryTokenPresent" -}}
-{{- if not (lookup "v1" "Namespace" "" "kube-system") -}}
-unknown
-{{- else -}}
-{{- $ns := .Values.nodeAgents.namespace.name -}}
-{{- if or (lookup "v1" "Secret" $ns (include "tracebloc.telemetryTokenSecretName" .)) (lookup "v1" "Secret" $ns (include "tracebloc.telemetryTokenLegacyName" .)) (lookup "v1" "Secret" $ns (include "tracebloc.telemetryTokenPreOverrideName" .)) -}}
-yes
-{{- else -}}
-no
-{{- end -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
   tracebloc.telemetryCollectorState — the ONE decider for whether the Collector
   renders, and why. Returns exactly one of:
 
     enabled                    render it
     disabled-by-operator       the operator said no
-    skipped-no-token           nobody chose; the token Secret is not there yet
     skipped-incomplete-values  nobody chose; the Class A lists are missing, so
                                there is nothing coherent to collect
 
-  THE SECOND SKIP IS NOT DEFENSIVENESS, it is the same wedge one guard further
-  along, and the chart's own tests caught it. `helm upgrade --reuse-values`
-  DELETES a key set to null and does not coalesce chart defaults back, so a
-  release predating this block arrives with the whole `telemetryCollector` map
-  gone — `enabled` absent (fleet mode, correctly) and `classAContainers` absent
-  too. Rendering then dies on the configmap's own `fail`, which is exactly the
-  unattended hard-stop this helper exists to prevent, just relocated. Fleet mode
-  therefore requires a COMPLETE config, not merely a token.
+  NO SECRET IS LOOKED UP. The Collector used to wait for jobs-manager's
+  telemetry-token Secret (backend#2274, backend#2400); it now sends through the
+  egress gate with its own projected service-account token
+  (tracebloc/tracebloc-engine#2065), so nothing on the cluster decides whether
+  it renders. telemetry_collector_test.yaml renders it against a cluster that
+  holds no Secret at all, in fleet mode and enabled by the operator.
+
+  THE SKIP IS NOT DEFENSIVENESS. `helm upgrade --reuse-values` DELETES a key set
+  to null and does not coalesce chart defaults back, so a release predating this
+  block arrives with the whole `telemetryCollector` map gone — `enabled` absent
+  (fleet mode, correctly) and `classAContainers` absent too. Rendering then dies
+  on the configmap's own `fail`, an unattended hard stop on an auto-upgrade
+  CronJob nobody watches. Fleet mode therefore requires a COMPLETE config.
 
   The attended path is untouched: an operator who set `enabled: true` with those
   lists nulled still gets the loud configmap failure naming the list, because
   that branch never reaches these checks.
 
   WHY THIS IS NOT A BOOLEAN, and why `telemetryCollector.enabled` has no default
-  in values.yaml any more (backend#1906).
-
-  The chart could not previously tell "an operator deliberately enabled this" from
-  "this arrived as a new chart default", and the right answer differs sharply:
-
-    * An operator who set the flag is WATCHING. A missing token Secret must refuse
-      the release, loudly, naming the Secret — that is actionable, and silently
-      installing nothing would be the backend#2400 deadlock again.
-
-    * A value that arrived as a chart default has NOBODY watching: auto-upgrade is
-      a CronJob. Refusing there does not inform anyone, it costs that edge every
-      future upgrade — including security fixes — because `helm upgrade` fails at
-      RENDER time, before `--atomic` can roll anything back, and an edge whose
-      jobs-manager predates backend#2400 will never write the Secret that would
-      unwedge it. That is a permanent stop, delivered by a checklist item.
-
-  `--reset-then-reuse-values` (what auto-upgrade runs) makes the two
-  distinguishable, and this is MEASURED, not assumed — on a real cluster, upgrading
-  a release onto a chart whose values.yaml omits the key:
+  in values.yaml (backend#1906). `--reset-then-reuse-values` (what auto-upgrade
+  runs) keeps operator CHOICES, both ways, and drops old chart DEFAULTS, measured
+  on a real cluster:
 
     never set the flag    -> key ABSENT      (kindOf "invalid")
     --set enabled=true    -> true, preserved
     --set enabled=false   -> false, preserved
 
-  Old chart DEFAULTS are not carried forward; operator CHOICES are, both ways. So
-  `kindIs "bool"` is exactly "an operator chose this", and the absent case is the
-  fleet default the chart itself gets to decide.
+  So `kindIs "bool"` is exactly "an operator chose this", and the absent case is
+  the fleet default the chart itself gets to decide.
 
   THE SKIP IS RECORDED, never silent — see templates/telemetry-collector-status.yaml.
-  A component that quietly does nothing is the failure this epic exists to remove;
-  a skip nobody can see is not safer than a crash, only quieter.
 */}}
 {{- define "tracebloc.telemetryCollectorState" -}}
 {{- $tc := default (dict) .Values.telemetryCollector -}}
 {{- if kindIs "bool" $tc.enabled -}}
 {{- if $tc.enabled -}}
-{{- if eq (include "tracebloc.telemetryTokenPresent" .) "no" -}}
-{{- fail (printf "telemetryCollector.enabled is true but its token Secret does not exist in namespace %q — looked for %q, the legacy %q, and the pre-fullnameOverride %q. The Collector's exporter authenticates with it, and jobs-manager writes it (backend#2274). IF YOU JUST CHANGED fullnameOverride FROM ONE VALUE TO ANOTHER, the token is under the PREVIOUS override's name and this render cannot guess it: nothing records what the last one was, and enumerating the namespace would be worse than guessing, because the Collector's volume and the RBAC's resourceNames both name ONLY the first Secret above, so a token found under any other name is one nothing is permitted to read. Two ways forward, and neither is a reinstall: copy the existing Secret to the first name above in that namespace (kubectl get secret <old> -o json | jq '.metadata.name=\"<new>\" | del(.metadata.uid,.metadata.resourceVersion,.metadata.creationTimestamp,.metadata.ownerReferences)' | kubectl apply -f -), or leave telemetryCollector.enabled unset for one upgrade and let jobs-manager re-mint it under the new name on its next re-authentication — the Collector's mount is optional, so it waits and buffers rather than crash-looping. Otherwise create it, or set telemetryCollector.enabled: false — enabling without it buys a DaemonSet that spools to every node's disk and delivers nothing." .Values.nodeAgents.namespace.name (include "tracebloc.telemetryTokenSecretName" .) (include "tracebloc.telemetryTokenLegacyName" .) (include "tracebloc.telemetryTokenPreOverrideName" .)) -}}
-{{- end -}}
 enabled
 {{- else -}}
 disabled-by-operator
 {{- end -}}
-{{- else -}}
-{{- if or (not $tc.classAContainers) (not $tc.classANodeAgentContainers) -}}
+{{- else if or (not $tc.classAContainers) (not $tc.classANodeAgentContainers) -}}
 skipped-incomplete-values
-{{- else if eq (include "tracebloc.telemetryTokenPresent" .) "no" -}}
-skipped-no-token
 {{- else -}}
 enabled
-{{- end -}}
 {{- end -}}
 {{- end -}}
 

@@ -949,6 +949,9 @@ ensure_cosign() {
   fi
   chmod +x "$bin"
   COSIGN_BIN="$bin"
+  # The core checks the chart with this same pinned build (verify_client_chart), and
+  # holds it to the checksum again before using it, so it is not downloaded twice.
+  export TRACEBLOC_COSIGN="$bin"
   return 0
 }
 

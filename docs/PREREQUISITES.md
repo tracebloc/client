@@ -82,7 +82,9 @@ To move it, delete that secure environment with 'tracebloc delete'. Then delete 
 ✖ Nothing was changed.
 ```
 
-Deleting the file and the context's entries by hand does not get the installer past a k3d cluster that is still there: while Docker lists that cluster's containers, stopped ones too, it stops the same way. With k3d installed and Docker not answering, it cannot tell, and stops: start Docker and check that `docker ps` works for you, then run it again.
+Deleting the file and the context's entries by hand does not get the installer past a k3d cluster that is still there: while Docker lists that cluster's containers, stopped ones too, it stops the same way. With no file saying k3d, k3d installed and Docker not answering, it cannot tell, and stops: start Docker and check that `docker ps` works for you, then run it again.
+
+**When Docker is gone.** If the install record or the `k3d-tracebloc` kubeconfig context says k3d, and Docker cannot be used (there is no `docker` command, or it fails outright), the old secure environment is out of the installer's reach, and it does not stop. It removes every `k3d-*` context from your kubeconfig, moves the install record aside to `install-record.json.k3d-<timestamp>` (kept, not deleted), says so in one line, and continues the install. It touches nothing on the cluster side; the old secure environment stays listed on tracebloc as Offline. With Docker usable, or a `docker` that does not answer in time (it may be a live cluster behind a stuck Docker), the stop and its way out above stay: there is no moving a k3d machine.
 
 **Hosts.** Before a run changes anything, the installer checks each host that run needs. The last column says which runs need it.
 
@@ -135,6 +137,8 @@ Moving this machine to k3s in Apple's container runtime is a reinstall: its secu
 To move it, delete that secure environment with 'tracebloc delete'. Then delete ~/.tracebloc/install-record.json and the k3d-tracebloc entries from your kubeconfig if they are still there, and run this installer again.
 ✖ Nothing was changed.
 ```
+
+With Docker gone (no `docker` command, or one that fails outright), a Mac whose install record or `k3d-tracebloc` kubeconfig context says k3d is cleared the same way as on Linux: the contexts are removed, the record is moved aside, one line says so, and the install continues. With Docker usable, or one that does not answer in time, the stop above stays.
 
 A Mac the table above rules out (an Intel Mac, or an older macOS) is stopped by that first. Until the Mac moves, neither the installer nor `tracebloc upgrade` updates its secure environment.
 
@@ -217,7 +221,7 @@ The installer installs no Docker Desktop, no winget packages and no k3d. `traceb
 
 **After a restart.** The secure environment runs while you are signed in. After Windows restarts, it starts again when you sign in.
 
-**A machine that runs tracebloc on k3d.** This installer no longer sets up tracebloc on Docker Desktop with k3d, nor moves a machine off it. On such a machine it stops before WSL is touched, names the secure environment it found, and changes nothing on this machine. It finds one from the files that install left, or, with none of them, from the containers Docker still has for its cluster; with k3d installed and Docker not answering, it cannot tell, and stops. To move the machine, delete that secure environment with `tracebloc delete`. Then delete `%USERPROFILE%\.tracebloc\install-state.json` and the `k3d-tracebloc` entries from your kubeconfig if they are still there, and run this installer again. Moving is a reinstall: its secure environment and that environment's data are deleted, its datasets are ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc.
+**A machine that runs tracebloc on k3d.** This installer no longer sets up tracebloc on Docker Desktop with k3d, nor moves a machine off it. On such a machine it stops before WSL is touched, names the secure environment it found, and changes nothing on this machine. It finds one from the files that install left, or, with none of them, from the containers Docker still has for its cluster; with no file saying k3d, k3d installed and Docker not answering, it cannot tell, and stops. When the install record or the `k3d-tracebloc` kubeconfig context says k3d and Docker cannot be used (no `docker` command, or one that fails outright), it does not stop: it removes every `k3d-*` context from the kubeconfig, moves the install record aside to `install-record.json.k3d-<timestamp>`, says so in one line and continues; the old secure environment stays listed on tracebloc as Offline. With an install record that says `k3s` and the `k3d-tracebloc` context still in your kubeconfig, it stops whatever Docker says, and names that context's entries to delete. With Docker usable, or one that does not answer in time, it stops, and to move the machine, delete that secure environment with `tracebloc delete`. Then delete `%USERPROFILE%\.tracebloc\install-state.json` and the `k3d-tracebloc` entries from your kubeconfig if they are still there, and run this installer again. Moving is a reinstall: its secure environment and that environment's data are deleted, its datasets are ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc.
 
 **A proxy.** Set `HTTPS_PROXY`, and `HTTP_PROXY` and `NO_PROXY` if your network needs them, in Windows' environment before the install. The installer stops before it sets up the distro if a proxy variable holds a value the cluster could not use. Windows' own downloads use `HTTPS_PROXY`. The installer hands these variables into the distro, and k3s gets them there.
 

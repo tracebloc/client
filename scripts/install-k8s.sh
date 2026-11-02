@@ -367,6 +367,9 @@ main() {
   if declare -F host_audit >/dev/null 2>&1; then
     host_audit
   fi
+  # The chart step e installs, checked against tracebloc's signature while nothing on
+  # the machine has changed yet (verify_client_chart), so a refusal can say so.
+  verify_client_chart --before-deps
   echo ""; echo ""
 
   # ── b) Install dependencies ──────────────────────────────────────────────

@@ -116,8 +116,40 @@ repository, not from the manifest, so each chart carries a signature of its own:
 bundles from the same keyless identity, attached to the release beside the chart.
 The release job signs each chart after it is packaged and checked, so the bundle
 covers the bytes the release serves, then verifies each bundle `--offline` and
-checks that a copy with one extra byte fails. Neither the installer nor the
-auto-upgrade checks the bundle yet; verify a chart yourself with the recipe in §6.
+checks that a copy with one extra byte fails. The hourly auto-upgrade does not check
+the bundle yet; verify a chart yourself with the recipe in §6.
+
+**The installer checks the client chart before it changes anything.** At the end of
+step 1, on a host that already has curl (`verify_client_chart` in
+`scripts/lib/install-client-helm.sh`), it reads the Helm repository's index, takes
+the newest stable `client` chart (the one `helm upgrade --install` takes with no
+`--version`), downloads it and the `<chart>.tgz.bundle` beside it, and verifies the
+chart against the bundle with the identity in §6. It then installs that checked
+file, never the repository's chart by name, so the bytes it verified are the bytes
+Helm installs; a reconcile of an existing client takes the same file. It stops
+before anything changes, with *This release isn't signed by tracebloc, so nothing
+was changed*, when the bundle is missing (a 404) or the chart does not verify
+against it; a download it cannot finish stops it in step 1's words for a host it
+cannot reach. On a host without curl, the same check runs at install time, before
+the chart is installed, and refuses the same way, with *This release isn't signed by
+tracebloc, so it wasn't installed*. The installer installs no ingestor chart.
+
+- **cosign.** Only the pinned build (`COSIGN_VERSION` in `install.sh`) is used: the one
+  the bootstrap downloaded and hands down (`TRACEBLOC_COSIGN`), or one on `PATH`, when
+  its checksum is that build's; otherwise it is downloaded and held to its published
+  checksum. `cosign initialize` fetches Sigstore's trust root (`tuf-repo-cdn.sigstore.dev`)
+  into the run's scratch folder; after it, `verify-blob --offline` needs no network, so
+  a failed verification is the signature's, never the network's. If the trust root does
+  not answer, the install stops as for any host it cannot reach.
+- **Where the copies live.** The core runs without `install.sh` in tracebloc's WSL
+  distro, so it keeps its own copy of the signer identity and the cosign build;
+  `scripts/tests/install-chart-verify.bats` holds both to `install.sh`'s.
+- **What is not checked.** A local chart directory (`TRACEBLOC_CHART_PATH`, development
+  and CI) is installed as it is, and `TRACEBLOC_ALLOW_UNVERIFIED=1` skips the check with
+  a warning on the terminal.
+- **The first signed release.** The first signed client chart is 1.16.0. Releases cut
+  before it carry no bundle, so an installer that checks refuses them: it needs the
+  newest stable chart in the index to be one a signing release published.
 
 `scripts/tests/release-upload-scope.bats` refuses a release workflow that attaches
 a chart without its bundle, signs a chart before the last `helm package` or after
@@ -313,7 +345,7 @@ cosign verify-blob \
 Releases cut before the bootstraps were signed carry no `install.sh.bundle` or
 `install.ps1.bundle`.
 
-Verify a chart before you install it (§2b):
+Verify a chart before you install it (§2b; the installer does this for the client chart):
 
 ```bash
 VERSION=${TAG#v}
@@ -329,7 +361,8 @@ cosign verify-blob \
 # → "Verified OK"; then install that file: helm upgrade --install <release> "./client-$VERSION.tgz" ...
 ```
 
-Releases cut before the charts were signed carry no `client-<version>.tgz.bundle`.
+Releases cut before the charts were signed (before client 1.16.0) carry no
+`client-<version>.tgz.bundle`.
 
 On Windows the same `cosign verify-blob` invocation works verbatim (cosign ships
 a Windows binary); compare a sub-script's digest with

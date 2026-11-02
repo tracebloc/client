@@ -477,38 +477,15 @@ spec:
         env:
         {{- include "tracebloc.proxyEnv" . | nindent 8 }}
         {{- /*
-          The edge Collector's token Secret (backend#2274). jobs-manager holds NO
-          default for these: the chart declares the name, namespace and key and
-          passes them here, so the two sides cannot disagree. The Collector mounts
-          that Secret `optional: true` on purpose — a missing token must buffer,
-          not CrashLoopBackOff on every node — which means a wrong name, namespace
-          or key all look exactly like "not deployed yet". A default on the reader
-          side that drifted from this block would manufacture that silence.
+          The telemetry-token Secret's coordinates (backend#2274). Nothing reads
+          that Secret any more: the Collector sends through the egress gate with
+          its own service-account token, and its render no longer waits for the
+          Secret (tracebloc/tracebloc-engine#2065). jobs-manager writes it while
+          these are set; they go with telemetry-token-rbac.yaml once its writer
+          is gone.
 
           THIS CONTAINER ONLY. `pods-monitor-container` below has a
-          byte-identical `env:` opening, and it does not run jobs_manager.py — the
-          Secret writer lives in the jobs-manager image. Wired to the wrong one,
-          every variable would be set on a process that never reads them and the
-          Collector would still get no token.
-
-          SET WHETHER OR NOT THE COLLECTOR IS ENABLED (backend#2400). These were
-          gated on `telemetryCollector.enabled`, and that gate deadlocked the
-          feature on every edge in the fleet: the Collector's own template REFUSES
-          the release while the Secret is absent (telemetry-collector-daemonset.yaml),
-          and the Secret was absent precisely because these were gated. Nobody
-          could take the first step.
-
-          The Secret is a PRECONDITION of the flag, so it must be written BEFORE
-          the flag — which is exactly what it cannot be if it is conditional on it.
-          Ungated, enabling the Collector is one `--set` on an edge that already
-          has the Secret, and the daemonset's `fail` guard keeps its full strength
-          because its precondition is now reachable rather than unreachable.
-
-          THE COST, stated rather than hidden: one idempotent Secret write per
-          re-authentication on every edge, and a Secret sitting unused on edges
-          that never enable the Collector. That is already a supported state on
-          the reading side — the Collector mounts this Secret `optional: true`, so
-          present-or-absent is a case it is built for.
+          byte-identical `env:` opening, and it does not run jobs_manager.py.
         */}}
         {{- $tcEnv := default (dict) .Values.telemetryCollector }}
         {{- $tokEnv := default (dict) $tcEnv.tokenSecret }}
@@ -519,8 +496,7 @@ spec:
         - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_NAME
           # Release-scoped, resolved through the one helper the reader and RBAC also
           # use, so the WRITER cannot end up naming a different Secret than they read
-          # (backend#2625). jobs-manager writes THIS name; the daemonset's pre-flight
-          # additionally tolerates the legacy fixed name until every edge has one.
+          # (backend#2625).
           value: {{ include "tracebloc.telemetryTokenSecretName" . | quote }}
         - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_KEY
           value: {{ $tokEnv.key | default "token" | quote }}

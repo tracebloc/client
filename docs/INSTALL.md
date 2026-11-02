@@ -40,6 +40,7 @@ The standalone installer runs a **preflight** check that verifies this connectiv
 | `api.tracebloc.io` (`dev-api`/`stg-api` for non-prod) | client credential check + the running client's platform connection |
 | `*.servicebus.windows.net` | Azure Service Bus, the experiment and results queues the running client's jobs-manager, pods-monitor and outbound gate connect to (AMQP over WebSockets on 443, so it honors the same HTTP proxy). **Not probed by preflight:** the namespace host is issued by the platform after the credential check, so a block here shows up only once the client is running, as experiments that never leave Pending (`tracebloc cluster doctor` checks the requests-proxy) |
 | `tracebloc.github.io` | the tracebloc Helm chart repository |
+| `tuf-repo-cdn.sigstore.dev` (+ `github.com` and `release-assets.githubusercontent.com`, where each release's chart and its signature are) | Sigstore's trust root, which the installer checks tracebloc's signatures against: its own files, and the chart it installs. **Not probed by preflight:** the chart check at the end of step 1 fetches them before anything changes, and stops naming a host it cannot reach |
 
 On **Linux**, the installer sets up native k3s and fetches no Docker, k3d or kubectl; its download hosts are listed in [PREREQUISITES.md § Linux](PREREQUISITES.md#linux). On a **Mac**, it fetches no Docker, colima, Homebrew or k3d either; its hosts are listed in [PREREQUISITES.md § macOS](PREREQUISITES.md#macos).
 

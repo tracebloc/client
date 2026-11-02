@@ -3662,6 +3662,118 @@ function Get-RetiredClusterContainer {
   return ''
 }
 
+# What Docker says on this machine: 'usable' when docker lists containers, 'absent' when
+# there is no docker command, it cannot start, or it answers with a failure, and
+# 'unknown' when it does not answer in time: a wedged daemon is not a gone one.
+function Get-HostDockerState {
+  $docker = Find-HostCommand 'docker'
+  if (-not $docker) { return 'absent' }
+  $p = Invoke-WslProbe -FilePath $docker -ArgumentList @('ps', '-q') -TimeoutSec $WslProbeTimeoutSec
+  if ($p.TimedOut) { return 'unknown' }
+  if ($p.Started -and $p.ExitCode -eq 0) { return 'usable' }
+  return 'absent'
+}
+
+# The contexts: section of a kubeconfig, its header line included, and nothing else:
+# a cluster or user named k3d-* is no context. JSON has no lines to split on: it
+# is read for its contexts, and text that does not parse is returned whole.
+function Get-KubeconfigContextsText {
+  param([string]$Text)
+  if ($Text -match '^\s*\{') {
+    try {
+      $j = $Text | ConvertFrom-Json -ErrorAction Stop
+      return ('{"contexts":' + (ConvertTo-Json -InputObject @($j.contexts) -Depth 20 -Compress) + '}')
+    } catch { return $Text }
+  }
+  $in = $false
+  $keep = foreach ($line in ($Text -split "`n")) {
+    if ($line -match '^[^ \t#-]') { $in = ($line -match '^contexts[ \t]*:') }
+    if ($in) { $line }
+  }
+  return (@($keep) -join "`n")
+}
+
+# Whether kubeconfig TEXT has the context CONTEXT, in the spellings the header above
+# lists. Only its contexts: are read: a cluster or user of that name is no context.
+function Test-KubeconfigContext {
+  param([string]$Text, [string]$Context)
+  $named = '(?m)(?<![\w.@-])(?<!^[ \t]*#[^\r\n]*)["'']?name["'']?[ \t]*:[ \t]*["'']?' + [regex]::Escape($Context) + '["'']?(?=[ \t]*(?:[,}\]\r\n]|$)|[ \t]+#)'
+  return ((Get-KubeconfigContextsText $Text) -match $named)
+}
+
+# The kubeconfig text less each item under contexts: named k3d-*, and a
+# current-context that names one. Block layout only, which kubectl and k3d write.
+function Remove-K3dContextText {
+  param([string]$Text)
+  $out = New-Object System.Collections.ArrayList
+  $buf = New-Object System.Collections.ArrayList
+  $drop = $false
+  $sec = ''
+  foreach ($line in ($Text -split "`n")) {
+    if ($line -match '^[^ \t#-]') {
+      if (-not $drop) { foreach ($b in $buf) { [void]$out.Add($b) } }
+      $buf.Clear(); $drop = $false
+      $sec = ($line -replace '[ \t]*:.*$', '').Trim()
+      if ($line -match '^current-context[ \t]*:[ \t]*["'']?k3d-') { continue }
+      [void]$out.Add($line); continue
+    }
+    if ($sec -eq 'contexts') {
+      if ($line -match '^[ \t]*-([ \t]|\s*$)') {
+        if (-not $drop) { foreach ($b in $buf) { [void]$out.Add($b) } }
+        $buf.Clear(); $drop = $false
+      }
+      $l = $line -replace '^[ \t]*(-[ \t]+)?', ''
+      if ($l -match '^["'']?name["'']?[ \t]*:[ \t]*["'']?k3d-') { $drop = $true }
+      [void]$buf.Add($line); continue
+    }
+    [void]$out.Add($line)
+  }
+  if (-not $drop) { foreach ($b in $buf) { [void]$out.Add($b) } }
+  return ($out -join "`n")
+}
+
+# With Docker absent, a k3d install's cluster is out of this run's reach: remove its
+# k3d-* contexts from each kubeconfig, move the install record aside, say so in one
+# line; STATE, the retired core's state file, goes aside too. $true when done;
+# $false when a file cannot be changed, which leaves the refusal to stand.
+function Clear-RetiredK3dInstall {
+  param([string]$Record, [string]$State, [string[]]$Kubeconfigs)
+  # A failure puts every file back as it was, so the refusal's "Nothing was changed" holds.
+  $saved = [System.Collections.Generic.List[object]]::new()
+  $moved = [System.Collections.Generic.List[object]]::new()
+  $undo = {
+    foreach ($m in $moved) { try { Move-Item -LiteralPath $m[1] -Destination $m[0] -ErrorAction Stop } catch { $null = $_ } }
+    foreach ($s in $saved) { try { [IO.File]::WriteAllText($s[0], $s[1]) } catch { $null = $_ } }
+  }
+  foreach ($kc in $Kubeconfigs) {
+    if (-not (Test-Path -LiteralPath $kc)) { continue }
+    try {
+      $text = [IO.File]::ReadAllText($kc)
+      $new = Remove-K3dContextText $text
+      if ($new -ne $text) {
+        [void]$saved.Add(@($kc, $text))
+        [IO.File]::WriteAllText($kc, $new)
+      }
+    } catch { & $undo; return $false }
+  }
+  $cluster = $RetiredInstalls['k3d'].Context -replace '^k3d-', ''
+  $said = "Docker is not available on this machine, so its old k3d secure environment '$cluster' is left as it is: this installer deleted the k3d-* contexts from your kubeconfig"
+  $stamp = '.k3d-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ', [Globalization.CultureInfo]::InvariantCulture)
+  if (Test-Path -LiteralPath $Record) {
+    $aside = $Record + $stamp
+    try { Move-Item -LiteralPath $Record -Destination $aside -ErrorAction Stop } catch { & $undo; return $false }
+    [void]$moved.Add(@($Record, $aside))
+    $said += " and moved $Record to $aside"
+  }
+  # Left here, the state file would be read as that install on the next run, which
+  # would then refuse the machine and name 'tracebloc delete' as the way out.
+  if ($State -and (Test-Path -LiteralPath $State)) {
+    try { Move-Item -LiteralPath $State -Destination ($State + $stamp) -ErrorAction Stop } catch { & $undo; return $false }
+  }
+  Write-Host "$said. It stays listed on tracebloc as Offline."
+  return $true
+}
+
 # Refuses, by name, a machine on the retired Windows install (above).
 function Assert-NoRetiredInstall {
   # The way out, last in each message: delete that secure environment with
@@ -3671,6 +3783,21 @@ function Assert-NoRetiredInstall {
   $contexts = @($RetiredInstalls.Values | ForEach-Object { $_.Context }) -join ' and '
   $move = 'To move it, delete that secure environment with ''tracebloc delete''. Then delete ' + $state + ' and the ' + $contexts + ' entries from your kubeconfig if they are still there, and run this installer again.'
   $record = Get-HostRecordPath
+  $kubeconfigs = if ($env:KUBECONFIG) { @($env:KUBECONFIG -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @(Join-Path (Join-Path $env:USERPROFILE '.kube') 'config') }
+  # Read as reinstall.sh's _reinstall_k3d_said reads it: a record decides alone (one of another
+  # substrate, or one that cannot be read, is never cleared and meets the checks below), and
+  # with none only the retired install's own context says k3d, never another k3d cluster's.
+  $saysK3d = $false
+  if (Test-Path -LiteralPath $record) {
+    try { $saysK3d = ([string]((Get-Content -Raw -LiteralPath $record -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop).substrate) -eq 'k3d') } catch { $saysK3d = $false }
+  } else {
+    foreach ($kc in $kubeconfigs) {
+      $t = $null
+      try { $t = [IO.File]::ReadAllText($kc) } catch { $t = $null }
+      if ($t -and (Test-KubeconfigContext $t $RetiredInstalls['k3d'].Context)) { $saysK3d = $true }
+    }
+  }
+  if ($saysK3d -and (Get-HostDockerState) -eq 'absent' -and (Clear-RetiredK3dInstall -Record $record -State $state -Kubeconfigs $kubeconfigs)) { return }
   if (Test-Path -LiteralPath $record) {
     $rec = $null
     try { $rec = Get-Content -Raw -LiteralPath $record -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop } catch { $rec = $null }
@@ -3685,14 +3812,12 @@ function Assert-NoRetiredInstall {
   if (Test-Path -LiteralPath $state) {
     throw "This machine has a secure environment on $RetiredInstallNames ($state, which only its installer wrote, is here), and this installer no longer sets one up or moves one. Nothing was changed on this machine. If that secure environment is already gone, delete $state and re-run. $move"
   }
-  $kubeconfigs = if ($env:KUBECONFIG) { @($env:KUBECONFIG -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @(Join-Path (Join-Path $env:USERPROFILE '.kube') 'config') }
   foreach ($kc in $kubeconfigs) {
     $text = $null
     try { $text = [IO.File]::ReadAllText($kc) } catch { $text = $null }
     if (-not $text) { continue }
     foreach ($r in $RetiredInstalls.Values) {
-      $named = '(?m)(?<![\w.@-])(?<!^[ \t]*#[^\r\n]*)["'']?name["'']?[ \t]*:[ \t]*["'']?' + [regex]::Escape($r.Context) + '["'']?(?=[ \t]*(?:[,}\]\r\n]|$)|[ \t]+#)'
-      if ($text -match $named) {
+      if (Test-KubeconfigContext $text $r.Context) {
         throw "This machine has a secure environment on $($r.Name) (the kubeconfig $kc has its context, $($r.Context)), and this installer no longer sets one up or moves one. Nothing was changed on this machine. If that secure environment is already gone, delete the $($r.Context) entries from $kc and re-run. $move"
       }
     }

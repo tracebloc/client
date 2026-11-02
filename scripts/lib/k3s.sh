@@ -1058,12 +1058,28 @@ _native_k3s_selinux_enabled() {
   "$cmd" >/dev/null 2>&1
 }
 
+# _native_k3s_caller_hostpath -- 0 when a caller's values file (TRACEBLOC_VALUES_FILE,
+# which dev mode installs as-is) may turn hostPath on: its hostPath.enabled is anything
+# but empty or false, or the file cannot be read. 1 with no such file, or hostPath off.
+_native_k3s_caller_hostpath() {
+  local vf="${TRACEBLOC_VALUES_FILE:-}" out
+  [[ -n "$vf" ]] || return 1
+  [[ -r "$vf" ]] && declare -F _values_hostpath_storage >/dev/null 2>&1 || return 0
+  out="$(_values_hostpath_storage <"$vf")" || return 0
+  [[ "$out" != unreadable ]] || return 0
+  case "$(printf '%s\n' "$out" | sed -n 's/^enabled=//p')" in
+    ""|false|null|"~") return 1 ;;
+  esac
+  return 0
+}
+
 # _native_k3s_selinux_confine MODE -- `true` when this k3s runs its pods confined
-# (`selinux: true`), else `false`. Only with SELinux on and MODE node-local:
-# hostpath's volumes are the chart's hostPath PVs, which the kubelet never relabels,
-# so a confined pod could not use their directories.
+# (`selinux: true`), else `false`. Only with SELinux on and node-local volumes: the
+# chart's hostPath PVs (MODE hostpath, or a caller's file that turns hostPath on) are
+# never relabelled by the kubelet, so a confined pod could not use their directories.
 _native_k3s_selinux_confine() {
-  if [[ "$TB_K3S_SELINUX_ARMED" == 1 && "${1:-}" == node-local ]] && _native_k3s_selinux_enabled; then
+  if [[ "$TB_K3S_SELINUX_ARMED" == 1 && "${1:-}" == node-local ]] && ! _native_k3s_caller_hostpath \
+     && _native_k3s_selinux_enabled; then
     printf 'true'
   else
     printf 'false'

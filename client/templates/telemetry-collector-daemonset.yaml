@@ -34,31 +34,7 @@
   already reached central telemetry once (backend#1879).
 */}}
 {{/*
-  Pre-flight: the token Secret must exist before this DaemonSet does. THE CHECK
-  ITSELF NOW LIVES IN `tracebloc.telemetryCollectorState` (_helpers.tpl), which
-  the gate above consults — read it there. Four templates render on this decision
-  and three of them held a byte-identical copy of the old gate, which is three
-  places for it to drift; the helper is the one reader.
-
-  Why it exists at all: `optional: true` on the volume stops the kubelet failing
-  the MOUNT — it does not make the file appear, and `bearertokenauth` needs
-  `filename` to resolve. Whether a missing file aborts the extension's Start is
-  version-dependent and lives in core's `credentialsfile.ValueResolver`, not in
-  the extension: I could not establish it for 0.159.0 from either that tag or
-  `main`. (Bugbot on #779 asserts it aborts.) So the chart does not BET on the
-  answer — it declines to reach the case.
-
-  WHAT CHANGED (backend#1906): "declines to reach the case" used to mean `fail`,
-  unconditionally. That is right when an operator set the flag and is watching,
-  and wrong when the flag arrived as a chart default and a CronJob is the only
-  thing looking — there, refusing costs the edge every future upgrade rather than
-  informing anyone. The helper now splits those two, and the skip is RECORDED
-  (telemetry-collector-status.yaml) rather than silent.
-
-  Refusing the RELEASE rather than crashlooping every node remains the right
-  direction for the operator case: telemetry may never be the reason a node looks
-  unhealthy, and "the install said no, here is the Secret it wants" is actionable
-  in a way that CrashLoopBackOff on 200 nodes is not.
+  Whether this renders is `tracebloc.telemetryCollectorState` (_helpers.tpl).
 */}}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -97,15 +73,12 @@ spec:
       serviceAccountName: {{ include "tracebloc.telemetryCollectorName" . }}
       # The ServiceAccount above is pod IDENTITY ONLY — it is the SCC binding
       # subject on OpenShift, and telemetry-collector-rbac.yaml deliberately
-      # gives it no Role and no ClusterRole. The Collector reads container
-      # stdout off the node filesystem and ships it over HTTP; it never calls
-      # the Kubernetes API. The ingest token it DOES need is the projected
-      # Secret at /etc/tracebloc/telemetry, not this one.
+      # gives it no Role and no ClusterRole. The Collector never calls the
+      # Kubernetes API; it proves who it is to the egress gate with its own
+      # token, projected by the `token` volume below.
       #
-      # Stated rather than left to the default, because this is a DaemonSet:
-      # the default mounts a credential nothing reads onto every node of a
-      # customer's cluster, and a reader of the template cannot tell whether
-      # that was chosen or inherited.
+      # Off: the `token` volume is the one mount of that token, in this
+      # container alone.
       automountServiceAccountToken: false
       securityContext:
         # ROOT, SELECTED EXPLICITLY — `runAsNonRoot: false` only PERMITS root, it
@@ -166,18 +139,12 @@ spec:
             # file_storage queue and /tmp. A Collector that can write anywhere on a
             # customer's node is a larger footprint than this job needs.
             readOnlyRootFilesystem: true
-          env:
-            # Corporate egress proxy (client-runtime#154). The exporter is Go and
-            # honours HTTPS_PROXY/NO_PROXY ambiently, so the CONNECT tunnel the
-            # egress proxy already permits to the backend is the path this takes.
-            # Renders nothing when HTTP_PROXY_HOST is unset.
-            {{- include "tracebloc.proxyEnv" . | nindent 12 }}
           volumeMounts:
             - name: config
               mountPath: /conf
               readOnly: true
             - name: token
-              mountPath: /etc/tracebloc/telemetry
+              mountPath: /var/run/secrets/tracebloc/collector
               readOnly: true
             # The node's container stdout. READ-ONLY — the Collector must never be
             # able to modify or truncate the logs it reads.
@@ -194,21 +161,13 @@ spec:
         - name: config
           configMap:
             name: {{ include "tracebloc.telemetryCollectorName" . }}
+        # The pod's own service-account token, for the egress gate.
         - name: token
-          secret:
-            # The release-scoped name jobs-manager writes (backend#2625). Mounting
-            # the WRITER's target — not "whichever name exists at render time" —
-            # matters during migration: on an edge still holding only the legacy
-            # Secret this renders before the release-scoped one exists, but `optional`
-            # below tolerates that, and jobs-manager fills it on its next re-auth.
-            # Freezing this to the legacy name instead would strand the Collector on
-            # a Secret jobs-manager no longer refreshes, stale on the next rotation.
-            secretName: {{ include "tracebloc.telemetryTokenSecretName" . }}
-            # OPTIONAL, and this is the difference between "buffers until the token
-            # arrives" and "CrashLoopBackOff on every node". jobs-manager writes
-            # this Secret; a Collector deployed before it exists must wait, not
-            # fail — telemetry may never be the reason a node looks unhealthy.
-            optional: true
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
         - name: host-logs
           hostPath:
             path: {{ $tc.hostLogsPath | default "/var/log/pods" }}

@@ -29,8 +29,8 @@
   privilege this workload has no use for, on a DaemonSet that runs on every node
   of a customer's cluster.
 
-  It does need the token Secret, and that is mounted rather than fetched, so the
-  ServiceAccount is only an identity for the pod.
+  Its own projected service-account token is mounted rather than fetched, and
+  the egress gate reviews it, so the ServiceAccount is only an identity.
 */}}
 apiVersion: v1
 kind: ServiceAccount

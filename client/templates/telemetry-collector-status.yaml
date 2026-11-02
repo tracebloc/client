@@ -2,9 +2,9 @@
   WHAT THE COLLECTOR DECIDED, AND WHY — backend#1906.
 
   A component that quietly does nothing is the exact failure this epic exists to
-  remove. `tracebloc.telemetryCollectorState` can now decline to render the
-  Collector (`skipped-no-token`) instead of failing the release, which is the
-  right call for an unattended auto-upgrade — but a skip nobody can see is not
+  remove. `tracebloc.telemetryCollectorState` can decline to render the
+  Collector (`skipped-incomplete-values`) instead of failing the release, which is
+  the right call for an unattended auto-upgrade — but a skip nobody can see is not
   safer than a crash, only quieter. So the decision is written down on the
   cluster, every time, including when the answer is "enabled".
 
@@ -30,38 +30,6 @@
   label selectors.
 */}}
 {{- $state := include "tracebloc.telemetryCollectorState" . -}}
-{{- /*
-  WHAT ACTUALLY RE-RENDERS A SKIP (backend#3550). The record used to say the
-  no-token skip "resolves itself once jobs-manager writes the Secret". It does
-  not: the `lookup` that decides the state runs only inside a `helm upgrade`, and
-  the Secret appearing triggers none. Measured on a fresh edge — the Secret was
-  present within minutes, three hourly ticks passed, no Collector; it rendered a
-  day later, when a NEWER chart happened to be published. So the trigger is a
-  helm upgrade, and the record must name the one that will actually happen. The
-  auto-upgrade tick now performs a same-version re-render when the stored state is
-  skipped-no-token and a server-side dry-run says the Secret has arrived
-  (auto-upgrade-cronjob.yaml), but only when the deployed chart version is one
-  its repo can serve — an edge running a version AHEAD of the published index
-  (a dev chart) has nothing the tick can re-render, and waits for the next
-  published chart. Both the schedule and the repo are read from the values that
-  drive that CronJob, never restated here.
-
-  A NAMED TRIGGER CAN ITSELF BE PAUSED (backend#3731). `$au.enabled` alone is not
-  "the tick will run" — the CronJob this record names also honours
-  `autoUpgrade.suspend` (auto-upgrade-cronjob.yaml renders it into the CronJob's
-  own `spec.suspend`), and a suspended CronJob never fires no matter what its
-  schedule says. Naming the tick as the trigger while it is suspended is the same
-  false promise backend#3550 fixed for the wrong-mechanism case, so `$au.suspend`
-  gates this branch too. `imageRefresh.suspend` is a different flag on a
-  different CronJob and has no bearing here.
-*/ -}}
-{{- $au := default (dict) .Values.autoUpgrade -}}
-{{- $trigger := "autoUpgrade is off in this release, so nothing re-renders it for you: run `helm upgrade` on this release once the Secret exists" -}}
-{{- if and $au.enabled (not $au.suspend) -}}
-{{- $trigger = printf "the next auto-upgrade tick (CronJob schedule %q) re-renders this release in place once the Secret exists, provided the deployed chart version %s is one the repo %s serves — a version ahead of that repo's index cannot be re-rendered and waits for the next published chart" ($au.schedule | default "unset" | toString) .Chart.Version ($au.repoUrl | default "unset" | toString) -}}
-{{- else if and $au.enabled $au.suspend -}}
-{{- $trigger = "autoUpgrade is suspended on this release (autoUpgrade.suspend: true): the CronJob will not run until it is unsuspended, so nothing re-renders this for you — unsuspend autoUpgrade, or run `helm upgrade` on this release yourself once the Secret exists" -}}
-{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -82,8 +50,6 @@ data:
     "The Collector is running. Class A container stdout is forwarded to the tracebloc backend."
   {{- else if eq $state "disabled-by-operator" -}}
     "telemetryCollector.enabled is explicitly false in this release's values. Nothing is collected, by choice."
-  {{- else if eq $state "skipped-incomplete-values" -}}
-    {{ printf "No Collector: nobody set telemetryCollector.enabled, and this release carries no Class A container lists — helm DELETES a key set to null and does not coalesce chart defaults back under --reuse-values, so a release predating the Collector arrives without them. Upgrading with --reset-then-reuse-values (which auto-upgrade uses) restores them — on the next chart upgrade, which is the next auto-upgrade tick that finds a newer published chart or a `helm upgrade` you run; nothing re-renders this release by itself." | quote }}
   {{- else -}}
-    {{ printf "No Collector: nobody set telemetryCollector.enabled, and its token Secret is not present in namespace %q (looked for %q, and the legacy %q). jobs-manager writes that Secret when it next re-authenticates (backend#2274). The Secret appearing triggers nothing by itself — the Collector renders on the next helm upgrade of this release: %s. Set telemetryCollector.enabled: false to opt out permanently." .Values.nodeAgents.namespace.name (include "tracebloc.telemetryTokenSecretName" .) (include "tracebloc.telemetryTokenLegacyName" .) $trigger | quote }}
+    {{ printf "No Collector: nobody set telemetryCollector.enabled, and this release carries no Class A container lists — helm DELETES a key set to null and does not coalesce chart defaults back under --reuse-values, so a release predating the Collector arrives without them. Upgrading with --reset-then-reuse-values (which auto-upgrade uses) restores them — on the next chart upgrade, which is the next auto-upgrade tick that finds a newer published chart or a `helm upgrade` you run; nothing re-renders this release by itself." | quote }}
   {{- end }}

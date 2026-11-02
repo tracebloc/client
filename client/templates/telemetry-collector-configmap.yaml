@@ -41,12 +41,12 @@ metadata:
 data:
   config.yaml: |
     extensions:
-      # Watches the projected Secret file, so a token rotated by jobs-manager is
-      # picked up without restarting the Collector (upstream: the extension builds
-      # a credentialsfile.ValueResolver with WithOnChange).
+      # The Collector's own service-account token, projected by the kubelet, which
+      # rotates it; the extension re-reads the file when it changes. The egress gate
+      # has the Kubernetes API review it (RFC-0324 D2).
       bearertokenauth:
-        scheme: {{ $tc.authScheme | default "Token" | quote }}
-        filename: /etc/tracebloc/telemetry/{{ (default (dict) $tc.tokenSecret).key | default "token" }}
+        scheme: Bearer
+        filename: /var/run/secrets/tracebloc/collector/token
 
       # D7: the queue is backed by DISK, not memory, so it survives the pod
       # restart that is the common case during a backend outage.
@@ -299,23 +299,25 @@ data:
               {{- end }}
 
       batch:
-        # Modest, because the destination is a Django request path rather than a
-        # collector: a large batch is a large request against the service that also
-        # serves the product.
+        # Modest: each batch is one request. The egress gate refuses a body past
+        # its cap (413, which the exporter drops), and sends the rest to a Django
+        # view that also serves the product.
         send_batch_size: 200
         send_batch_max_size: 500
         timeout: 10s
 
     exporters:
+      # The id names where the records land; the persisted queue below is keyed
+      # by it, so a new id would strand what each node has buffered.
       otlp_http/backend:
-        # logs_endpoint, NOT endpoint: otlp_http appends /v1/logs to `endpoint`,
-        # and the ingest boundary is a versioned path of our own.
-        logs_endpoint: {{ printf "%stelemetry/v1/records/" (include "tracebloc.backendUrl" .) | quote }}
+        # The egress gate's OTLP route for the `collector.records` row (RFC-0324
+        # Q8): the gate checks each export and sends it on with its own login.
+        logs_endpoint: {{ printf "%s/v1/otlp/collector.records" (include "tracebloc.egressGateSendUrl" .) | quote }}
         encoding: json
+        # The gate reads JSON only; gzip on this in-cluster hop would be refused.
+        compression: none
         auth:
           authenticator: bearertokenauth
-        # https/443 by construction (the backend URL is https), so the CONNECT
-        # tunnel the egress proxy allows is the same one this uses.
         sending_queue:
           enabled: true
           storage: file_storage
