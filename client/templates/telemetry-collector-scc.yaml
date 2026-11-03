@@ -1,7 +1,7 @@
 {{- $tcScc := default (dict) .Values.telemetryCollector -}}
 {{- if and (eq (include "tracebloc.telemetryCollectorState" .) "enabled") .Values.openshift.scc.enabled }}
 {{- /*
-  OpenShift SCC for the edge Collector — backend#1906.
+  OpenShift SCC for the edge Collector.
 
   A SEPARATE SCC, not a widening of resource-monitor's. That one declares
   `runAsUser: MustRunAsNonRoot`, which is correct for it: its hostPath mounts are
@@ -12,7 +12,7 @@
 
   Chart-managed SCCs previously gated on `resourceMonitor` alone and bound only its
   ServiceAccount, so on OpenShift with `openshift.scc.enabled` the Collector's pods
-  had no SCC admitting their hostPath mounts at all. (Bugbot on #779.)
+  had no SCC admitting their hostPath mounts at all.
 */}}
 ---
 apiVersion: security.openshift.io/v1
@@ -60,7 +60,7 @@ seLinuxContext:
   # `container_log_t` with per-container MCS categories. A namespace MCS context
   # from `MustRunAs` cannot read them, so the pods would be admitted, run as root,
   # and take a permission error on every include glob: a healthy DaemonSet
-  # shipping zero records. (Bugbot on #779.)
+  # shipping zero records.
   #
   # Same shape as the runAsUser widening on this SCC, and the same trade: the
   # narrowing that makes it defensible is elsewhere — all capabilities dropped, no

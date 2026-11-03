@@ -9,11 +9,11 @@ data:
   {{- /*
   ONE key, shared by every engine major, because both mounts in
   mysql-deployment.yaml (conf.d for all engines; /etc/mysql/my.cnf on 8.4
-  only, backend#3032) name `mysql.cnf` as their subPath. What differs per
+  only) name `mysql.cnf` as their subPath. What differs per
   engine is decided INSIDE the block, on the same helper that gates the 8.4
   mount, so the file the 8.4 mount makes mysqld read is one 8.4 accepts.
 
-  The redo-log line is the one place the majors disagree (client-dev#1140):
+  The redo-log line is the one place the majors disagree:
   8.0.30+ replaced innodb_log_file_size and innodb_log_files_in_group with
   innodb_redo_log_capacity, the TOTAL redo size — so 5.7's 64M x the default
   innodb_log_files_in_group of 2 becomes 128M, the same redo budget. On 8.4

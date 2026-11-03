@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: Service
 metadata:
-  # client-runtime#21: exposes jobs-manager's HTTP ingestion endpoint
+  # exposes jobs-manager's HTTP ingestion endpoint
   # (POST /internal/submit-ingestion-run) at a stable in-cluster name so
-  # the ingestor subchart's post-install hook (tracebloc/client#86) can
+  # the ingestor subchart's post-install hook can
   # POST without discovering Pod IPs. ClusterIP-only — there is no
   # legitimate caller outside the cluster.
   name: jobs-manager

@@ -2,7 +2,7 @@
 # =============================================================================
 #  k3s-firewall.sh — keep the native k3s API (6443) and the kubelet (10250)
 #                    off the network with a persisted host firewall rule
-#                    (RFC-0175 D4)
+# 
 # =============================================================================
 #
 # k3d published the API on 127.0.0.1 only. Native k3s listens on *:6443 and

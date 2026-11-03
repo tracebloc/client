@@ -42,7 +42,7 @@ _tb_lowest_version() {
 }
 
 # _NVIDIA_PRE_TURING_NAME_RE -- the GPU families below compute capability 7.5, as
-# nvidia-smi names them (tracebloc/client-dev#1631): GeForce GT / GTS / GTX 4xx-10xx,
+# nvidia-smi names them: GeForce GT / GTS / GTX 4xx-10xx,
 # GTX TITAN, TITAN X / Xp / V / Z / Black, MX1xx-3xx, the 6xx-9xx M / MX / A laptop
 # parts, Quadro K / M / P / GP / GV, NVS, Tesla and GRID K / M / P / V, and the bare
 # datacenter names (K80, M60, P100, P40, P4, V100 ...). Turing and later never match:
@@ -92,10 +92,10 @@ _NVIDIA_GPU_FLOOR_VERDICTS=(ok below-hard-floor below-compute unreadable)
 #     old for the images is never reported as merely an old driver (an upgrade cannot
 #     help it).
 #   - A driver too old to know compute_cap (the query fails) is judged by the card's
-#     NAME: a known pre-Turing family is below-compute (client-dev#1631, a GT 710 on
+#     NAME: a known pre-Turing family is below-compute (a GT 710 on
 #     its last driver). A name this cannot classify is judged on the driver alone.
 #   - Below HARD_FLOOR (the CUDA 13 minimum tracebloc's GPU images need) it is
-#     below-hard-floor, which skips the GPU (client-dev#1632). There is no warning
+#     below-hard-floor, which skips the GPU. There is no warning
 #     band: every driver at or above HARD_FLOOR is judged on the card alone.
 #     DRIVER_FLOOR is not compared, only read: the gate names it as the update, so a
 #     floor that is not a version is unreadable, never a pass.
@@ -114,7 +114,7 @@ _nvidia_gpu_floor_verdict() {
 }
 
 # _nvidia_unsupported_name NAMES CAPS CAP_FLOOR -- pure: the name of the GPU the floor
-# gate left off as unsupported (client-dev#1633), for env.GPU_UNSUPPORTED_NAME. NAMES and
+# gate left off as unsupported, for env.GPU_UNSUPPORTED_NAME. NAMES and
 # CAPS are nvidia-smi's name and compute_cap answers, one line per GPU in the same order:
 #   - the first GPU whose compute capability is below CAP_FLOOR;
 #   - else, the compute capability unreadable, the first pre-Turing name;
@@ -155,9 +155,9 @@ _nvidia_driver_update_cmd() {
 #                               below-hard-floor prints the update to the driver
 #                               floor and says to re-run the installer
 # below-compute and below-hard-floor also set TB_GPU_UNSUPPORTED_REASON / _NAME, which
-# the chart passes to the platform (client-dev#1633), and TB_GPU_UNSUPPORTED_CODE, the
-# machine-readable kind beside the sentence (compute_too_old / driver_too_old,
-# backend#5296); every other verdict clears all three.
+# the chart passes to the platform, and TB_GPU_UNSUPPORTED_CODE, the
+# machine-readable kind beside the sentence (compute_too_old / driver_too_old);
+# every other verdict clears all three.
 _nvidia_gpu_floor_gate() {
   local floor="$TB_NVIDIA_DRIVER_FLOOR" cap_floor="$TB_NVIDIA_COMPUTE_CAP_FLOOR"
   local hard="$TB_NVIDIA_DRIVER_HARD_FLOOR" names="${3:-}"
@@ -173,9 +173,8 @@ _nvidia_gpu_floor_gate() {
   case "$TB_GPU_FLOOR_VERDICT" in
     ok) ;;
     below-hard-floor)
-      # Below the CUDA 13 minimum tracebloc's GPU images need (torch 2.14.1+cu130,
-      # tracebloc-engine#1712) the GPU would be advertised and unusable
-      # (client-dev#1632), so it is left off: there is no warning band (2026-10-18).
+      # Below the CUDA 13 minimum tracebloc's GPU images need (torch 2.14.1+cu130)
+      # the GPU would be advertised and unusable, so it is left off: there is no warning band (2026-10-18).
       # The update is to the driver floor, and the GPU is set up only by a run on the
       # new driver, so the hint says to re-run the installer. Word for word what
       # install-wsl.ps1 says on Windows (install-wsl.Tests.ps1 holds it).
@@ -191,8 +190,8 @@ _nvidia_gpu_floor_gate() {
       ;;
     below-compute)
       if [[ "$cap" == unknown ]] && old_name="$(_nvidia_pre_turing_name "$names")"; then
-        # Classified by name: the driver could not report the compute capability
-        # (client-dev#1631), so the card is named instead of a number.
+        # Classified by name: the driver could not report the compute capability,
+        # so the card is named instead of a number.
         warn "This NVIDIA GPU (${old_name}) is too old for tracebloc's GPU images, which need compute capability ${cap_floor} or newer — this machine will run in CPU mode."
         TB_GPU_UNSUPPORTED_REASON="This GPU is too old for tracebloc's GPU training images, which need compute capability ${cap_floor} or newer (NVIDIA Turing or later), so this machine runs on CPU."
       else
@@ -210,8 +209,8 @@ _nvidia_gpu_floor_gate() {
   esac
 }
 
-# _nvidia_gpu_wsl_verdict NAMES -- the floor gate in tracebloc's WSL distro (3.2 part 3,
-# client-dev#1810). There nvidia-smi answers for the WINDOWS driver, whose number the
+# _nvidia_gpu_wsl_verdict NAMES -- the floor gate in tracebloc's WSL distro (3.2 part 3).
+# There nvidia-smi answers for the WINDOWS driver, whose number the
 # Linux floors must never judge. The Windows installer judged it against the Windows
 # floors (install-wsl.ps1, Confirm-NvidiaDriver), said what it means, and hands the
 # verdict to both of the core's runs on their line: TRACEBLOC_WSL_GPU_VERDICT, one of
@@ -249,7 +248,7 @@ _nvidia_gpu_wsl_verdict() {
   esac
 }
 
-# ── The GPU that is not NVIDIA, and the NVIDIA GPU no container can see (backend#5296) ──
+# ── The GPU that is not NVIDIA, and the NVIDIA GPU no container can see ──
 # TB_GPU_UNSUPPORTED_CODE is one of a CLOSED vocabulary the backend stores beside the
 # sentence and the dashboard switches on: compute_too_old and driver_too_old (the floor
 # gate above), not_nvidia, runtime_cannot_see_gpu and arch_unsupported (below).
@@ -257,8 +256,8 @@ _nvidia_gpu_wsl_verdict() {
 # detect-gpu.bats holds its not_nvidia and arch_unsupported sentences to these.
 # wsl_cannot_see_gpu is the Windows installer's alone (install-wsl.ps1,
 # Confirm-NvidiaWslGpu), taken below as it reports it. A code the backend does not
-# know yet is stored blank and the sentence still shows (backend#5296).
-# runtime_cannot_see_gpu is the runtime-neutral name backend#5892 gave the container-blind
+# know yet is stored blank and the sentence still shows.
+# runtime_cannot_see_gpu is the runtime-neutral name given to the container-blind
 # code. The backend and cli-dev's doctor still read the old name, for clients installed
 # before it, but nothing here writes it: detect-gpu.bats fails on any file naming it.
 
@@ -317,7 +316,7 @@ _gpu_not_nvidia_report() {
   TB_GPU_UNSUPPORTED_NAME="$1"
 }
 
-# ── The GPU tracebloc has no training image for (client-dev#1697, #1698) ──
+# ── The GPU tracebloc has no training image for ──
 # The GPU training images are CUDA and linux/amd64 only: there is no ROCm image and no
 # arm64 GPU image. So an AMD GPU, and an NVIDIA GPU on a machine that is not x86_64, are
 # GPUs this installer cannot use, and it treats them as it treats an NVIDIA card below
@@ -515,12 +514,12 @@ detect_gpu() {
     fi
     GPU_VENDOR="nvidia"
     NVIDIA_DRIVER_OK=true
-    # Capture-then-slice, not `nvidia-smi … | head -1` (backend#1778). These run
+    # Capture-then-slice, not `nvidia-smi … | head -1`. These run
     # under install.sh's `set -euo pipefail` by inheritance, and head closes the
     # pipe after line 1 — one line per GPU is small today, but the shape is the
     # one being retired fleet-wide and the slice costs nothing.
     #
-    # `|| _x=""` is NOT decoration (Bugbot). These were argument-position
+    # `|| _x=""` is NOT decoration. These were argument-position
     # substitutions, where a failing nvidia-smi could not trip errexit; moving
     # them into assignments puts them where it can, so a driver that answers
     # `nvidia-smi` but fails --query-gpu would abort the install with 2>/dev/null
@@ -562,7 +561,7 @@ detect_gpu() {
     # close the pipe on its first hit; lspci takes SIGPIPE and pipefail makes the
     # pipeline 141, which the `if` reads as "no such GPU" — a CPU-mode cluster on
     # a GPU host. lspci streams device-per-line, so an NVIDIA/AMD card early in
-    # the enumeration is exactly the case that loses the race (backend#1778).
+    # the enumeration is exactly the case that loses the race.
     lspci_out="$(lspci 2>/dev/null || true)"
     if grep -qi "NVIDIA" <<<"$lspci_out"; then
       GPU_VENDOR="nvidia"
@@ -575,7 +574,7 @@ detect_gpu() {
       return
     fi
     if grep -qi "AMD.*VGA\|Advanced Micro Devices.*VGA\|Radeon" <<<"$lspci_out"; then
-      # No ROCm image exists (client-dev#1697): the AMD GPU is left off, like any other
+      # No ROCm image exists: the AMD GPU is left off, like any other
       # GPU that is not NVIDIA. No ROCm, no AMD device plugin, no amd.com/gpu request.
       GPU_VENDOR="amd_unsupported"
       amd_line="$(grep -i 'Radeon\|AMD.*VGA' <<<"$lspci_out" || true)"

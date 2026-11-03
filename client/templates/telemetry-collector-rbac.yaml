@@ -20,7 +20,7 @@
 {{- $tc := default (dict) .Values.telemetryCollector -}}
 {{- if eq (include "tracebloc.telemetryCollectorState" .) "enabled" }}
 {{- /*
-  The Collector's identity — backend#1906.
+  The Collector's identity.
 
   NO ClusterRole AND NO Role, deliberately. It reads container stdout off the
   node's filesystem through `file_log`; it never calls the Kubernetes API, so it

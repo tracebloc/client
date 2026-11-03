@@ -20,12 +20,11 @@
   NO SECRETS. A GPU job's MySQL user comes by secretKeyRef from a Secret whose
   name is made per job (tb-dbcreds-exp<id>c<cycle>-<hash>, see rbac.yaml), and
   no rule here can pin that. jobs-manager grants the runner that one Secret per
-  job instead, with a Role and RoleBinding the Job owns (RFC-0185 §8 Q5, option
-  1; rbac.yaml gives jobs-manager the right under tracebloc.runnerDbCredsGrant),
+  job instead, with a Role and RoleBinding the Job owns (rbac.yaml gives jobs-manager the right under tracebloc.runnerDbCredsGrant),
   so this grants no access to Secrets at all.
 
   ITS OWN TOKEN. The installer mints the runner a bound token for one year, and
-  the runner renews it at half-life (RFC-0185 Call 2, option (a)): a
+  the runner renews it at half-life: a
   TokenRequest for this ServiceAccount, pinned by name, and for no other.
 
   NAMES. The ServiceAccount's is fixed (tracebloc.appleGpuRunnerAccount). The

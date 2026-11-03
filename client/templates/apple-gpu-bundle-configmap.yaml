@@ -1,6 +1,6 @@
 {{- /*
-  The macOS engine bundle the Apple GPU runner on a Mac is to hold (RFC-0185 D2,
-  D6, §8 Q16; tracebloc-engine#1701 publishes it, cli-dev#1305 reads it).
+  The macOS engine bundle the Apple GPU runner on a Mac is to hold. The engine release
+  publishes it and the CLI reads it.
 
   WHY THE CLUSTER TELLS THE RUNNER. The chart upgrades itself hourly; the runner
   ships in the CLI and moves only when the user upgrades it. jobs-manager sends a

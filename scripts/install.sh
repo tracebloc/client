@@ -54,7 +54,7 @@ set -euo pipefail
 # small local palette, disabled under the same rule as common.sh's: stdout not a
 # terminal, NO_COLOR, TERM=dumb or TB_PLAIN=1 (TRACEBLOC_PLAIN=1). _tb_anim says
 # whether this script's own spinner frames may redraw in place; plain, each step
-# prints one static line instead (client-dev#1642).
+# prints one static line instead.
 if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" \
       && "${TRACEBLOC_PLAIN:-${TB_PLAIN:-}}" != "1" ]]; then
   _B=$'\033[1m'; _C=$'\033[0;36m'; _D=$'\033[2m'; _G=$'\033[0;32m'; _R=$'\033[0m'
@@ -120,7 +120,7 @@ _tb_boot_resume() {
 # A terminal left in a folder that was deleted meanwhile makes EVERY new bash
 # print "shell-init: error retrieving current directory: getcwd: …" once at
 # start-up, and this bootstrap starts install-k8s.sh, which starts more. Four of
-# those lines read as the installer failing (backend#5025 O-16). The installer
+# those lines read as the installer failing. The installer
 # never needs the caller's folder -- it works in mktemp dirs and ~/.tracebloc --
 # so move to $HOME once, say so in one line, and every child starts clean. The
 # lines bash printed before this script ran (the shell reading `curl | bash`)
@@ -155,7 +155,7 @@ esac
 # substrate served here (_tb_record_served, below).
 _tb_bail_ok=1
 _tb_force=0
-# Settings naming (backend#3846): TRACEBLOC_REF / TRACEBLOC_BRANCH are the
+# Settings naming: TRACEBLOC_REF / TRACEBLOC_BRANCH are the
 # canonical spellings of the release pin and the dev-branch override; REF /
 # BRANCH still work (remove_by 2026-12-31). A non-empty canonical wins, resolved
 # once into the legacy-named variable the rest of this bootstrap reads.
@@ -177,7 +177,7 @@ if [[ -n "${TRACEBLOC_BRANCH:-}" ]]; then BRANCH="$TRACEBLOC_BRANCH"; fi
 [[ "${TB_UPGRADE_CLI:-${TRACEBLOC_UPGRADE_CLI:-0}}" == "1" ]] && _tb_bail_ok=0
 # An explicit substrate request (TRACEBLOC_SUBSTRATE set to anything; empty is
 # none, as install-k8s.sh reads it) is install-k8s.sh's to answer, so it skips ONLY
-# the bailout, with no _tb_force (client-dev#1761). install-k8s.sh hands a healthy
+# the bailout, with no _tb_force. install-k8s.sh hands a healthy
 # machine on its own substrate to the home screen, and refuses by name a machine
 # that runs tracebloc on k3d (reinstall.sh) or a request it cannot serve.
 # install-bootstrap.bats reads the variable's name and the substrates from the
@@ -189,15 +189,15 @@ for _a in "$@"; do
     # prepare-host must reach the sub-script even on a healthy machine — it's
     # useful there (grant ANOTHER researcher the k3s group), and the
     # healthy-bailout would otherwise open the home screen and silently skip the
-    # TB_PREPARE_USER grant (Bugbot on #381). It skips ONLY the bailout — no
+    # TB_PREPARE_USER grant. It skips ONLY the bailout — no
     # _tb_force — so host-prep is never mislabeled as a forced reinstall (the
     # sub-script dispatches prepare-host before its assess gate anyway).
     prepare-host|--prepare-host) _tb_bail_ok=0 ;;
     # install-k8s.sh's terminal commands: the support bundle and the help text.
     # They install nothing, and a healthy machine is where people ask for the
     # bundle ("which version am I on?"). The bailout used to open the home screen
-    # instead, so `bash -s -- --diagnose` produced no bundle there
-    # (client-dev#1671). Like prepare-host, they skip ONLY the bailout, with no
+    # instead, so `bash -s -- --diagnose` produced no bundle there.
+    # Like prepare-host, they skip ONLY the bailout, with no
     # _tb_force. install-bootstrap.bats derives this list from install-k8s.sh's
     # dispatch, so a new terminal flag there fails that test until it is added
     # here.
@@ -267,7 +267,7 @@ _tb_check_healthy() {
 # step reads it to say "run it now" when the CLI's directory was already on it,
 # and "open a new terminal" only when it was not (install-cli.sh,
 # _cli_on_launch_path). Kept when already set, so a nested run keeps the first.
-# TRACEBLOC_LAUNCH_PATH is the name (backend#3846: TB_ is a banned prefix); the
+# TRACEBLOC_LAUNCH_PATH is the name (TB_ is a banned prefix); the
 # legacy TB_LAUNCH_PATH is read as the fallback (remove_by 2026-12-31). Only the
 # canonical is exported: the core libs this bootstrap fetches read it first.
 export TRACEBLOC_LAUNCH_PATH="${TRACEBLOC_LAUNCH_PATH:-${TB_LAUNCH_PATH:-${PATH:-}}}"
@@ -426,7 +426,7 @@ if [[ -n "${TRACEBLOC_SOURCE_URL:-}" ]]; then
 fi
 # The RELEASE ASSETS for this ref. Everything the customer path fetches — the
 # sub-scripts (attached as flat assets by basename), the signed manifest, and its
-# cosign sig/cert/bundle — is served from here. backend#3998: the public mirror
+# cosign sig/cert/bundle — is served from here. the public mirror
 # carries no scripts/ tree, so the old raw-by-tag transport 404s for every
 # customer tag; and even where a tree IS present on the mirror it tracks only the
 # newest stable publish (the mirror's tree push is gated to that release), so a
@@ -468,7 +468,7 @@ subscript_url() {
 # it the new one. Trust exactly those two — anything else is rejected — so both
 # the last pre-rename stable and the first post-rename one verify. A verifier
 # pinned to the old name alone fails every post-rename release with "signature
-# verification FAILED"; the CLI shipped that live (backend#3985, backend#3601 F).
+# verification FAILED"; the CLI shipped that live.
 # ONE declaration: install.ps1 carries the same set as $SignerRepos and a test on
 # each side holds the two in lockstep.
 SIGNER_REPOS='client|client-dev'
@@ -483,7 +483,7 @@ TMPDIR="$(mktemp -d)"
 # The trap must not turn an abort into a success. On macOS /bin/bash 3.2 a
 # `set -u` abort under an EXIT trap exits with the trap's last status (0 after
 # the rm), and `$?` inside the trap is the last COMPLETED command's status, so
-# `rc=$?; ...; exit $rc` exits 0 too (client-dev#1751, measured on 3.2.57). So the
+# `rc=$?; ...; exit $rc` exits 0 too (measured on 3.2.57). So the
 # trap fails closed: a 0 becomes 1 unless the script reached its normal end
 # and set _tb_done=1. Every other exit below the trap is `exit 1`. A live line still
 # drawing (a Ctrl-C mid-download) is ended, so the cursor comes back.
@@ -497,7 +497,7 @@ mkdir -p "$TMPDIR/lib"
 # this set at release time; see scripts/gen-manifest.sh). Keep it in sync.
 # scripts/vendor/k3s-install.sh is not a lib: it is upstream k3s's install.sh at
 # the pinned tag, which native k3s runs from here instead of downloading it on
-# every run (client-dev#1994).
+# every run.
 FILES=(
   "scripts/install-k8s.sh"
   "scripts/lib/common.sh"
@@ -529,8 +529,8 @@ FILES=(
 # Each entry is the wait before the next attempt, so ${#DL_DELAYS[@]}+1 attempts
 # over ~75 s. It used to be three attempts 5 s apart in each function, ~10 s in
 # all, and a GitHub 500 on a sub-script one minute after a release was published
-# outlasted that and failed a fresh install at "Downloading"
-# (client-dev#2053). Only a failure that a wait can cure is retried: no answer
+# outlasted that and failed a fresh install at "Downloading".
+# Only a failure that a wait can cure is retried: no answer
 # (000 — DNS, a refused connect), 408, 429, or a 5xx. A 4xx other than 408 and
 # 429 is the server's answer and returns at once.
 #
@@ -565,7 +565,7 @@ _dl_fetch() {
   while :; do
     FETCH_TRIES=$((FETCH_TRIES + 1))
     # --tlsv1.2 floor; honor any proxy / custom-CA env the corporate-proxy
-    # segment relies on (#172/#722) — curl picks up HTTPS_PROXY/NO_PROXY/
+    # segment relies on — curl picks up HTTPS_PROXY/NO_PROXY/
     # CURL_CA_BUNDLE from the environment automatically. --connect-timeout/--max-time
     # (added to every fetch in this file) turn a stalled endpoint into a retriable
     # failure instead of hanging the "Downloading" phase forever.
@@ -603,7 +603,7 @@ download_with_retry() {
 # sub-script. These fetches used to be
 # single-shot, so one dropped connection on the manifest refused the whole
 # install as "couldn't fetch the integrity checksums" on a release whose assets
-# had been published for hours (backend#3020).
+# had been published for hours.
 fetch_optional() {
   _dl_fetch "$1" "$2" quiet
 }
@@ -654,10 +654,10 @@ _sha256_of() {
 # privileged sub-script (provision.sh mints+writes the credential; install-
 # client-helm.sh runs Helm) is executed.
 # Wire an explicitly-provided corporate CA into cosign so a TLS-inspecting proxy that
-# re-signs HTTPS doesn't fail the signature check with an x509 error (#583). cosign is
+# re-signs HTTPS doesn't fail the signature check with an x509 error. cosign is
 # Go: it reads SSL_CERT_FILE on LINUX, but on macOS Go uses the system Keychain and
 # IGNORES SSL_CERT_FILE (Bugbot) — so on macOS the CA must live in the Keychain, or
-# use the offline installer path (#584). curl ALREADY honors the user's own
+# use the offline installer path. curl ALREADY honors the user's own
 # CURL_CA_BUNDLE natively, and we must NOT re-export it from a corp-root-only
 # TRACEBLOC_CA_BUNDLE (CURL_CA_BUNDLE is replace-not-augment). Fail fast on a
 # set-but-unreadable bundle rather than a later generic cosign error.
@@ -689,7 +689,7 @@ MANIFEST_OK=""; SIGNATURE_OK=""
 verify_installer_manifest() {
   local manifest="$TMPDIR/manifest.sha256"
 
-  # Trust an explicit corporate CA before cosign's HTTPS calls (#583).
+  # Trust an explicit corporate CA before cosign's HTTPS calls.
   _bootstrap_wire_ca
 
   : >"$TMPDIR/sha256-probe"
@@ -768,7 +768,7 @@ download_manifest() {
   # Authoritative source: the signed release asset. Fall back to a copy in the
   # source tree only under the unverified dev opt-in (a branch checkout has no
   # release assets). A per-commit bundle serves one generated from its commit;
-  # a git tree has none since backend#2868, and the caller then skips the check.
+  # a git tree has none, and the caller then skips the check.
   if fetch_optional "$REPO_REL/manifest.sha256" "$dest"; then
     return 0
   fi
@@ -810,7 +810,7 @@ verify_manifest_signature() {
     exit 1
   fi
 
-  # OFFLINE Sigstore bundle first (#584): the bundle carries the Rekor inclusion
+  # OFFLINE Sigstore bundle first: the bundle carries the Rekor inclusion
   # proof, so this verifies signature + cert identity + tlog inclusion with NO live
   # Rekor call — immune to networks that block/TLS-inspect sigstore, and the ONLY
   # path that verifies our short-lived keyless cert once it has expired (its embedded
@@ -852,7 +852,7 @@ verify_manifest_signature() {
     _signature_verified
   else
     _tb_boot_live_end
-    # Plain language, no internal identifiers — parity with install.ps1 (#576).
+    # Plain language, no internal identifiers — parity with install.ps1.
     echo "[ERROR] Couldn't confirm the installer download is authentic, so the install" >&2
     echo "        stopped before changing anything on your machine." >&2
     exit 1
@@ -868,8 +868,7 @@ _signature_verified() {
 # _cosign ARG... -- $COSIGN_BIN with sigstore's TUF cache inside this run's $TMPDIR.
 # cosign keeps the TUF root it verifies with under $TUF_ROOT, else under
 # $HOME/.sigstore/root (v2.4.1, the pin below, and v3 alike, measured), and nothing
-# removed that folder: every install left ~/.sigstore behind (client-dev#1615, live
-# check 23). TUF_ROOT is set for this one process only, never exported, so the
+# removed that folder: every install left ~/.sigstore behind (measured live). TUF_ROOT is set for this one process only, never exported, so the
 # user's own ~/.sigstore and their own TUF_ROOT are neither read nor written, and the
 # cache goes with $TMPDIR on exit. A ~/.sigstore an earlier install left stays: it
 # cannot be told from one the user's own cosign made.
@@ -926,7 +925,7 @@ ensure_cosign() {
   # The website shim (tracebloc.io/i.sh) has usually just fetched and digest-checked
   # this same pinned build to verify THIS script, into its own temp dir, which is
   # not on PATH. TRACEBLOC_COSIGN hands that path down so it is not downloaded a
-  # second time (~110 MB, client-dev#2848). It is used only when it IS the pinned
+  # second time (~110 MB). It is used only when it IS the pinned
   # build for this OS/arch -- the same checksum a fresh download must match -- so
   # any other file there costs one warning and the download below, never trust.
   if [[ -n "${TRACEBLOC_COSIGN:-}" ]]; then

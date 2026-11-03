@@ -26,7 +26,11 @@ On Linux the installer sets up **native k3s**: Kubernetes runs on the machine it
 - Helm;
 - the firewall tool k3s needs (nftables);
 - the tracebloc CLI;
-- on an NVIDIA machine, the driver and the NVIDIA container toolkit.
+- on an NVIDIA machine, the driver and the NVIDIA container toolkit;
+- only on a machine with AppArmor enabled and `kernel.apparmor_restrict_unprivileged_unconfined=1` (the Ubuntu 25.10 and 26.04 default), an AppArmor profile named `runc` for the `runc` k3s ships, so that k3s's containers can signal themselves (without it, MySQL's first start never ends):
+  - the profile, `/etc/tracebloc/apparmor-k3s-runc`;
+  - a k3s drop-in that puts it back in the kernel before every k3s start, `/etc/systemd/system/k3s.service.d/tracebloc-apparmor-runc.conf`;
+  - on a machine with apt, an apt hook that puts it back in the kernel after every package update, `/etc/apt/apt.conf.d/99tracebloc-apparmor-runc`.
 
 kubectl comes with k3s. The installer installs no Docker and no k3d. k3s lives in `/usr/local/bin/k3s`, `/etc/rancher/k3s` and `/var/lib/rancher/k3s`, and runs as the `k3s` service. `tracebloc delete` removes them.
 

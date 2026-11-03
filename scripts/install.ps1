@@ -50,8 +50,8 @@ $DefaultRef = "__TRACEBLOC_RELEASE_REF__"
 # hashes exactly this set (its WINDOWS_FILES array) and its --check mode fails CI
 # if this array and that one drift. Keep them in lockstep.
 $Files = @(
-  # The distro path (RFC-0175 D2, D7), the one Windows install path since the
-  # PowerShell core was retired (client-dev#1810 part 5). Its other input is the
+  # The distro path, the one Windows install path since the PowerShell core
+  # was retired. Its other input is the
   # bash core, whose scripts the signed manifest lists (Get-CoreScriptKeys).
   "scripts/install-wsl.ps1"
 )
@@ -63,8 +63,8 @@ $Files = @(
 # variable's name, to it.
 $WslSubstrate = 'k3s'
 
-# The Windows floor: Windows 11, whose first build is 22000 (RFC-0175 D7; Windows
-# 10 was dropped, client-dev#1810). The floor is the build, not the name: from
+# The Windows floor: Windows 11, whose first build is 22000 (Windows 10 is not
+# supported). The floor is the build, not the name: from
 # build 22000 on, ProductName still reads "Windows 10".
 $WslMinWindowsBuild = 22000
 
@@ -80,7 +80,7 @@ $CosignVersion = "v2.4.1"
 # release workflow: releases cut before the rename carry the old name, every
 # release after it the new one. Trust exactly those two -- anything else is
 # rejected. A verifier pinned to the old name alone fails every post-rename
-# release; the CLI shipped that live (backend#3985, backend#3601 F).
+# release; the CLI shipped that live.
 # SAME set as install.sh's SIGNER_REPOS -- a Pester test holds the two in lockstep.
 $SignerRepos = 'client|client-dev'
 # Derived from that set and narrowed to the exact release workflow on a tag ref
@@ -168,7 +168,7 @@ function Resolve-InstallRef {
   }
 
   # '/' IS NOT THE LEVER, AND REFUSING IT OUTRIGHT BROKE THE ONLY FLOW IT EXISTS
-  # FOR (client#917). Every real development branch is `fix/1234-thing` or
+  # FOR. Every real development branch is `fix/1234-thing` or
   # `feat/...`, so a blanket refusal meant the documented developer override
   # could fetch `develop`, `staging` and `main` and NOTHING ELSE -- while the
   # whole point of the escape hatch is testing unreleased code, which lives on
@@ -207,7 +207,7 @@ function Resolve-InstallRef {
 # wait before the next attempt: $DlDelays.Count + 1 attempts over ~75 s. It used
 # to be three attempts 5 s apart, ~10 s in all, and a GitHub 500 on a release
 # asset one minute after the release was published outlasted that and failed a
-# fresh install (client-dev#2053). Only a failure a wait can cure is retried: no
+# fresh install. Only a failure a wait can cure is retried: no
 # answer (a timeout, a reset, DNS), 408, 429, or a 5xx; any other 4xx is the
 # server's answer and returns at once. Invoke-WebRequest throws on a status alone
 # only at 400 and above, so a thrown error that carries a lower status failed in
@@ -224,7 +224,7 @@ function Test-DownloadRetriable {
 # throws. Leaves the last outcome in $script:FetchStatus (the HTTP code, or 'none'
 # for no answer), $script:FetchTries, $script:FetchWaited (seconds slept),
 # $script:FetchUrl and $script:FetchError, so a refusal can name them.
-# Honors $env:HTTPS_PROXY for the corporate-proxy segment (#172/#722). Unlike curl
+# Honors $env:HTTPS_PROXY for the corporate-proxy segment. Unlike curl
 # in install.sh it does not currently apply $NO_PROXY exclusions or a custom CA
 # bundle -- HTTPS_PROXY covers the common case.
 $script:FetchStatus = ''
@@ -239,7 +239,7 @@ function Invoke-DownloadOnSchedule {
   )
   # PS 5.1's progress overlay throttles Invoke-WebRequest massively (its render
   # loop dominates the transfer) and its "Writing request stream" banner reads
-  # like a hang (#468). Function-local assignment -- the preference reverts
+  # like a hang. Function-local assignment -- the preference reverts
   # automatically when this function returns.
   $ProgressPreference = 'SilentlyContinue'
   $proxyArgs = @{}
@@ -291,7 +291,7 @@ function Get-WithRetry {
 # timeout, a reset, a 5xx is a blip and gets the same schedule Get-WithRetry
 # gives every sub-script. These fetches used to be single-shot, so one dropped
 # connection on the manifest refused the whole install as "couldn't fetch the
-# integrity checksums" (backend#3020; parity with install.sh's fetch_optional).
+# integrity checksums" (parity with install.sh's fetch_optional).
 function Get-Optional {
   param(
     [string]$Url,
@@ -312,7 +312,7 @@ function Get-FetchRefusalCause {
 # Where to fetch one sub-script from. Customer path -> the RELEASE ASSET
 # addressed by basename ("$RepoRel/<name>"), and ONLY the release asset: the
 # customer path never reads the source tree, so it can never fetch from
-# raw.githubusercontent (backend#3998). Dev/unverified path -> the source TREE
+# raw.githubusercontent. Dev/unverified path -> the source TREE
 # ("$RepoRaw/scripts/..."), DELIBERATELY tree-only: it does not prefer or fall
 # back to the release asset (unlike Confirm-ManifestSignature's manifest fetch,
 # which is release-first), because a privileged sub-script must come from exactly
@@ -334,8 +334,7 @@ function Get-SubscriptUrl {
 }
 
 # Print a dim heartbeat dot every $TickSeconds while $Job runs — a quiet window
-# on a multi-minute step reads as a hang and gets killed (#468; the same honest-
-# progress philosophy as #449). Returns
+# on a multi-minute step reads as a hang and gets killed. Returns
 # $true once the job has left the Running state on its own; $false if it is
 # still running after $TimeoutSeconds (the job is stopped, caller owns Remove-Job).
 function Wait-JobWithTicks {
@@ -367,8 +366,8 @@ function Wait-JobWithTicks {
 # retry would wait it out again), and the fetch runs in a background job so the
 # parent can tick a liveness dot.
 # The job re-applies the TLS 1.2 floor (fresh powershell.exe — PS 5.1 defaults
-# to TLS 1.0), silences the progress overlay (#468), and pins its cwd to a local
-# directory so UNC-homed roaming profiles don't splash red noise (#409). The
+# to TLS 1.0), silences the progress overlay, and pins its cwd to a local
+# directory so UNC-homed roaming profiles don't splash red noise. The
 # timeout only bounds a wedged transfer; a slow-but-moving download must never
 # be killed — that is the exact failure mode this function exists to prevent.
 function Get-OptionalWithTicks {
@@ -481,7 +480,7 @@ function Resolve-Cosign {
   # The website shim (tracebloc.io/i.ps1) has usually just fetched and digest-checked
   # this same pinned build to verify THIS script, into its own temp folder, which
   # is not on PATH. TRACEBLOC_COSIGN hands that path down so it is not downloaded a
-  # second time (~180 MB, client-dev#2848). It is used only when it IS the pinned
+  # second time (~180 MB). It is used only when it IS the pinned
   # build -- the same checksum a fresh download must match -- so any other file
   # there costs one warning and the download below, never trust.
   $handed = $env:TRACEBLOC_COSIGN
@@ -494,8 +493,8 @@ function Resolve-Cosign {
 
   # Set expectations BEFORE the big fetch: this is the bootstrap's one large
   # download, and during v1.9.7-rc.1 FR a healthy install got killed as
-  # "frozen" in exactly this window (#468). The size is cosign-windows-amd64.exe's
-  # at the pin: 186,998,456 bytes (client-dev#2848; it said ~17 MB).
+  # "frozen" in exactly this window. The size is cosign-windows-amd64.exe's
+  # at the pin: 186,998,456 bytes (it said ~17 MB).
   Info "cosign not found -- downloading pinned cosign $CosignVersion (~180 MB) to verify the manifest."
   Info "This is the bootstrap's one big download; a few minutes on a slow network is normal."
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -516,7 +515,7 @@ function Resolve-Cosign {
 #    never a stale 0 read as "verified".
 #  - stderr is merged to stdout and discarded: a native tool writing to stderr would
 #    otherwise surface as a NativeCommandError dumping this script's source line +
-#    internal identifiers into the console/transcript (#576).
+#    internal identifiers into the console/transcript.
 # Can this cosign actually EXECUTE here? A trivial `cosign version`.
 #
 # Invoke-CosignVerifyBlob fails closed on a binary that won't start (the 255
@@ -547,7 +546,7 @@ function Test-CosignRuns {
 
 # -TufRoot: cosign keeps the TUF root it verifies with under $env:TUF_ROOT, else
 # under ~/.sigstore/root (v2.4.1 and v3 alike, measured), and nothing removed that
-# folder: every install left ~/.sigstore behind (client-dev#1615). TUF_ROOT is set
+# folder: every install left ~/.sigstore behind. TUF_ROOT is set
 # for this one call to a folder inside the run's TmpDir, which goes with it, and put
 # back as it was in `finally` -- this script may run in the user's own session
 # (irm | iex), where a process variable would outlive it. Their own TUF_ROOT is held
@@ -593,7 +592,7 @@ function Confirm-ManifestSignature {
   # An explicit corporate CA can't be wired into cosign via env on Windows: cosign is
   # Go, and Go on Windows reads the certificate store and IGNORES SSL_CERT_FILE
   # (Bugbot). So there's nothing to export here — the CA must live in the Windows
-  # store (Cert:\LocalMachine\Root), or use the offline installer path (#584).
+  # store (Cert:\LocalMachine\Root), or use the offline installer path.
   # We still validate the path so a typo fails fast with a clear message rather than
   # a later generic cosign authenticity error.
   $ca = if ($env:TRACEBLOC_CA_BUNDLE) { $env:TRACEBLOC_CA_BUNDLE } elseif ($env:CURL_CA_BUNDLE) { $env:CURL_CA_BUNDLE } else { $null }
@@ -636,13 +635,22 @@ function Confirm-ManifestSignature {
     throw "cosign was obtained but won't run on this machine, so the installer's signature can't be checked. This is NOT a failed verification -- nothing suggests the download is bad. Two things cause it: security software may have quarantined or blocked the downloaded cosign.exe (check your antivirus / SmartScreen and allow it); or, on Windows-on-ARM, x64 emulation is unavailable -- Windows 11 on ARM includes it, Windows 10 on ARM may not, and sigstore publishes no native arm64 cosign to fall back on, so one would have to be built from source and put on PATH. For local development only you can set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
   }
 
+  # A cosign this run downloaded (into its own temp folder) goes to what runs next,
+  # as install.sh exports it: install-wsl.ps1 inherits it, and so does the CLI
+  # installer it starts (Install-HostCli), which reuses it after the same checksum
+  # check instead of downloading another ~180 MB. The folder is
+  # removed only after install-wsl.ps1 exits. A cosign from PATH is not handed
+  # down (the CLI installer finds that one itself); one the shim handed down is
+  # already there. Invoke-Bootstrap puts the session's own value back.
+  if ($cosign -eq (Join-Path $TmpDir "cosign.exe")) { $env:TRACEBLOC_COSIGN = $cosign }
+
   # The keyless signing identity: the release workflow's OIDC cert, from the ONE
   # declaration at the top ($SignerIdRe -- both repo names, exact workflow, tag
   # ref). SAME pins as install.sh; shared by both verification paths below.
   $idRe   = $SignerIdRe
   $issuer = 'https://token.actions.githubusercontent.com'
 
-  # OFFLINE Sigstore bundle first (#584): the bundle carries the Rekor inclusion
+  # OFFLINE Sigstore bundle first: the bundle carries the Rekor inclusion
   # proof, so this verifies signature + cert identity + tlog inclusion with NO live
   # Rekor call — immune to networks that block/TLS-inspect sigstore, and the only
   # path that verifies our short-lived keyless cert once it has expired (its embedded
@@ -766,7 +774,7 @@ function Invoke-Bootstrap {
   Assert-WslWindowsBuild
 
   $allowUnverified = ($env:TRACEBLOC_ALLOW_UNVERIFIED -eq "1")
-  # Settings naming (backend#3846): TRACEBLOC_REF / TRACEBLOC_BRANCH first, the
+  # Settings naming: TRACEBLOC_REF / TRACEBLOC_BRANCH first, the
   # legacy REF / BRANCH after them (remove_by 2026-12-31); a non-empty canonical
   # wins, the bash bootstrap's rule.
   $refEnv    = if ($env:TRACEBLOC_REF) { $env:TRACEBLOC_REF } else { $env:REF }
@@ -775,7 +783,7 @@ function Invoke-Bootstrap {
 
   # Everything the customer path fetches -- the sub-scripts (attached as flat
   # release assets by basename), the signed manifest, and its cosign sig/cert --
-  # is served from the RELEASE ASSETS ($repoRel). backend#3998: the public mirror
+  # is served from the RELEASE ASSETS ($repoRel): the public mirror
   # carries no scripts/ tree (its default branch is .github + README only, and no
   # tag exposes scripts/), so the old raw-by-tag transport 404s for every customer
   # tag; and even where a tree IS present on the mirror it tracks only the newest
@@ -810,6 +818,9 @@ function Invoke-Bootstrap {
     throw "temp dir $tmpDir already exists -- refusing to reuse it."
   }
   New-Item -ItemType Directory -Path $tmpDir | Out-Null
+  # Confirm-ManifestSignature hands a cosign it downloaded down as TRACEBLOC_COSIGN;
+  # under `irm | iex` this is the user's own session, so the finally puts it back.
+  $prevCosign = [Environment]::GetEnvironmentVariable('TRACEBLOC_COSIGN', 'Process')
   try {
     Info "Downloading tracebloc client installer (ref: $ref)..."
 
@@ -868,7 +879,7 @@ function Invoke-Bootstrap {
     # (Found by the derived ScriptVar test, not by review.)
     $env:TRACEBLOC_INSTALL_REF = $ref
 
-    # The distro path (RFC-0175 D2, D7; client-dev#1810). Its one input is the tree
+    # The distro path. Its one input is the tree
     # verified just above: install-wsl.ps1 checks it again and refuses any other,
     # and there is no way to hand it an unverified one. Its exit code goes through
     # unchanged: 2 is the declared "restart, then re-run" handoff.
@@ -877,16 +888,17 @@ function Invoke-Bootstrap {
     & powershell.exe -ExecutionPolicy Bypass -File $wsl -CoreDir $tmpDir
     $childExit = $LASTEXITCODE
   } finally {
-    # Before the hold, not after it (client-dev#2847): Complete-Bootstrap waits up
+    # Before the hold, not after it: Complete-Bootstrap waits up
     # to a minute for a key, and a window closed in that minute ends this process
     # without running a `finally` still waiting below it.
     Remove-InstallerTemp -Path $tmpDir | Out-Null
+    $env:TRACEBLOC_COSIGN = $prevCosign   # $null removes it again
   }
   Complete-Bootstrap -Code $childExit
 }
 
 # Remove this run's temp folder (~180 MB with a bootstrapped cosign.exe), and SAY
-# so when it cannot be removed (client-dev#2847). One Remove-Item used to do this,
+# so when it cannot be removed. One Remove-Item used to do this,
 # silently: on Windows a file just written or run is often still held for a moment
 # (Defender scanning a fresh .exe, the image of a process that only just exited),
 # and Windows PowerShell 5.1's -Recurse deletes children asynchronously, so the
@@ -906,12 +918,12 @@ function Remove-InstallerTemp {
 }
 
 # =============================================================================
-#  EXITING WITHOUT TAKING THE USER'S WINDOW WITH IT (#577, client#917)
+#  EXITING WITHOUT TAKING THE USER'S WINDOW WITH IT
 # =============================================================================
-# #577 made the installer always show a clean "what happened" instead of
-# vanishing -- and it fixed that in the installer's CHILD process, where
-# `exit` is harmless. THIS file is the other half, and it was
-# missed: the documented entry point is `irm ... | iex`, so this script runs
+# The installer always shows a clean "what happened" instead of
+# vanishing. Its CHILD process does that with `exit`, which is harmless
+# there. THIS file is the other half: the documented entry point is
+# `irm ... | iex`, so this script runs
 # INSIDE the user's own console. A top-level `exit` there ends THEIR session --
 # the window closes and takes the outcome with it.
 #
@@ -956,7 +968,7 @@ function Complete-Bootstrap {
       # a 15-40 minute install (an extra Enter at a prompt, the trailing newline of
       # `irm ... | iex`, a keystroke at a spinner) is still queued, would make
       # the `while` false on its FIRST evaluation, and would close the window over the
-      # summary -- reproducing the exact #577 failure this function exists to stop,
+      # summary -- reproducing the exact failure this function exists to stop,
       # under a line that just promised to wait.
       while ([Console]::KeyAvailable) { [void][Console]::ReadKey($true) }
       while (-not [Console]::KeyAvailable -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
@@ -991,8 +1003,8 @@ if (-not $env:TRACEBLOC_PESTER) {
   try {
     Invoke-Bootstrap -BootstrapArgs $args
   } catch {
-    # Clean, branded failure — never a raw stack (#577). "$_" stringifies to the
-    # exception MESSAGE (curated at the throw sites, #576), not the source/stack.
+    # Clean, branded failure — never a raw stack. "$_" stringifies to the
+    # exception MESSAGE (curated at the throw sites), not the source/stack.
     Write-Host ""
     Err "Installation stopped: $_"
     Write-Host "  It's safe to re-run this installer. If it keeps failing, share the output above with tracebloc support." -ForegroundColor DarkGray

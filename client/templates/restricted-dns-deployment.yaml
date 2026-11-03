@@ -1,5 +1,5 @@
 {{- $rd := default dict .Values.restrictedDns }}
-{{- if $rd.enabled }}
+{{- if include "tracebloc.restrictedDnsOn" . }}
 {{- /*
   Restricted DNS resolver (SECURITY §8.2, DNS exfiltration). A CoreDNS that
   answers only the cluster domain + restrictedDns.allowlist and NXDOMAINs the

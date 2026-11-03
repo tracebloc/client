@@ -1,6 +1,6 @@
 {{- /*
-  Durable pause/resume volume (client-runtime#882). Set per environment by
-  backend#5266 (7-day retention in jobs-manager); see `trainingResume` and
+  Durable pause/resume volume. Set per environment with a
+  7-day retention in jobs-manager; see `trainingResume` and
   `trainingResumeEnabledByEnv` in values.yaml.
 
   The env key is refused rather than passed through: on its own it arms the
@@ -9,10 +9,10 @@
   the stop-kind annotation 403s and a pause still ends as Error).
 */ -}}
 {{- if hasKey (default dict .Values.env) "TRACEBLOC_TRAINING_RESUME_PVC" }}
-{{- fail "env.TRACEBLOC_TRAINING_RESUME_PVC is set by the chart from trainingResume: set trainingResume.enabled (and trainingResume.existingClaim for your own claim) instead, so jobs-manager also gets the /data/resume mount and the pods/patch grant (client-runtime#882)." }}
+{{- fail "env.TRACEBLOC_TRAINING_RESUME_PVC is set by the chart from trainingResume: set trainingResume.enabled (and trainingResume.existingClaim for your own claim) instead, so jobs-manager also gets the /data/resume mount and the pods/patch grant." }}
 {{- end }}
 {{- if hasKey (default dict .Values.env) "TRACEBLOC_STOP_KIND_SIGNAL" }}
-{{- fail "env.TRACEBLOC_STOP_KIND_SIGNAL is set by the chart from stopKindSignal: set stopKindSignal.enabled instead, so jobs-manager also gets the pods/patch grant the stop-kind annotation needs (client-runtime#882)." }}
+{{- fail "env.TRACEBLOC_STOP_KIND_SIGNAL is set by the chart from stopKindSignal: set stopKindSignal.enabled instead, so jobs-manager also gets the pods/patch grant the stop-kind annotation needs." }}
 {{- end }}
 {{- if and (include "tracebloc.trainingResumeEnabled" .) (not (default dict .Values.trainingResume).existingClaim) }}
 {{- $name := include "tracebloc.trainingResumePvc" . -}}
@@ -41,7 +41,7 @@ spec:
 {{- end }}
 {{- /* No "helm.sh/resource-policy: keep", unlike the logs and data claims: this
      one holds model weights, and whether they may outlive the release is the
-     retention half of backend#5266. */}}
+     retention half of the 7-day policy. */}}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

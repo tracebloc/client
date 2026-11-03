@@ -1,6 +1,6 @@
-{{- /* Refuse a Docker Hub registry before anything is patched (backend#4959): its frozen control plane reads only the legacy env names this chart no longer sets. */ -}}
+{{- /* Refuse a Docker Hub registry before anything is patched: its frozen control plane reads only the legacy env names this chart no longer sets. */ -}}
 {{- include "tracebloc.assertRegistryIsNotDockerHub" . -}}
-{{- /* #229/#238: when HTTP_PROXY_HOST is set, tracebloc.proxyEnv owns these keys — it emits HTTP(S)_PROXY and a merged, cluster-safe NO_PROXY. Exclude them from the generic .Values.env passthrough below so a user-set NO_PROXY (or proxy var) is not re-emitted UNMERGED after proxyEnv — Kubernetes keeps the LAST duplicate env, which would drop the cluster-internal NO_PROXY entries and route in-cluster traffic through the proxy. When HTTP_PROXY_HOST is UNSET, proxyEnv renders nothing, so the exclusion list stays empty and the passthrough still emits a directly-set env.HTTP_PROXY / NO_PROXY — the pre-1.6.0 way to configure a corporate proxy. Dropping those unconditionally was an upgrade regression (#238): gate the exclusion on proxyEnv being active. */ -}}
+{{- /* When HTTP_PROXY_HOST is set, tracebloc.proxyEnv owns these keys — it emits HTTP(S)_PROXY and a merged, cluster-safe NO_PROXY. Exclude them from the generic .Values.env passthrough below so a user-set NO_PROXY (or proxy var) is not re-emitted UNMERGED after proxyEnv — Kubernetes keeps the LAST duplicate env, which would drop the cluster-internal NO_PROXY entries and route in-cluster traffic through the proxy. When HTTP_PROXY_HOST is UNSET, proxyEnv renders nothing, so the exclusion list stays empty and the passthrough still emits a directly-set env.HTTP_PROXY / NO_PROXY — the pre-1.6.0 way to configure a corporate proxy. Dropping those unconditionally was an upgrade regression: gate the exclusion on proxyEnv being active. */ -}}
 {{- $proxyKeys := list -}}
 {{- if .Values.env.HTTP_PROXY_HOST -}}
 {{- $proxyKeys = list "HTTP_PROXY_HOST" "HTTP_PROXY_PORT" "HTTP_PROXY_USERNAME" "HTTP_PROXY_PASSWORD" "NO_PROXY" "no_proxy" "HTTP_PROXY" "HTTPS_PROXY" "http_proxy" "https_proxy" -}}
@@ -47,7 +47,7 @@ spec:
         {{- . | nindent 8 }}
         {{- end }}
         # No fsGroup here (deliberately). On hostPath kubelet ignores it
-        # (kubernetes/kubernetes#138411) — the init below does the work. On CSI an fsGroup
+        # (a known upstream kubelet limitation) — the init below does the work. On CSI an fsGroup
         # relabel would only add GID 1000 to jobs-manager's OWN processes, yet it would flip
         # the shared/logs volumes' group to 1000 (OnRootMismatch, first restart) — stripping
         # the group-0 access the spawned training pods (UID 1001 / OpenShift arbitrary-UID,
@@ -55,14 +55,14 @@ spec:
         # It never reaches those spawned writers, so it's all risk and no gain.
         seccompProfile:
           type: RuntimeDefault
-      # INITCONTAINERS IS UNCONDITIONAL, and that is the change (backend#2913).
+      # INITCONTAINERS IS UNCONDITIONAL, and that is the change.
       # It used to open inside the hostPath.enabled gate, so an edge without
       # hostPath had NO init containers at all. MySQL is deployed unconditionally
       # by this chart, so the wait below must be too; `init-writable-data` stays
       # gated exactly as before.
       initContainers:
       # =====================================================================
-      # WAIT FOR MYSQL TO ACCEPT CONNECTIONS (backend#2913).
+      # WAIT FOR MYSQL TO ACCEPT CONNECTIONS.
       #
       # jobs-manager opens its database connection during initialisation and
       # EXITS when it fails, so a MySQL a few seconds behind it crashloops the
@@ -73,8 +73,8 @@ spec:
       #   Warning  BackOff  Back-off restarting failed container api
       #
       # Errno 111 is connection refused -- nothing is listening yet. It is none
-      # of the four causes that error message lists, which is why it cost a real
-      # investigation to separate from backend#2492.
+      # of the four causes that error message lists, which is why it is easy to
+      # mistake for one of them.
       #
       # IT RECOVERS ON ITS OWN, AND THAT IS WHAT MAKES IT EXPENSIVE. By the time
       # anyone looks the pod is healthy and the reason survives only in the
@@ -90,8 +90,7 @@ spec:
       # =====================================================================
       - name: wait-for-mysql
         # THE APP IMAGE, NOT BUSYBOX, AND THAT IS WHAT MAKES THE MISSING UID SAFE
-        # (Bugbot High on #942, corroborating a plain-Kubernetes regression this
-        # branch introduced when it dropped the pin). `runAsNonRoot: true` only
+        # (a plain-Kubernetes regression if the pin is dropped). `runAsNonRoot: true` only
         # FORBIDS uid 0 -- it assigns nothing -- so with no `runAsUser` anywhere the
         # kubelet reads the effective user from the IMAGE. `library/busybox`
         # declares `Config.User` empty (measured: `[]`), i.e. root, so AKS, EKS
@@ -109,7 +108,7 @@ spec:
         # TCP connect the app image can already do.
         image: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) | quote }}
         securityContext:
-          # NO runAsUser, DELIBERATELY (Bugbot High, #942). OpenShift's
+          # NO runAsUser, DELIBERATELY. OpenShift's
           # `restricted` SCC assigns a UID from the project's range, and the pod
           # is built for that -- the pod-level comment above says
           # "OpenShift arbitrary-UID" in as many words, and neither `api` nor
@@ -168,10 +167,10 @@ spec:
                     sys.exit(1)
                 time.sleep(2)
       {{- if (default dict .Values.hostPath).enabled }}
-      # kubelet does NOT apply fsGroup to hostPath volumes (kubernetes/kubernetes#138411),
+      # kubelet does NOT apply fsGroup to hostPath volumes (an upstream kubelet limitation),
       # so /data/shared AND /data/logs are created root-owned and non-root pods can't write
       # to them. Two failures this causes: (1) dataset ingest — `tb data ingest` streams files
-      # into a staging pod that does `mkdir /data/shared/.tracebloc-staging/` (#611); and
+      # into a staging pod that does `mkdir /data/shared/.tracebloc-staging/`; and
       # (2) training — a spawned training pod does `os.makedirs('/data/logs/<run>')` and hits
       # "Permission denied". Both are the SAME hostPath dirs those spawned pods mount
       # (client-pvc / client-logs-pvc), so fixing them once here reaches those pods too.
@@ -190,7 +189,7 @@ spec:
       #                 so sticky made a documented product operation impossible: the table was
       #                 dropped and the files stayed, leaving a half-deleted dataset. fsGroup
       #                 cannot align those identities either, since kubelet ignores it on
-      #                 hostPath (kubernetes/kubernetes#138411). Keeping sticky on /data/shared
+      #                 hostPath (the same upstream limitation). Keeping sticky on /data/shared
       #                 protects writers from each other at the cost of never being able to
       #                 clean up after them.
       # The init container runs as root only long enough to fix the mounts. Caps: CHOWN for the
@@ -199,7 +198,7 @@ spec:
       # (fsgid 0), and a root process without FSETID has the kernel silently strip S_ISGID, landing
       # the mount at 1777 (setgid lost).
       #
-      # Each dir is fixed INDEPENDENTLY and best-effort, and so is each OPERATION (#672). The chown
+      # Each dir is fixed INDEPENDENTLY and best-effort, and so is each OPERATION. The chown
       # and the chmod used to be chained with a logical AND, which meant that on any mount that
       # refused the chown — a pre-provisioned volume, an NFS root_squash export via TRACEBLOC_HOST_DATASET_DIR
       # (old name HOST_DATASET_DIR still works),
@@ -245,7 +244,7 @@ spec:
           - |
             for e in /data/shared:2777 /data/logs:3777{{ if (include "tracebloc.trainingResumeEnabled" .) }} /data/resume:3777{{ end }}; do
               d=${e%:*}; want=${e#*:}
-              # Two statements, never chained (#672): the chmod is attempted even when the chown
+              # Two statements, never chained: the chmod is attempted even when the chown
               # is refused. Each records which call failed; neither is fatal.
               failed=
               chown 1000:1000 "$d" || failed="chown"
@@ -279,7 +278,7 @@ spec:
       containers:
       - name: api
         image: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) | quote }}
-        # #569: IfNotPresent wherever an update path exists without `Always` --
+        # IfNotPresent wherever an update path exists without `Always` --
         # a pinned digest, or the image-refresh reconcile. `Always` forced a
         # registry round-trip on every (re)start, so a restart while offline
         # landed in ImagePullBackOff even though containerd already
@@ -298,7 +297,7 @@ spec:
         # mysqld dies as collateral. 512Mi/1Gi covers steady state with
         # headroom; revisit if heap profiling shows the working set growing.
         #
-        # #1144: requests.memory now == limits.memory (1Gi). On a single-node
+        # requests.memory now == limits.memory (1Gi). On a single-node
         # cluster-recovery mass restart every pod restarts at once and contends
         # for node memory + CPU; with requests (512Mi) below the limit (1Gi)
         # jobs-manager ran Burstable and was the kernel OOM-killer's preferred
@@ -310,16 +309,12 @@ spec:
         # cpu limit either).
         #
         # EQUALISING CPU HERE WOULD NOT MAKE THIS POD GUARANTEED, and stopping at
-        # cpu is how the last attempt concluded the chart was broken
-        # (backend#2872). ComputePodQOS requires requests == limits for BOTH
+        # cpu is how the last attempt concluded the chart was broken. ComputePodQOS requires requests == limits for BOTH
         # dimensions in EVERY container, INIT CONTAINERS INCLUDED — and
         # `init-writable-data` above carries no resources at all whenever
         # hostPath.enabled=true, i.e. on every installer-provisioned edge.
         #
-        # AND SINCE #942 IT REACHES GUARANTEED ON NO CLUSTER AT ALL (review on
-        # client#922). This comment used to end "Per-container equalisation only
-        # reaches Guaranteed on CSI clusters", which #942 falsified the day it
-        # merged: `wait-for-mysql` is UNCONDITIONAL and unequal on BOTH
+        # AND IT REACHES GUARANTEED ON NO CLUSTER AT ALL: `wait-for-mysql` is UNCONDITIONAL and unequal on BOTH
         # dimensions (cpu 10m/100m, memory 16Mi/64Mi), so it blocks Guaranteed
         # on CSI exactly as `init-writable-data` does off it. Measured on the
         # merged tree with hostPath off and every resources.* knob equalised:
@@ -333,25 +328,24 @@ spec:
         # requests == limits with an unresourced init container yields
         # Guaranteed.
         #
-        # NOT the only route, though an earlier version of this comment said so
-        # (review on client#922): resourcing every init container requests ==
+        # NOT the only route: resourcing every init container requests ==
         # limits reaches Guaranteed too, and pod-qos-class.py returns exactly
         # that for t-jobs-manager and mysql-client when they are equalised. That
         # is now a CHART edit rather than a values change, for the reason above.
         # It is rejected on cost, not capability — those reservations are held
         # for the pod's whole life, not just the seconds the init container runs.
         #
-        # THE STALENESS IS THE POINT. Both claims above survived #942 with every
+        # THE STALENESS IS THE POINT. Both claims above can survive a change with every
         # QoS guard green, because the guards pin the class and the
         # unresourced-init set, and neither is reachability.
         # `scripts/tests/qos-reachability.sh` asserts it now.
         #
         # requests.cpu was raised (100m -> 250m) so a mass restart doesn't throttle
         # its startup to a crawl (the ~9m recovery seen on lukas-test); the interim
-        # trim (backend#2461) brings it to 150m -- the whole plane idles at 36m --
+        # trim brings it to 150m -- the whole plane idles at 36m --
         # and the measured trim (2026-09-13) sets requests.memory to 192Mi from a
         # 105 MiB p95 / 103 MiB restart peak, while the LIMIT stays 1Gi, so the
-        # #1144 equality is deliberately broken here: see the derivation on
+        # request == limit equality is deliberately broken here: see the derivation on
         # values.yaml#resources for why the request moved and the limit did not.
         resources:
           requests:
@@ -361,7 +355,7 @@ spec:
             cpu: {{ .Values.resources.jobsManager.limits.cpu | default "1000m" | quote }}
             memory: {{ .Values.resources.jobsManager.limits.memory | default "1Gi" | quote }}
         ports:
-          # client-runtime#21: POST /internal/submit-ingestion-run. The
+          # POST /internal/submit-ingestion-run. The
           # ingestor subchart's post-install hook hits this through the
           # jobs-manager Service. Cluster-internal only.
           - name: http
@@ -375,16 +369,15 @@ spec:
             protocol: TCP
           {{- end }}
         {{- if include "tracebloc.ingestionHttpEnabled" . }}
-        # backend#1779. jobs-manager had no probes at all, so the kubelet
-        # reported the container Ready the moment it was *running* — and
-        # `kubectl rollout status` printed "successfully rolled out" while the
-        # pod was crash-looping (4 restarts in 72s, 2026-08-11 / backend#1723).
+        # Without probes the kubelet reports the container Ready the moment it
+        # is *running*, and `kubectl rollout status` prints "successfully rolled
+        # out" while the pod is crash-looping.
         #
         # Why GET /healthz and not a bare TCP connect to 8080:
-        # this probe first shipped as `tcpSocket: 8080` (client#699) because at
+        # this probe first shipped as `tcpSocket: 8080` because at
         # that time `/healthz` was an unconditional `200 {"status":"ok"}` — a
         # probe pointed at it could not go red, so it would have added nothing
-        # over the TCP connect while looking like a check. client-runtime#327
+        # over the TCP connect while looking like a check. The runtime
         # replaced that endpoint with `_healthz_report`, which returns 200 only
         # when all three of its checks pass and 503
         # (`{"status":"unavailable","failed":[…]}`) when any of them fails:
@@ -439,7 +432,7 @@ spec:
         # the main loop stops stamping (TRACEBLOC_LIVEZ_MAX_AGE_SECONDS, in the app).
         # /healthz reads MySQL, so liveness there restarts the pod on a MySQL blip.
         # No startupProbe either: it kills on failure too.
-        # TODO(tracebloc/backend#6765): default on once no edge can run an image
+        # Off by default; it becomes the default once no edge can run an image
         # without /livez (it 404s there and the probe would restart-loop it).
         {{- if and (dig "livenessProbe" "enabled" false (default dict .Values.jobsManager)) (include "tracebloc.ingestionHttpEnabled" .) }}
         livenessProbe:
@@ -467,7 +460,7 @@ spec:
             subPath: ingestion-authz.yaml
             readOnly: true
           {{- if (include "tracebloc.trainingResumeEnabled" .) }}
-          # Durable pause/resume (client-runtime#882): the same claim the
+          # Durable pause/resume: the same claim the
           # training pods mount per experiment. jobs-manager pre-creates
           # /data/resume/<pk> before a spawn and removes it on a stop; without
           # this mount both are skipped.
@@ -477,10 +470,10 @@ spec:
         env:
         {{- include "tracebloc.proxyEnv" . | nindent 8 }}
         {{- /*
-          The telemetry-token Secret's coordinates (backend#2274). Nothing reads
+          The telemetry-token Secret's coordinates. Nothing reads
           that Secret any more: the Collector sends through the egress gate with
           its own service-account token, and its render no longer waits for the
-          Secret (tracebloc/tracebloc-engine#2065). jobs-manager writes it while
+          Secret. jobs-manager writes it while
           these are set; they go with telemetry-token-rbac.yaml once its writer
           is gone.
 
@@ -489,14 +482,12 @@ spec:
         */}}
         {{- $tcEnv := default (dict) .Values.telemetryCollector }}
         {{- $tokEnv := default (dict) $tcEnv.tokenSecret }}
-        {{- /* Each of the three under its canonical TRACEBLOC_ name only
-             (backend#3846), the name its readers take. */}}
+        {{- /* Each of the three under its canonical TRACEBLOC_ name only, the name its readers take. */}}
         - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_NAMESPACE
           value: {{ .Values.nodeAgents.namespace.name | quote }}
         - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_NAME
           # Release-scoped, resolved through the one helper the reader and RBAC also
-          # use, so the WRITER cannot end up naming a different Secret than they read
-          # (backend#2625).
+          # use, so the WRITER cannot end up naming a different Secret than they read.
           value: {{ include "tracebloc.telemetryTokenSecretName" . | quote }}
         - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_KEY
           value: {{ $tokEnv.key | default "token" | quote }}
@@ -513,7 +504,7 @@ spec:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
               key: TRACEBLOC_CLIENT_PASSWORD
-        # client-runtime#79: shared HMAC secret used to MINT the per-pod
+        # Shared HMAC secret used to MINT the per-pod
         # REQUESTS_PROXY_TOKEN. Same Secret key the egress gate reads to
         # verify. When present, spin_job mints stateless signed tokens (no
         # pod_tokens table). Never injected into training pods.
@@ -539,13 +530,13 @@ spec:
           value: {{ .Values.selinux.level | quote }}
         {{- end }}
         {{- if (include "tracebloc.trainingResumeEnabled" .) }}
-        # client-runtime#882: arms the durable resume volume and the stop-kind
-        # signal in jobs-manager. New setting, canonical name only (RFC-0076 S6).
+        # Arms the durable resume volume and the stop-kind
+        # signal in jobs-manager. New setting, canonical name only.
         - name: TRACEBLOC_TRAINING_RESUME_PVC
           value: {{ include "tracebloc.trainingResumePvc" . | quote }}
         {{- $opEnv := default dict .Values.env }}
         {{- if not (or (hasKey $opEnv "TRAINING_RESUME_ENABLED") (hasKey $opEnv "TRACEBLOC_TRAINING_RESUME_ENABLED")) }}
-        # backend#5266: a volume the engine ignores keeps nothing, so the same
+        # A volume the engine ignores keeps nothing, so the same
         # switch arms the engine's resume. jobs-manager forwards it to every
         # training pod (client-runtime operator_training_switches). The canonical
         # name only, as the env passthrough writes it; an operator's own
@@ -555,9 +546,9 @@ spec:
         {{- end }}
         {{- end }}
         {{- if (include "tracebloc.stopKindSignalEnabled" .) }}
-        # client-runtime#882: training pods get the stop-kind file and stops
-        # annotate pause | stop, so a paused pod exits 0 (tracebloc-engine#1588).
-        # No weights: on by default. Canonical name only (new, RFC-0076 S6).
+        # Training pods get the stop-kind file and stops
+        # annotate pause | stop, so a paused pod exits 0.
+        # No weights: on by default. Canonical name only (new).
         - name: TRACEBLOC_STOP_KIND_SIGNAL
           value: "1"
         {{- end }}
@@ -571,7 +562,7 @@ spec:
         - name: MYSQL_HOST
           value: "mysql-client"
         {{- if include "tracebloc.perIngestionTables" . }}
-        # RFC-0003 D16 (backend#1204 / backend#1205): forwarded by
+        # Forwarded by
         # jobs-manager into every ingestion Job it spawns — the ingestor
         # then writes one immutable ds_<uuid4 hex> table per run. Resolved
         # per environment by tracebloc.perIngestionTables; rendered only
@@ -580,7 +571,7 @@ spec:
           value: "1"
         {{- end }}
         {{- if .Values.perDatasetPvcs }}
-        # RFC-0003 D9 Track B (client-runtime#203 / #261): per-dataset
+        # Per-dataset
         # hostPath PV/PVCs. When on, jobs-manager mounts each training pod's
         # dataset(s) as dedicated read-only dataset-<handle> PVCs instead of
         # a subPath view of the shared data PVC (single-node/hostPath
@@ -593,7 +584,7 @@ spec:
 {{- /* Refuse a mis-paired narrowing before the Deployment is patched. */ -}}
 {{- include "tracebloc.assertNarrowEdgeuserIsSafe" . }}
         {{- if (include "tracebloc.narrowEdgeuser" .) }}
-        # backend#1528 S3 close-out: REVOKE edgeuser to USAGE on every boot, so a
+        # REVOKE edgeuser to USAGE on every boot, so a
         # fleet that completed the retirement stays retired across a fresh datadir
         # (10-edgeuser-bridge-grants.sql re-grants it at init and cannot branch on
         # a runtime flag). jobs-manager refuses this unless the whole posture is
@@ -604,18 +595,18 @@ spec:
 {{- /* Refuse a mis-paired DROP before the Deployment is patched. */ -}}
 {{- include "tracebloc.assertDropEdgeuserIsSafe" . }}
         {{- if (include "tracebloc.dropEdgeuser" .) }}
-        # backend#5427: DROP edgeuser entirely on boot — the step backend#1528 left
+        # DROP edgeuser entirely on boot — the step that was left
         # to an operator, automated for edges we cannot reach. Separate gate, and
         # the resolver only turns it on where narrowEdgeuser is already on, so the
         # account is USAGE-only and inert by the time this runs. jobs-manager
         # refuses it unless the posture is retired; the render refuses it too, above.
-        # DROP USER IF EXISTS, so a fresh datadir (no edgeuser since backend#947) and
+        # DROP USER IF EXISTS, so a fresh datadir (no edgeuser on new installs) and
         # an already-dropped edge are both clean no-ops.
         - name: TRACEBLOC_DROP_EDGEUSER
           value: "1"
         {{- end }}
         {{- if (include "tracebloc.perExperimentDbCreds" .) }}
-        # RFC-0003 D10 (backend#1181): per-experiment MySQL credentials. When
+        # Per-experiment MySQL credentials. When
         # on, jobs-manager mints a short-lived MySQL user per experiment scoped
         # to only its own table(s) and injects it into the training pod via a
         # per-job Secret — instead of every pod sharing the root-equivalent
@@ -633,7 +624,7 @@ spec:
               key: TRACEBLOC_CREDMGR_PASSWORD
         {{- end }}
         {{- if (include "tracebloc.serviceDbAccounts" .) }}
-        # backend#1528 S1 (RFC-0003 D10 close-out): dedicated MySQL service
+        # Dedicated MySQL service
         # identities that replace the root-equivalent edgeuser. jobs-manager
         # mints tb_meta (owns the metadata DB) and tb_ingest (writes the dataset
         # DB) at startup from these generated Secrets. Additive — nothing
@@ -656,8 +647,8 @@ spec:
               name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
               key: TRACEBLOC_INGEST_PASSWORD
         {{- end }}
-        # backend#2073: give each ingestion Job its own short-lived, ingest-scoped
-        # backend token instead of the edge's shared one (client-runtime#868).
+        # Give each ingestion Job its own short-lived, ingest-scoped
+        # backend token instead of the edge's shared one.
         # Resolved per environment by tracebloc.ingestRunToken -- on for dev only,
         # see ingestRunTokenByEnv in values.yaml for why stg/prod wait. Always
         # rendered, "true" or "false", so the edge's posture reads off the pod.
@@ -667,12 +658,12 @@ spec:
         - name: TRACEBLOC_INGEST_RUN_TOKEN
           value: {{ if (include "tracebloc.ingestRunToken" .) }}"true"{{ else }}"false"{{ end }}
         {{- if (include "tracebloc.bootstrapDbReparent" .) }}
-        # backend#1528 S3 (RFC-0003 D10 close-out): re-parent the account-minting
+        # Re-parent the account-minting
         # bootstrap DDL OFF the root-equivalent edgeuser onto MySQL root, so
         # edgeuser can be REVOKEd / DROPped. jobs-manager authenticates as this
         # identity ONLY to CREATE USER / GRANT the scoped accounts (tb_credmgr /
         # tb_meta / tb_ingest) — privileges those accounts deliberately lack.
-        # client-runtime#310's _bootstrap_db_config reads DB_BOOTSTRAP_USER and
+        # The runtime's _bootstrap_db_config reads DB_BOOTSTRAP_USER and
         # DB_BOOTSTRAP_PASSWORD together (both-or-neither), so both render here or
         # neither. Rendered only when the S3 gate is on; a default install stays
         # byte-identical (the mint keeps running as edgeuser).
@@ -700,7 +691,7 @@ spec:
         # Prod: DIGEST renders `images.ingestor.prodDigest`, a CHART DEFAULT, so
         # prod is reproducible with no per-edge action and a republished pin
         # reaches installed edges via the auto-upgrade's
-        # `--reset-then-reuse-values` (backend#1245). `prodPin: false` opts a
+        # `--reset-then-reuse-values`. `prodPin: false` opts a
         # canary edge back onto the floating tag; `images.ingestor.digest` pins
         # explicitly in any environment. All of that resolves in one place —
         # the `tracebloc.ingestorDigest` helper.
@@ -709,14 +700,14 @@ spec:
         # nil-guarded so `--reuse-values` from a release that predates the
         # `images.ingestor` key still renders.
         - name: TRACEBLOC_INGESTOR_IMAGE_REPOSITORY
-          # Precedence (#585): an explicit images.ingestor.repository always wins
+          # Precedence: an explicit images.ingestor.repository always wins
           # (someone who names a full repo means it). Otherwise, when a private
           # mirror is set via global.imageRegistry, the still-default repository is
           # re-homed onto that mirror (<mirror>/tracebloc/ingestor) so a single
           # knob points the ingestor at the same registry as the chart's own
           # images. With neither, it falls back to the ghcr.io default. Nil-guarded
           # for --reset-then-reuse-values upgrades that predate images.ingestor,
-          # and for an explicit `images: null` (backend#4372).
+          # and for an explicit `images: null`.
           {{- $ingRepo := (default dict (index (default dict .Values.images) "ingestor")).repository | default "ghcr.io/tracebloc/ingestor" }}
           {{- $ingMirror := dig "imageRegistry" "" (.Values.global | default dict) }}
           {{- if and $ingMirror (eq $ingRepo "ghcr.io/tracebloc/ingestor") }}{{ $ingRepo = printf "%s/tracebloc/ingestor" $ingMirror }}{{ end }}
@@ -725,8 +716,7 @@ spec:
           value: {{ include "tracebloc.ingestorTag" . | quote }}
         - name: TRACEBLOC_INGESTOR_IMAGE_DIGEST
           value: {{ include "tracebloc.ingestorDigest" . | quote }}
-        {{- /* What the pinned ingestor image says about itself
-             (tracebloc/cli-dev#971): the CLI reads these off this Deployment
+        {{- /* What the pinned ingestor image says about itself: the CLI reads these off this Deployment
              before it copies any data and refuses a task the image can't run.
              Rendered only when the effective digest has a
              images.ingestor.pinnedImageLabels entry, so a floating tag or an
@@ -744,15 +734,15 @@ spec:
         - name: TRACEBLOC_REQUESTS_PROXY_URL
           value: "http://requests-proxy-service:8888"
         {{- if and (default dict .Values.egressProxy).enabled (default dict .Values.egressProxy).routeWorkloads }}
-        # client-runtime#102: when routing is enabled, jobs-manager injects
+        # When routing is enabled, jobs-manager injects
         # HTTPS_PROXY=<gateway> into training pods (and suppresses raw HTTP_PROXY_HOST).
-        # routeWorkloads defaults true (RFC-0003 D6), so this renders by default;
+        # routeWorkloads defaults true, so this renders by default;
         # set egressProxy.routeWorkloads=false to opt a fleet out of gateway routing.
         - name: TRACEBLOC_EGRESS_PROXY_URL
           value: "http://egress-proxy-service:{{ (default dict .Values.egressProxy).port | default 3128 }}"
         {{- end }}
+        {{- if include "tracebloc.restrictedDnsOn" . }}
         {{- with (default dict .Values.restrictedDns) }}
-        {{- if .enabled }}
         # SECURITY §8.2 (DNS): jobs-manager spawns training and ingestion pods
         # with dnsPolicy None + a dnsConfig naming the restricted resolver
         # (restricted-dns-*.yaml). The value is the pinned ClusterIP when one is
@@ -769,7 +759,7 @@ spec:
         # training-job image it spawns. Rendered from tracebloc.tbRegistry -- the
         # SAME precedence chain as the control-plane images, so the two cannot
         # point at different registries: a private mirror set via
-        # global.imageRegistry (#585) wins, so an air-gapped/mirrored install
+        # global.imageRegistry wins, so an air-gapped/mirrored install
         # pulls job images from the same registry as the chart's own images;
         # else images.traceblocRegistry (the tracebloc-only knob); else the
         # chart default, ghcr.io since the GHCR migration. Docker Hub is a
@@ -783,7 +773,7 @@ spec:
           value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
         {{- if include "tracebloc.useImagePullSecrets" . }}
         # IMAGE_PULL_SECRET_NAME is the pull Secret jobs-manager puts on the
-        # TRAINING pods it spawns (backend#2119). It has to be injected rather
+        # TRAINING pods it spawns. It has to be injected rather
         # than written into client-runtime's job.yaml, because the name is
         # release-dependent: a literal in that repo cannot be right for every
         # release, and the one it carried ("regcred", unqualified) was right for
@@ -798,7 +788,7 @@ spec:
         # runtime reads that as "pull publicly" and sets no imagePullSecrets at
         # all, which is the honest declaration of a public pull.
         #
-        # Skew-safe both ways: a client-runtime older than backend#2119 ignores
+        # Skew-safe both ways: a client-runtime that predates this variable ignores
         # this var, and a newer one treats its absence as "public".
         - name: TRACEBLOC_IMAGE_PULL_SECRET_NAME
           value: {{ include "tracebloc.registrySecretName" . | quote }}
@@ -806,8 +796,7 @@ spec:
         {{- $clientEnv := include "tracebloc.clientEnv" . }}
         - name: TRACEBLOC_ENV
           value: {{ $clientEnv | quote }}
-        {{- /* Digest-pinned training images (RFC-1246 P2; backend#3156 for
-             RFC-0067 D8). Read by jobs_manager.load_training_image_digests /
+        {{- /* Digest-pinned training images. Read by jobs_manager.load_training_image_digests /
              training_pinning_enabled, which run in THIS container only -- the
              pods-monitor container spawns nothing, so it gets none of these.
 
@@ -846,7 +835,7 @@ spec:
         {{- /* `hasKey` first: on a --reuse-values upgrade from a release that
              predates images.training the key is ABSENT, and `toString` of an
              absent value is a non-empty sentinel that would emit the var and
-             turn a no-op upgrade into a pod roll (Bugbot, client#976). */}}
+             turn a no-op upgrade into a pod roll. */}}
         {{- if and (hasKey $training "pinned") (ne (toString $training.pinned) "") }}
         - name: TRACEBLOC_TRAINING_IMAGE_PINNED
           value: {{ $training.pinned | toString | quote }}
@@ -855,7 +844,7 @@ spec:
         - name: TRACEBLOC_TRAINING_ENGINE_CAPABILITIES
           value: {{ $training.capabilities | quote }}
         {{- end }}
-        {{- /* The macOS engine bundle this pinned release names (RFC-0185 D2):
+        {{- /* The macOS engine bundle this pinned release names:
              jobs-manager sends a GPU job to the Mac's Apple GPU node only while
              the node's tracebloc.io/bundle-digest annotation equals this value.
              One decision with ConfigMap tracebloc-apple-gpu-bundle, which tells
@@ -873,69 +862,60 @@ spec:
         # heartbeat for a workload the operator turned off.
         - name: TRACEBLOC_NODE_AGENTS_NAMESPACE
           value: {{ if (include "tracebloc.resourceMonitorEnabled" .) }}{{ dig "namespace" "name" "" (.Values.nodeAgents | default dict) | quote }}{{ else }}""{{ end }}
-        # backend#664 (Utilization Ladder L0): with NEITHER env.RESOURCE_REQUESTS
+        # With NEITHER env.RESOURCE_REQUESTS
         # nor env.RESOURCE_LIMITS set, BOTH vars are omitted and jobs-manager
         # sizes the envelope from node allocatable — BUT ONLY IF
         # DERIVE_JOB_ENVELOPE is set. It is off by default, so the two cases
-        # differ and so does their QoS class (backend#2872; this line said
-        # "requests == limits / Guaranteed QoS" flatly, which #2418 had already
-        # made false for one case and which was never true of both):
+        # differ and so does their QoS class (it is not
+        # flatly "requests == limits / Guaranteed QoS"; that was never true of both):
         #
         #   * derivation ON  -> 75% with cpu=2/memory=8Gi floors; MEMORY
-        #     requests == limits, CPU request-only with NO limit since
-        #     backend#2418 -> the job pod is BURSTABLE.
+        #     requests == limits, CPU request-only with NO limit
+        #     -> the job pod is BURSTABLE.
         #   * derivation OFF (the default) -> jobs-manager's built-in fallback,
-        #     the contract floor cpu=1,memory=2Gi since backend#2254 (a pre-#2254
+        #     the contract floor cpu=1,memory=2Gi (an older
         #     image used cpu=2,memory=8Gi, the value this template used to
         #     inject), assigned to requests AND limits -> a CPU job pod is
         #     GUARANTEED.
-        #   * a GPU job -> the SAME class as a CPU job, on a runtime image with
-        #     client-runtime#1092 (client-runtime#1089): one-GPU pods now carry
+        #   * a GPU job -> the SAME class as a CPU job, on a runtime image that
+        #     sizes GPU pods: one-GPU pods now carry
         #     the cpu/memory envelope by default, capped to the node's share
-        #     per GPU on a single node. Before #1092 the GPU path sized only
+        #     per GPU on a single node. Before that, the GPU path sized only
         #     nvidia.com/gpu and ephemeral-storage, neither QoS-relevant, so
-        #     every GPU job pod was BESTEFFORT (backend#2871). Setting
+        #     every GPU job pod was BESTEFFORT. Setting
         #     env.GPU_POD_ENVELOPE=0 opts out and restores that BestEffort pod.
         #
-        # NO VERBATIM CROSS-REPO QUOTE HERE, deliberately (Asad, review of
-        # backend#2872). This block used to quote client-runtime's own comment
-        # word for word to support the Guaranteed claim. A quote is a dependency
-        # nothing checks -- client-runtime#457 exists to delete one in the other
-        # direction -- and it would have gone stale on the very sentence this
-        # commit is correcting. Cite the behaviour and where it lives; do not
-        # copy its prose.
+        # NO VERBATIM CROSS-REPO QUOTE HERE, deliberately. A quote of the
+        # runtime's own comment is a dependency nothing checks and goes stale.
+        # Cite the behaviour and where it lives; do not copy its prose.
         #
-        # So the spawned-job default drops when the runtime image crosses #2254,
+        # So the spawned-job default drops when the runtime image carries the contract floor,
         # and the class depends on the flag AND on whether the job asks for a
         # GPU -- not on this template.
-        # The standalone installer writes explicit values (backend#1236), so the
+        # The standalone installer writes explicit values, so the
         # derivation path applies to chart-direct installs only.
         #
-        # EACH VAR IS EMITTED ONLY IF SET (backend#2418). This block used to fill
-        # the missing one with "cpu=2,memory=8Gi" so a half-set config never
-        # emitted a lone var. That was deliberate and it is now wrong, twice over:
+        # EACH VAR IS EMITTED ONLY IF SET. Filling the missing one with a
+        # literal such as "cpu=2,memory=8Gi" is wrong, twice over:
         #
-        #   * It re-created, at the CHART layer, the bug client-runtime#388 just
-        #     fixed at the RUNTIME layer. An operator setting only
-        #     RESOURCE_REQUESTS="cpu=7,memory=29Gi" got
+        #   * It would re-create, at the CHART layer, a bug the RUNTIME layer
+        #     already fixed. An operator setting only
+        #     RESOURCE_REQUESTS="cpu=7,memory=29Gi" would get
         #     RESOURCE_LIMITS="cpu=2,memory=8Gi" injected underneath them --
         #     request ABOVE limit on both dimensions, which Kubernetes rejects
-        #     outright. #388 made jobs-manager mirror the given side instead, and
-        #     this template is what stopped that mirror from ever being reached.
-        #   * L0.2 (backend#2418) writes a RESOURCE_LIMITS with no cpu key. That
-        #     shape was ALWAYS expressible when both keys are set -- which is
-        #     what the installer does -- so this change is not what unblocked
-        #     L0.2, and an earlier version of this comment claimed otherwise
-        #     (Bugbot on client#821). What the injection did break is the
-        #     ONE-SIDED case: a chart-direct operator could not express "memory
-        #     Guaranteed, CPU unlimited" by setting limits alone, because
-        #     requests came back as the literal underneath it.
+        #     outright. jobs-manager mirrors the given side instead, and an
+        #     injected literal would stop that mirror from ever being reached.
+        #   * A RESOURCE_LIMITS with no cpu key is always expressible when both
+        #     keys are set -- which is what the installer does. What an injected
+        #     literal breaks is the ONE-SIDED case: a chart-direct operator could
+        #     not express "memory Guaranteed, CPU unlimited" by setting limits
+        #     alone, because requests would come back as the literal.
         #
         # ORDERING CONSTRAINT: needs a jobs-manager that mirrors a one-sided
-        # envelope (client-runtime#388). An OLDER image merges the parsed pairs
+        # envelope. An OLDER image merges the parsed pairs
         # onto its built-in literal, so a lone RESOURCE_REQUESTS returns as a
         # 2-core LIMIT under a 7-core REQUEST. Do not publish this chart ahead of
-        # a runtime carrying #388.
+        # a runtime that mirrors one-sided envelopes.
         {{- if or (hasKey .Values.env "RESOURCE_REQUESTS") (hasKey .Values.env "RESOURCE_LIMITS") }}
         {{- if hasKey .Values.env "RESOURCE_REQUESTS" }}
         - name: TRACEBLOC_RESOURCE_REQUESTS
@@ -945,7 +925,7 @@ spec:
         - name: TRACEBLOC_RESOURCE_LIMITS
           value: {{ .Values.env.RESOURCE_LIMITS | quote }}
         {{- end }}
-        # backend#2220: WHO chose the pair above. Bookkeeping only -- it never
+        # WHO chose the pair above. Bookkeeping only -- it never
         # changes the envelope. It rides inside the same gate on purpose: a
         # provenance marker with no envelope to describe is noise, and pinning
         # them together means the unset recipe below clears all three at once.
@@ -958,55 +938,54 @@ spec:
         - name: TRACEBLOC_RESOURCE_PROVENANCE
           value: {{ if hasKey .Values.env "RESOURCE_PROVENANCE" }}{{ .Values.env.RESOURCE_PROVENANCE | quote }}{{ else }}"unknown"{{ end }}
         {{- end }}
-        # #343: never stamp a PHANTOM GPU. Emitting the "nvidia.com/gpu=1"
+        # Never stamp a PHANTOM GPU. Emitting the "nvidia.com/gpu=1"
         # default on a CPU-only install surfaced a GPU that was not there in
         # the CLI resources view. GPU_REQUESTS and GPU_LIMITS share one gate so
         # an install emits BOTH or NEITHER (a lone GPU request with no matching
         # limit is rejected by the API server).
         #
-        # THE GATE IS `hasKey`, NOT NON-EMPTINESS (backend#2216). #343 keyed on
-        # a non-empty GPU_LIMITS, which collapsed two different situations into
+        # THE GATE IS `hasKey`, NOT NON-EMPTINESS. Keying on
+        # a non-empty GPU_LIMITS collapses two different situations into
         # one silence:
         #
         #   * the operator DECLARED CPU-only     -> `GPU_LIMITS: ""` is present
         #   * nobody said anything (chart-direct) -> the key is absent
         #
         # jobs-manager reads those differently by design: an explicit empty
-        # means "no GPU on this cluster" (`_gpu_available_from_env`,
-        # client-runtime#80) while absence preserves the legacy assume-a-GPU
+        # means "no GPU on this cluster" (`_gpu_available_from_env`)
+        # while absence preserves the legacy assume-a-GPU
         # default. Omitting the var in BOTH cases threw the declaration away, so
         # a declared CPU-only edge looked identical to a GPU one — every job
         # requested `nvidia.com/gpu`, wedged Pending, and waited out the 600s
         # scale-from-zero grace before being respun on CPU, once per experiment
-        # (the cost recorded on client-runtime#355).
+        # (a scale-from-zero grace wait per job).
         #
         # So: key present -> emit it, empty value included. Key absent -> emit
         # neither, which is still "can't tell" and still the legacy default.
         # The phantom GPU stays fixed either way, because what caused it was
         # the "nvidia.com/gpu=1" DEFAULT, and an explicit empty is not that.
         #
-        # client#995: THE TWO ARE ONE NUMBER. Kubernetes requires an extended
+        # THE TWO ARE ONE NUMBER. Kubernetes requires an extended
         # resource's request to equal its limit, and this block used to fill an
         # absent GPU_REQUESTS with a literal "nvidia.com/gpu=1" -- so a values
         # file carrying only `GPU_LIMITS: nvidia.com/gpu=2` reached jobs-manager
         # as requests=1 / limits=2, which the API server rejects, and the
-        # runtime's own mirror (client-runtime#515/#516) could never be reached
+        # runtime's own mirror could never be reached
         # from values because both keys always arrived set. An absent
         # GPU_REQUESTS now takes GPU_LIMITS' value. GPU_LIMITS stays the ONLY
         # gate: a lone GPU_REQUESTS still renders neither var, so an edge that
-        # carried one on an older chart keeps its behaviour on upgrade (Saqlain,
-        # client#996). Both set to different values is written as given: the
+        # carried one on an older chart keeps its behaviour on upgrade. Both set to different values is written as given: the
         # operator asked for it, the runtime warns once, the pod is rejected --
         # the chart does not silently overrule an explicit pair. The pair is
         # rendered by ONE helper (`tracebloc.gpuEnv`) for both containers.
         {{- include "tracebloc.gpuEnv" . | nindent 8 }}
-        # client-runtime#946 (RFC-0243 D12): an inference pod's own size, from
+        # An inference pod's own size, from
         # env.INFERENCE_RESOURCE_* / env.INFERENCE_GPU_*. Absent, nothing is
         # rendered and inference pods keep the training size above.
         {{- include "tracebloc.inferenceResourceEnv" . | nindent 8 }}
         - name: TRACEBLOC_RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
-        # client-runtime#92: gates jobs-manager's GPU->CPU pending-job fallback.
+        # Gates jobs-manager's GPU->CPU pending-job fallback.
         # Default tracks hostPath.enabled — a fixed single-host cluster
         # (installer- or operator-provisioned hostPath) applies the hard
         # CPU-or-GPU rule (downgrade a Pending GPU pod to CPU); managed
@@ -1018,7 +997,7 @@ spec:
         # --reset-then-reuse-values upgrade can't crash templating.
         - name: TRACEBLOC_SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
-        # backend#4346: the node this pod runs on, reported as the heartbeat's
+        # The node this pod runs on, reported as the heartbeat's
         # `hostname` for the dashboard's secure-environment switcher, and as
         # telemetry's `k8s.node.name`. Downward API, so no RBAC and no API call
         # -- the same source the resource monitor DaemonSet uses. On the
@@ -1064,12 +1043,12 @@ spec:
              last two are absent and jobs-manager reports a trigger `refused`
              instead of creating a Job it could not run.
 
-             Settings naming (backend#3846): each MYSQL_MIGRATION_* name is set
+             Settings naming: each MYSQL_MIGRATION_* name is set
              under its TRACEBLOC_ canonical too, from the same expression, so a
              jobs-manager that reads the canonical first and an older one that
              reads only the legacy name resolve the same Job.
 
-             RELEASE_SECRET_NAME names `mysql-credentials` (client-dev#1702), not
+             RELEASE_SECRET_NAME names `mysql-credentials`, not
              the release Secret: the Job reads only the MySQL passwords from it
              (DB_BOOTSTRAP_PASSWORD and the TB_META / TB_INGEST / TB_CREDMGR
              pairs), and those moved there. The env name is client-runtime's
@@ -1088,8 +1067,8 @@ spec:
         {{- end }}
         {{- range $key, $value := .Values.env }}
         {{- /* IMAGE_PULL_SECRET_NAME is excluded so `env.IMAGE_PULL_SECRET_NAME`
-             cannot render it twice with the passthrough copy winning (Asad on
-             client#751). The consequence is sharper than JOB_IMAGE_HOST's, which
+             cannot render it twice with the passthrough copy winning (The
+             consequence is sharper than JOB_IMAGE_HOST's, which
              has the same shape and is deliberately left alone: a slow pull is
              recoverable, whereas client-runtime treats a pull-secret name that
              does not resolve as PERMANENT and dead-letters the experiment. The
@@ -1106,7 +1085,7 @@ spec:
              the variable does not exist before this change.
 
              The five migration-Job names above are excluded, under both
-             spellings, for the same reason (backend#4361): a passthrough copy renders after the chart's and
+             spellings, for the same reason: a passthrough copy renders after the chart's and
              wins, so `env.RELEASE_NAME` or `env.MYSQL_MIGRATION_*` could point
              the Job at another release, Secret, image or ServiceAccount -- and
              with auto-upgrade off, `env.MYSQL_MIGRATION_SERVICE_ACCOUNT` would
@@ -1114,7 +1093,7 @@ spec:
              `refused`.
 
              RESTRICTED_DNS_NAMESERVER / RESTRICTED_DNS_CLUSTER_DOMAIN are excluded
-             on the same grounds (client-dev#1282): they are rendered above from
+             on the same grounds: they are rendered above from
              `restrictedDns` alone. A passthrough copy with the feature OFF put
              jobs-manager on `dnsPolicy: None` for training and ingestion pods with
              no resolver deployed, so they lost DNS; with it ON it replaced the
@@ -1127,7 +1106,7 @@ spec:
              inject one when not.
 
              TRACEBLOC_INGEST_RUN_TOKEN is rendered above, always, from
-             `ingestRunToken` / `ingestRunTokenByEnv` (backend#2073). A passthrough
+             `ingestRunToken` / `ingestRunTokenByEnv`. A passthrough
              copy would render after it and win, turning the bound per-run token
              on for a fleet whose ingestor cannot use it, or off for one the chart
              turned on. pods-monitor's list is left alone: it never renders or
@@ -1138,24 +1117,24 @@ spec:
         {{- end }}
       - name: pods-monitor-container
         image: {{ include "tracebloc.controlPlaneImage" (dict "image" "podsMonitor" "root" $) | quote }}
-        # #569: same policy as the api container above -- see
+        # Same policy as the api container above -- see
         # tracebloc.controlPlanePullPolicy.
         imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "image" "podsMonitor" "root" $) }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
             drop: ["ALL"]
-        # #1144: same cluster-recovery treatment as the api container above —
-        # pods-monitor was also exit-137 killed in the mass restart. #1144 pinned
+        # Same cluster-recovery treatment as the api container above —
+        # pods-monitor was also exit-137 killed in the mass restart. So
         # requests.memory == limits.memory (512Mi) to lower its oom_score_adj
         # (a less-preferred node OOM victim; the pod stays Burstable — and cpu is
         # not the only reason: see the init-container note on the api container
-        # above, backend#2872), and raised
-        # requests.cpu (50m -> 100m) so its startup is not starved under
-        # contention. The measured trim (backend#2461, 2026-09-13) sets the REQUEST to
+        # above), and requests.cpu is raised
+        # (50m -> 100m) so its startup is not starved under
+        # contention. The measured trim sets the REQUEST to
         # 128Mi from a 77 MiB restart peak (the interim trim had guessed 384Mi)
         # and keeps the 512Mi LIMIT: nothing has measured this container yet, so
-        # the ceiling that #1144's restart peak justified stays where it was
+        # the ceiling that the restart peak justified stays where it was
         # (derivation on values.yaml#resources).
         resources:
           requests:
@@ -1184,11 +1163,10 @@ spec:
               key: TRACEBLOC_CLIENT_PASSWORD
         - name: TRACEBLOC_CLIENT_LOGS_PVC
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
-        # The egress gate, which pods-monitor's messages to tracebloc go through
-        # (RFC-0324 D2).
+        # The egress gate, which pods-monitor's messages to tracebloc go through.
         - name: TRACEBLOC_REQUESTS_PROXY_URL
           value: {{ include "tracebloc.egressGateSendUrl" . | quote }}
-        # See the api container's JOB_IMAGE_HOST note (#585): rendered from
+        # See the api container's JOB_IMAGE_HOST note: rendered from
         # tracebloc.tbRegistry, so a global.imageRegistry mirror wins, then
         # images.traceblocRegistry, then the chart default (ghcr.io).
         - name: TRACEBLOC_JOB_IMAGE_HOST
@@ -1196,11 +1174,10 @@ spec:
         {{- $clientEnv := include "tracebloc.clientEnv" . }}
         - name: TRACEBLOC_ENV
           value: {{ $clientEnv | quote }}
-        # See the api container's RESOURCE_REQUESTS note (backend#664,
-        # backend#2418): both omitted when neither is set (jobs-manager derives
+        # See the api container's RESOURCE_REQUESTS note: both omitted when neither is set (jobs-manager derives
         # from node allocatable; older images keep their built-in literal), and
         # EACH emitted only if set -- no literal is injected for the other side,
-        # because doing so re-created client-runtime#388's request-above-limit
+        # because doing so re-created the runtime's request-above-limit
         # bug at the chart layer and made the ONE-SIDED L0.2 envelope
         # inexpressible. (A both-keys-set pair, which is what the installer
         # writes, always rendered verbatim -- see the api container's note.)
@@ -1213,7 +1190,7 @@ spec:
         - name: TRACEBLOC_RESOURCE_LIMITS
           value: {{ .Values.env.RESOURCE_LIMITS | quote }}
         {{- end }}
-        # backend#2220: WHO chose the pair above. Bookkeeping only -- it never
+        # WHO chose the pair above. Bookkeeping only -- it never
         # changes the envelope. It rides inside the same gate on purpose: a
         # provenance marker with no envelope to describe is noise, and pinning
         # them together means the unset recipe below clears all three at once.
@@ -1226,19 +1203,19 @@ spec:
         - name: TRACEBLOC_RESOURCE_PROVENANCE
           value: {{ if hasKey .Values.env "RESOURCE_PROVENANCE" }}{{ .Values.env.RESOURCE_PROVENANCE | quote }}{{ else }}"unknown"{{ end }}
         {{- end }}
-        # #343: only stamp the GPU vars when a GPU is actually configured (see
+        # Only stamp the GPU vars when a GPU is actually configured (see
         # the api container above) — GPU_REQUESTS and GPU_LIMITS share one gate,
-        # `hasKey` since backend#2216 (see the api container for why)
+        # `hasKey` (see the api container for why)
         # so a CPU-only install emits neither (no phantom GPU in the CLI view)
         # and a GPU install emits both (request == limit). Rendered by the same
-        # helper as the api container (client#995, see above).
+        # helper as the api container (see above).
         {{- include "tracebloc.gpuEnv" . | nindent 8 }}
-        # client-runtime#946: same helper as the api container -- a GPU->CPU
+        # Same helper as the api container -- a GPU->CPU
         # respin of an inference pod is sized the same way.
         {{- include "tracebloc.inferenceResourceEnv" . | nindent 8 }}
         - name: TRACEBLOC_RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
-        # Kept in sync with the api container (client-runtime#92). pods-monitor
+        # Kept in sync with the api container. pods-monitor
         # does not consume SINGLE_NODE, but injecting it here keeps both env
         # blocks + their range-exclusion lists symmetric, matching how
         # GPU_REQUESTS et al. are already handled.

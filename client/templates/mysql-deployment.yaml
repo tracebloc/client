@@ -68,7 +68,7 @@ spec:
         - name: mysql-persistent-storage
           mountPath: /var/lib/mysql/
       {{- end }}
-      # Engine/datadir format guard (backend#723). MySQL datadirs are
+      # Engine/datadir format guard. MySQL datadirs are
       # version-specific: 8.4 refuses a 5.7-format datadir (staged 5.7→8.0→8.4
       # upgrades only), and 5.7 cannot open an 8.x one. A mismatched engine
       # would CrashLoop with a cryptic mysqld error — this fails FIRST with an
@@ -114,14 +114,14 @@ spec:
                   echo "REFUSING TO START: MySQL 8.4 image over a 5.7-format datadir (no mysql.ibd)."
                   echo "8.4 cannot open 5.7 data — MySQL supports staged upgrades only (5.7 -> 8.0 -> 8.4)."
                   echo "Either keep this edge on the 5.7 engine (remove the 8.4 image override) or"
-                  echo "migrate the datadir per the staged runbook in tracebloc/backend#723."
+                  echo "migrate the datadir through the staged 5.7 -> 8.0 -> 8.4 upgrade."
                   exit 1
                 fi ;;
               5.7)
                 if [ -e "$d/mysql.ibd" ]; then
                   echo "REFUSING TO START: MySQL 5.7 image over an 8.x-format datadir (mysql.ibd present)."
                   echo "This datadir was already upgraded and cannot go back to 5.7. Point this edge"
-                  echo "back at its 8.4 engine values (tracebloc/backend#723), or restore the"
+                  echo "back at its 8.4 engine values, or restore the"
                   echo "pre-migration backup if a rollback is intended."
                   exit 1
                 fi ;;
@@ -197,11 +197,11 @@ spec:
           readOnly: true
       {{- end }}
       {{- if (include "tracebloc.selfRotateMysqlRoot" .) }}
-      # Root init file (backend#5427; tracebloc.selfRotateMysqlRoot). On an EXISTING
+      # Root init file (tracebloc.selfRotateMysqlRoot). On an EXISTING
       # datadir, write root's ALTER USER statements and an option file naming them
       # into mysql-root-init, which mysqld reads as $MYSQL_HOME/my.cnf: mysqld then
       # sets root at startup, before it accepts connections.
-      # THE PASSWORD IS mysql-credentials' MYSQL_ROOT_PASSWORD (client-dev#1852):
+      # THE PASSWORD IS mysql-credentials' MYSQL_ROOT_PASSWORD:
       # the same Secret and key every other root reader names, so a password
       # changed by hand there is the one mysqld sets. It used to be SQL rendered
       # into the release Secret at render time -- a second copy of the password
@@ -244,7 +244,7 @@ spec:
             printf '[mysqld]\ninit_file=%s/root-init.sql\n' "$dst" > "$dst/my.cnf"
             echo "mysql-root-init: existing datadir: mysqld sets root from mysql-credentials at startup"
         env:
-        # The same Secret and key as mysql-client's MYSQL_ROOT_PASSWORD (client-dev#1852).
+        # The same Secret and key as mysql-client's MYSQL_ROOT_PASSWORD.
         # optional: a missing key is reported and skipped above, not a pod that cannot start.
         - name: MYSQL_ROOT_PASSWORD
           valueFrom:
@@ -260,7 +260,7 @@ spec:
           mountPath: /etc/mysql/tracebloc
       {{- end }}
       containers:
-      # THE REGISTRY IS tracebloc.tbRegistry SINCE D1 STEP 6 (backend#3397).
+      # THE REGISTRY IS tracebloc.tbRegistry SINCE D1 STEP 6.
       # mysql-client is a tracebloc-published image and now lives beside the
       # others on ghcr.io; it used to be routed around this helper with a
       # hardcoded `docker.io` fallback because it was published nowhere else.
@@ -271,13 +271,13 @@ spec:
       # digest was rendered onto ghcr.io and every pull timed out (see
       # tracebloc.pinFor). An IGNORED pin falls back to `:<images.mysqlClient.tag, default prod>`,
       # which the frozen Hub namespace and ghcr.io both serve.
-      # NIL-GUARDED (backend#4372): `images.mysqlClient: null` or `images: null`
+      # NIL-GUARDED: `images.mysqlClient: null` or `images: null`
       # renders the defaults below rather than a nil-pointer failure.
       - image: {{ include "tracebloc.image" (dict "repository" ($mysqlImg.repository | default "tracebloc/mysql-client") "tag" ($mysqlImg.tag | default "prod") "digest" (include "tracebloc.honouredPin" (dict "image" "mysqlClient" "root" $)) "registry" (include "tracebloc.tbRegistry" .)) | quote }}
         imagePullPolicy: IfNotPresent
         name: mysql-client
         {{- if (include "tracebloc.rotateMysqlRoot" .) }}
-        # backend#947 / backend#1528 Phase 0: chart-managed root password so a
+        # Chart-managed root password so a
         # FRESH datadir is born with a generated password instead of the image's
         # baked literal. On an EXISTING datadir the mysql entrypoint ignores this
         # (root's password lives in mysql.user) — the one-time `ALTER USER 'root'`
@@ -292,7 +292,7 @@ spec:
               name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
               key: MYSQL_ROOT_PASSWORD
         {{- if (include "tracebloc.selfRotateMysqlRoot" .) }}
-        # backend#5427: mysqld reads $MYSQL_HOME/my.cnf, a server-only option
+        # mysqld reads $MYSQL_HOME/my.cnf, a server-only option
         # file, after its usual ones, and skips it silently when it is absent.
         # The mysql-root-init init container writes it only on an existing
         # datadir. Under /etc/mysql/ deliberately: a host AppArmor mysqld profile
@@ -361,7 +361,7 @@ spec:
         - name: mysql-config
           mountPath: /etc/mysql/conf.d/
         {{- /*
-          ...AND as /etc/mysql/my.cnf, which mysqld reads directly (backend#3032).
+          ...AND as /etc/mysql/my.cnf, which mysqld reads directly.
 
           The conf.d mount alone is reached ONLY through `!includedir
           /etc/mysql/conf.d/` on the image's /etc/my.cnf. That line is a detail of
@@ -396,8 +396,7 @@ spec:
           time, after /etc/my.cnf, with identical content: same values, no
           behaviour change. (The image's OWN settings -- socket,
           skip-name-resolve -- still live in /etc/my.cnf and are still lost under
-          confinement; recovering those is an image change, tracked on
-          backend#3032.)
+          confinement; recovering those is an image change.)
 
           GATED ON 8.4, and that "second read" is exactly why. It holds only for
           the Oracle-Linux 8.4 layout, where /etc/mysql/my.cnf is a file mysqld
@@ -413,7 +412,7 @@ spec:
         {{- if eq (include "tracebloc.mysqlEngineMajor" .) "8.4" }}
         # Also as /etc/mysql/my.cnf: on 8.4 the conf.d mount is reachable only
         # via the image's `!includedir` in /etc/my.cnf, which a host AppArmor
-        # mysqld profile silently takes out of reach (backend#3032 -- rationale
+        # mysqld profile silently takes out of reach (rationale
         # above). Never on 5.7, where this path IS the primary option file.
         - name: mysql-config
           mountPath: /etc/mysql/my.cnf
@@ -465,7 +464,7 @@ spec:
           defaultMode: 0444
       {{- end }}
       {{- if (include "tracebloc.selfRotateMysqlRoot" .) }}
-      # backend#5427. In memory, because it holds root's password. Written once per pod start
+      # In memory, because it holds root's password. Written once per pod start
       # by the init container; mysqld mounts it read-only.
       - name: mysql-root-init
         emptyDir:

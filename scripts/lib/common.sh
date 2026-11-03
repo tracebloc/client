@@ -12,7 +12,7 @@
 # front of PATH: that entry is the installer's, not the user's, so it is dropped from
 # the capture. The cost is one conservative "open a new terminal" for a user whose
 # own PATH starts with ~/.local/bin and who pairs a stale bootstrap with these libs.
-# A bootstrap from before backend#3846 hands the capture over as TB_LAUNCH_PATH
+# A bootstrap from before the TRACEBLOC_ renaming hands the capture over as TB_LAUNCH_PATH
 # alone: read it as the fallback (remove_by 2026-12-31). Exported under the
 # canonical name only: every reader is this core, which reads it first.
 TRACEBLOC_LAUNCH_PATH="${TRACEBLOC_LAUNCH_PATH:-${TB_LAUNCH_PATH:-}}"
@@ -31,7 +31,7 @@ fi
 umask 077
 
 # ── Settings naming: the TRACEBLOC_ spellings of the tuning knobs ────────────
-# backend#3846. Every timeout, wait and bound below can be set as
+# Every timeout, wait and bound below can be set as
 # TRACEBLOC_<name> -- the TB_ prefix REPLACED (TB_PULL_TIMEOUT ->
 # TRACEBLOC_PULL_TIMEOUT), an unprefixed name prefixed (SIGN_IN_ATTEMPTS ->
 # TRACEBLOC_SIGN_IN_ATTEMPTS). The old spelling still works (remove_by 2026-12-31).
@@ -84,7 +84,7 @@ readonly CURL_SECURE="--tlsv1.2"
 # The chart, client-runtime and this installer all key on dev|stg|prod, while
 # values.schema.json documents development|staging|production as accepted
 # aliases. Every consumer must reduce through here rather than matching the raw
-# value, for the reason backend#1723 and backend#1745 both record: a `case`
+# value, because a `case`
 # that knows only dev|stg with a `*)` catch-all sends a documented alias to the
 # PROD branch silently.
 #
@@ -93,7 +93,7 @@ readonly CURL_SECURE="--tlsv1.2"
 # credentials against the PRODUCTION backend and told them their correct
 # credentials were wrong.
 #
-# RFC-0076 settings-naming (S3): TRACEBLOC_ENV is the canonical shell var,
+# Settings naming: TRACEBLOC_ENV is the canonical shell var,
 # CLIENT_ENV the legacy one (remove_by 2026-12-31), same alias-first
 # precedence as the chart's tracebloc.clientEnv -- a non-empty TRACEBLOC_ENV
 # wins, else CLIENT_ENV, else absent. This is only the AMBIENT-ENV fallback:
@@ -118,7 +118,7 @@ tb_client_env() {
 }
 
 # The DASHBOARD for this environment — where a human goes to create a client,
-# read their credentials, or see whether it came online (backend#2849).
+# read their credentials, or see whether it came online.
 #
 # Bugbot caught that this still hardcoded production at ten sites while
 # `_backend_url` was correctly env-aware — so a `CLIENT_ENV=dev` install on Linux
@@ -126,7 +126,7 @@ tb_client_env() {
 # then rejects. (The retired PowerShell core had been fixed first.)
 #
 # IT LIVES HERE, NOT IN install-client-helm.sh, and that placement is the whole
-# point (@LukasWodka on client#946). It was defined in install-client-helm.sh and
+# point. It was defined in install-client-helm.sh and
 # CALLED from summary.sh — sibling libraries where neither sources the other — so
 # summary.sh silently depended on a load order nothing enforced. Standalone (which
 # is exactly what summary.bats does) the four call sites rendered an EMPTY link:
@@ -146,8 +146,8 @@ tb_client_env() {
 #   $1 = path under the dashboard (default "secure-environment"; pass "" for the bare host)
 #
 # The default is My Secure Environment, the page that shows this client and
-# whether it is connected. It was "clients" until the Clients page retired
-# (frontend-app#2277): /clients now only redirects there.
+# whether it is connected. It was "clients" until the Clients page retired;
+# /clients now only redirects there.
 _dashboard_url() {
   local path="${1-secure-environment}" base
   # Bare call, no explicit fallback: tb_client_env's own ambient-env path
@@ -165,7 +165,7 @@ _dashboard_url() {
 
 # _credential_file_cmd / _credential_file_load_cmd — where a secure environment's
 # Client ID and password come from, for every line that tells someone. The
-# Clients page that showed them is retired (frontend-app#2277), and My Secure
+# Clients page that showed them is retired, and My Secure
 # Environment shows neither. An interactive install needs no pair at all:
 # provision_client signs in through the browser. An unattended one creates the
 # pair on a machine signed in to tracebloc, which writes it to tb.env, then loads
@@ -180,7 +180,7 @@ _credential_file_load_cmd() { printf '%s' 'set -a; . ./tb.env; set +a'; }
 #
 # The TLS floor used to be opt-in: every call site had to remember to splice
 # $CURL_SECURE in, and seven of them had silently lost it — including the POST
-# that carries the client's password (backend#1252). A wrapper makes the floor
+# that carries the client's password. A wrapper makes the floor
 # structural instead of remembered: a new call site gets it whether or not its
 # author knew it existed.
 #
@@ -214,7 +214,7 @@ curl_secure() {
 
 # Verify FILE against an EXPECTED sha256, portably and FAIL-CLOSED. Linux ships
 # sha256sum (coreutils); macOS ships NO sha256sum but has shasum -a 256 — so the
-# same pinned-download verification works on both (#429). We feed "<hash>  <file>"
+# same pinned-download verification works on both. We feed "<hash>  <file>"
 # to `--check` (exit-code only) rather than recomputing and string-comparing, so
 # the bats fetch mocks that stub `sha256sum` keep working unchanged. `command -v`
 # (not has()) picks the tool: has() is mocked per-test on PRESENT_CMDS, but the
@@ -226,7 +226,7 @@ _verify_sha256() {
   # Tool choice: Linux ships GNU sha256sum (coreutils, on even minimal cloud images).
   # macOS ALSO ships a /sbin/sha256sum (Darwin 1.0). On macOS 26 it accepts --check
   # --status, but only with a file operand: fed on stdin with none, as below, it
-  # prints its usage and exits 1 (measured on 26.6.2, client-dev#1356), so on real
+  # prints its usage and exits 1 (measured on 26.6.2), so on real
   # macOS prefer `shasum -a 256`. The `type -t` guard keeps this from disturbing
   # the bats fetch tests, which run on macOS dev boxes and provide sha256sum as a
   # shell FUNCTION (a mock): a function means we're under test, so honor it rather
@@ -249,7 +249,7 @@ _verify_sha256() {
 }
 
 # Fail-fast when a just-downloaded FILE is shorter than a real tool binary can be
-# (#607). On a filtered network a proxy or antivirus can return a truncated stream
+# . On a filtered network a proxy or antivirus can return a truncated stream
 # or a small error page under HTTP 200 — `curl -f` can't see it (it's not an HTTP
 # error), and the only downstream signal was _verify_sha256, which misreports a
 # blocked TRANSFER as "checksum verification failed" (tampering). Catching the short
@@ -589,7 +589,7 @@ _tb_live_resume() {
 }
 
 # The "release the secure environment that is already here" remedy, printed from ONE
-# place (backend#2077), for the sites that mean a FULL removal (switch account,
+# place, for the sites that mean a FULL removal (switch account,
 # switch Client ID), not a keep-your-data recreate.
 #
 # Why the release comes first: the backend record is anchored to the cluster's
@@ -629,7 +629,7 @@ _release_client_hint() {
 # gap BETWEEN steps comes from each step body ending with a blank line (main() adds
 # it), matching the run-through's spacing.
 #
-# It is also where the install's phase clock turns over (backend#1907). Hooking
+# It is also where the install's phase clock turns over. Hooking
 # THIS rather than adding a telemetry_phase_begin call to each of the six steps
 # is the difference between phase timings that are correct by construction and
 # phase timings that are correct for the steps somebody remembered — and the
@@ -666,7 +666,7 @@ _refuse_invalid_cluster_name() {
     || error "CLUSTER_NAME must start with a letter, contain only [a-zA-Z0-9._-], max 63 chars (got '${1:-}')"
 }
 
-# Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
+# Execute-gate a freshly-installed tool. The old post-install "check" was a
 # log-only interpolation (`... 2>/dev/null || echo present`) that masked failure,
 # so a corrupt or wrong-architecture binary — a partial package-manager install, or a
 # download no checksum path guarded — sat on PATH and failed only later, at
@@ -690,7 +690,7 @@ assert_tool_runs() {
   local name="$1"; shift
   local out
   if out="$("$name" "$@" 2>&1)"; then
-    # First line via pure-bash slicing, not `printf … | head -1` (backend#1778).
+    # First line via pure-bash slicing, not `printf … | head -1`.
     # This one sits in ARGUMENT position, where a 141 does NOT trip errexit, so it
     # was never an abort — but the pipeline bought nothing and the shape is the
     # one being retired fleet-wide.
@@ -712,7 +712,7 @@ assert_tool_runs() {
 #
 # timeout(1)/gtimeout(1) when either is present: they signal the whole process
 # group. Neither ships on a stock Mac, and the bare call this used to fall back to
-# was no bound at all there (#741, #832, backend#2521), so without them the deadline
+# was no bound at all there, so without them the deadline
 # comes from _tb_bounded_bg, the background-PID mechanism _bounded_capture uses.
 _bounded() {
   local t="$1"; shift
@@ -768,7 +768,7 @@ _tb_bounded_bg() {
 # TWO CLOCKS, and the deadline is whichever runs out first. The tick count is never
 # early (each tick sleeps at least one tick), but it is not a bound: every tick also
 # pays a `kill -0` and a `sleep` fork, and on a loaded macOS runner "1s, then a 2s
-# grace" measured 6.6s (client-dev#1514). The wall clock caps it. $SECONDS is whole
+# grace" measured 6.6s. The wall clock caps it. $SECONDS is whole
 # seconds, so a difference of N means MORE than N-1 have passed: the deadline needs
 # `> secs` to stay never-shorter-than-asked; the grace is best-effort and takes `>= 2`.
 _tb_bounded_wait() {
@@ -777,8 +777,7 @@ _tb_bounded_wait() {
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$limit" ] || [ $(( SECONDS - t0 )) -gt "$2" ]; then
       # EVERY LINE FAILURE-PROOFED (`|| true`), exactly as spin's deadline path is
-      # and for the reason recorded there (Bugbot #442 r3, and again on
-      # client#984): `wait` on a TERM'd child reports 143 and `kill` fails outright
+      # and for the reason recorded there: `wait` on a TERM'd child reports 143 and `kill` fails outright
       # on an already-exited pid, so under `set -e` either aborted this arm BEFORE
       # `return 124` and the caller saw a fired deadline as "the command failed
       # with 143". That is the stall/failure conflation every caller keys on.
@@ -815,7 +814,7 @@ _tb_bounded_wait() {
 # deadline fired. THREE OUTCOMES, all distinguishable by the caller: 0 (answered),
 # 124 (did not answer in time), anything else (CMD's own failure).
 #
-# WHY IT EXISTS ALONGSIDE _bounded (client#984). `_bounded` leaves the output where
+# WHY IT EXISTS ALONGSIDE _bounded. `_bounded` leaves the output where
 # the caller put it; this one captures it to a FILE, and uses the background-PID
 # deadline (_tb_bounded_bg) on every host, coreutils or not, so a capture behaves
 # the same everywhere.
@@ -827,7 +826,7 @@ _tb_bounded_wait() {
 # does not make a slower read of the same daemon safe: more work, a different
 # budget.
 #
-# The mechanism is _tb_bounded_bg's: the same background-PID + kill as spin (#426),
+# The mechanism is _tb_bounded_bg's: the same background-PID + kill as spin,
 # no coreutils, TERM first and then KILL, so a well-behaved child can clean up.
 _bounded_capture() {
   local secs="$1" out="$2"; shift 2
@@ -842,7 +841,7 @@ _bounded_capture() {
 # bypasses the root-aware `sudo()` shadow below — and as root (the normal
 # `--prepare-host` path, where RFC 0001 often has no sudo binary at all)
 # `timeout sudo CMD` then fails to find sudo and the caller misreads a live daemon
-# as dead (Bugbot, #744). So the bound goes INSIDE the executor: `tb_root timeout
+# as dead. So the bound goes INSIDE the executor: `tb_root timeout
 # SECS CMD` runs bare as root and through the real sudo otherwise, and under
 # --print a read stays a read (`timeout` is on _tb_root_reads' list).
 _bounded_root() {
@@ -855,7 +854,7 @@ _bounded_root() {
 # Sanitize a minutes-valued env override to a base-10 integer, else <default>.
 # The 10# base prefix matters: bash arithmetic reads a leading zero as octal,
 # so 08/09 would ABORT $(( … )) under set -e (mid-create, leaving a partial
-# cluster) and 010 would silently become 8 (Bugbot #442).
+# cluster) and 010 would silently become 8.
 tb_minutes_or() {
   local v="$1" def="$2"
   case "$v" in ''|*[!0-9]*) echo "$def"; return 0 ;; esac
@@ -872,8 +871,8 @@ tb_minutes_or() {
 #   SS3  ESC 'O' <final ∈ [A-Za-z~]>   — ESC OA/OB/OC/OD, ESC OH/OF, ESC OP…OS
 # SS3 is what the SAME keys emit once the terminal is in DECCKM
 # application-cursor mode, the state vim/less/tmux leave behind on an unclean
-# exit (cli#516). It was the hole left by the CSI-only fix of 2026-07-21
-# (client#362 / cli#364): ESC is dropped as a C0 byte but 'O' and the final byte
+# exit. It was the hole left by the CSI-only fix of 2026-07-21
+# : ESC is dropped as a C0 byte but 'O' and the final byte
 # are printable, so ESC OD ESC OA survived as the plausible name "ODOA" and
 # minted a permanent namespace — where CSI residue cleans to empty and re-prompts.
 # Strip iteratively to handle consecutive sequences (e.g. paste-wrappers).
@@ -907,8 +906,7 @@ _strip_paste_garbage() {
   # unbounded: one leaves the 'D' of an unrecognised SS3-shaped pair behind and
   # the floor stops firing on the very shape this is about, while unbounded
   # swallows a whole ASCII name (ESC N C h e l l o) yet spares a non-Latin one,
-  # making keep-vs-reject depend on the script the name is written in (Bugbot,
-  # #736). An escape final is one byte, an intro plus a final is two, and every
+  # making keep-vs-reject depend on the script the name is written in. An escape final is one byte, an intro plus a final is two, and every
   # keyboard-input escape family fits in that. The probe's output is only a
   # yes/no — it is never returned. Nothing but residue ⇒ emit empty, which every
   # caller already treats as "no answer" (re-prompt, or auto-name in the CLI).
@@ -943,7 +941,7 @@ _strip_paste_garbage() {
 # jq. Missing or non-numeric components read as 0, so "0.10" < "0.10.1" and a
 # pre-release suffix ("0.10.0-rc.1") compares as its base version.
 #
-# Lives here rather than in assess.sh (backend#2422) because k3s.sh and
+# Lives here rather than in assess.sh because k3s.sh and
 # install-cli.sh call it and assess.sh is sourced only conditionally.
 #
 # CALLER MUST STRIP A LEADING "v". A non-numeric leading component reads as 0, so
@@ -979,7 +977,7 @@ _chart_version() {
 }
 
 # THE CLIENT'S CORE WORKLOADS, READ FROM THE CLUSTER, NEVER BUILT FROM A NAME
-# (backend#2888). These three Deployments are the set whose readiness DEFINES
+# . These three Deployments are the set whose readiness DEFINES
 # "the client is up": the post-install readiness gate (wait_for_client_ready,
 # summary.sh), the stop-and-check gate (assess.sh) and --diagnose all read them
 # through _client_workloads below.
@@ -1055,7 +1053,7 @@ _client_workload_name() {
 }
 
 # THE RESOURCE-MONITOR DAEMONSET, READ FROM THE CLUSTER, NEVER BUILT FROM A NAME
-# (client-dev#1306). --diagnose used to fetch
+# . --diagnose used to fetch
 # `kubectl logs -n <client ns> daemonset/tracebloc-resource-monitor`, which is
 # wrong on BOTH halves: the chart puts the DaemonSet in the node-agents namespace
 # (`nodeAgents.namespace.name`, default `tracebloc-node-agents`), never the
@@ -1112,7 +1110,7 @@ _resource_monitor_daemonset() {
   _resource_monitor_from_rows "$rows" "$ns"
 }
 
-# ── Progress-line gate — animate only where a redraw reads (client-dev#1642) ──
+# ── Progress-line gate — animate only where a redraw reads ──
 # A spinner redraws its line with \r, \033[K and tput. Where colour is off
 # (NO_COLOR / not a TTY / TERM=dumb / TB_PLAIN=1, decided once above as
 # _tb_mode=none) those bytes land in a log as frame after frame of garbage, so
@@ -1162,7 +1160,7 @@ _tb_progress_end() {
 
 # _tb_proc_tree PID — PID and every descendant, one per line, parents first.
 # Captured BEFORE any signal: once a wrapper dies its children reparent to init
-# and `pgrep -P` can no longer see them (Bugbot #442 r2).
+# and `pgrep -P` can no longer see them.
 _tb_proc_tree() {
   local _todo="$1" _next _p
   while [[ -n "$_todo" ]]; do
@@ -1193,7 +1191,7 @@ _tb_proc_alive() {
 # KILL only those still alive under the same name. Empty GRACE_S is the
 # historical 0.5 s, right for kubectl, curl and systemctl probes. A package manager
 # is not one of those: rpm and dpkg defer TERM until the transaction is
-# written, and a KILL 0.5 s later lands mid-transaction (client-dev#2063).
+# written, and a KILL 0.5 s later lands mid-transaction.
 # Through sudo, sudo relays the TERM and only the reap of the WHOLE tree keeps
 # its child from being orphaned holding the lock. Sets _TB_SPIN_SURVIVORS to
 # "pid:name …" for whatever is still alive after the KILL (a root-owned
@@ -1220,7 +1218,7 @@ _tb_spin_reap() {
     sleep 0.5
   else
     # Ticks AND the wall clock, as spin's own deadline: a slow host stretches
-    # every sleep, and the grace must not stretch with it (client-dev#1514).
+    # every sleep, and the grace must not stretch with it.
     while (( _ticks * 2 < _grace * 10 && SECONDS - _t0 <= _grace )); do
       _live=0
       for _pair in $_pairs; do
@@ -1245,12 +1243,12 @@ _tb_spin_reap() {
 # ── Spinner — hides noisy command output behind an animated status line ──────
 #  Usage:  spin <pid> "Installing foo…" [deadline_seconds]
 #  Animates only through the progress-line gate above: with colour off it prints
-#  "  · Installing foo…" once and no frame, \r or escape (client-dev#1642).
+#  "  · Installing foo…" once and no frame, \r or escape.
 #  The background process's stdout/stderr should already be redirected to a file
 #  before calling spin. spin waits for the PID to exit and returns its exit code.
 #  With the optional third argument, a still-running PID is killed once the
 #  deadline passes and spin returns 124 (GNU timeout's convention) — the
-#  backstop for commands that can wedge indefinitely (#426). The optional
+#  backstop for commands that can wedge indefinitely. The optional
 #  fourth is the TERM-to-KILL grace in whole seconds (_tb_spin_reap below);
 #  empty keeps the 0.5 s every non-package-manager caller has always had.
 #  _TB_SPIN_QUIET=1 prints no static line when plain (the copy has none for this
@@ -1260,7 +1258,7 @@ spin() {
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local i=0
   local ticks=0                           # one tick ≈ 0.12s
-  local _spin_t0=$SECONDS                 # the deadline's wall clock: ticks alone stretch on a slow host (client-dev#1514)
+  local _spin_t0=$SECONDS                 # the deadline's wall clock: ticks alone stretch on a slow host
   local own=1
   [[ -z "${_TB_LIVE_MSG:-}" ]] || own=""
 
@@ -1273,10 +1271,10 @@ spin() {
     if [[ -n "$deadline_s" ]] && (( ticks * 12 >= deadline_s * 100 || SECONDS - _spin_t0 > deadline_s )); then
       # The whole tree, not just the pid: it is often a wrapper subshell
       # (spin_cmd_bounded's `tb_root dnf …`), and
-      # signalling only the wrapper orphans the real worker (Bugbot #442).
+      # signalling only the wrapper orphans the real worker.
       # Every line is failure-proofed (`|| true`): under `set -e` a bare
       # failure would abort the deadline path before `return 124`, and the
-      # caller would never see the timeout (Bugbot #442 r3).
+      # caller would never see the timeout.
       _tb_spin_reap "$pid" "$grace_s" || true
       wait "$pid" 2>/dev/null || true
       [[ -z "$own" ]] || _tb_progress_end
@@ -1297,7 +1295,7 @@ spin() {
 # ── Convenience wrapper: run a command quietly behind a spinner ───────────────
 #  Usage:  spin_cmd "Installing foo…" apt-get install -y foo
 #  stdout/stderr are captured in the LOG_FILE (if set) or a private mktemp file
-#  (_tb_spin_logfile; never a fixed /tmp name, backend#4279)
+#  (_tb_spin_logfile; never a fixed /tmp name)
 spin_cmd() {
   local msg="$1"; shift
   local logfile; _tb_spin_logfile; logfile="$_TB_SPIN_LOG"
@@ -1313,7 +1311,7 @@ spin_cmd() {
   fi
 }
 
-# ── spin_cmd with a hard deadline (#426) ─────────────────────────────────────
+# ── spin_cmd with a hard deadline ─────────────────────────────────────
 #  Usage:  spin_cmd_bounded <seconds> "Doing the thing…" cmd args…
 #  For commands that can wedge indefinitely against a stuck endpoint (helm
 #  talking to a wedged kube-apiserver). Same quiet-log capture + failure tail
@@ -1321,7 +1319,7 @@ spin_cmd() {
 #  killed it (with a timeout note so the user knows it was us, not the tool).
 #  `--grace N` first: N whole seconds between TERM and KILL instead of 0.5 —
 #  for a package manager, which must be let finish its transaction
-#  (client-dev#2063; callers pass "${TB_PM_KILL_GRACE:-60}"). Whatever is still
+#  (callers pass "${TB_PM_KILL_GRACE:-60}"). Whatever is still
 #  running after it is named, so the user knows a lock may still be held.
 spin_cmd_bounded() {
   local grace=""
@@ -1368,7 +1366,7 @@ spin_cmd_bounded() {
 #  option-only uses (`sudo -v` / `sudo -n`) live in preflight_sudo and go through
 #  _real_sudo. Detection + the real binary are wrapped in tiny helpers so the
 #  bats suite can exercise every branch without a real sudo.
-_have_sudo_bin() { type -P sudo >/dev/null 2>&1; }   # real binary, ignoring this fn; no $(...) so a failing probe can't trip set -e on bash <4.4 (Bugbot #372)
+_have_sudo_bin() { type -P sudo >/dev/null 2>&1; }   # real binary, ignoring this fn; no $(...) so a failing probe can't trip set -e on bash <4.4
 _real_sudo()     { command sudo "$@"; }           # the real sudo, bypassing the shadow
 
 sudo() {
@@ -1385,7 +1383,7 @@ sudo() {
   fi
 }
 
-# ── The root executor (RFC-0175 D3, client-dev#1541) ─────────────────────────
+# ── The root executor ─────────────────────────
 #  Every privileged command prepare-host can reach is one call of:
 #    tb_root CMD...          as root; may ask for the password (the sudo() shadow);
 #    tb_root_n CMD...        as root, never asking (the install record's root copy);
@@ -1408,7 +1406,7 @@ tb_root_as() { local u="$1"; shift; _tb_root "user:${u}" "$@"; }
 tb_root_planning() { [[ -n "${TRACEBLOC_ROOT_PLAN:-}" ]]; }
 
 # tb_root_bounded SECS CMD... -- CMD as root under _tb_bounded_bg, the pure-bash
-# deadline, for a host with no timeout(1) (client-dev#1618). _tb_bounded_bg signals
+# deadline, for a host with no timeout(1). _tb_bounded_bg signals
 # the pid it started, so what it backgrounds must be a BINARY, never a function: a
 # function runs in a subshell whose death leaves CMD running (measured: install.sh
 # ran to its end). So the sudo() shadow's one rule is applied here -- root runs CMD
@@ -1542,7 +1540,7 @@ _tb_root_credential() {
 # `bash -c '… sudo … …'`. Without
 # export, those child shells resolve the REAL sudo binary, so a root box without
 # sudo installed would still hit "sudo: command not found" there — the exact case
-# A2 fixes everywhere else (review #372). Harmless to non-bash children, which
+# A2 fixes everywhere else. Harmless to non-bash children, which
 # ignore the BASH_FUNC_* environment entries. The executor goes with it, so a
 # `bash -c` child plans under --print too. prepare-host-root-guard.py reads this
 # line as the executor: only these functions may name sudo.
@@ -1613,13 +1611,13 @@ retry() {
 # The install log's file name, declared once. <stamp> is `date +%Y%m%d-%H%M%S`.
 # In tracebloc's WSL distro both of the Windows installer's runs log into one
 # directory (TRACEBLOC_LOG_DIR), so the name carries the run: <phase> is one of
-# TB_WSL_PHASES below (client-dev#1810 section 5). e2e picks a run's log by it,
+# TB_WSL_PHASES below. e2e picks a run's log by it,
 # and install-wsl.ps1's Pester case holds its phase names to TB_WSL_PHASES: change
 # the names here, nowhere else. Every reader globs install-*.log.
 TB_INSTALL_LOG_NAME='install-<stamp>.log'
 TB_INSTALL_LOG_NAME_WSL='install-<stamp>-<phase>.log'
 # Choose the log-file path: under HOST_DATA_DIR when it's creatable AND writable,
-# else a temp file — so setup_log_file never dies on a bare `mkdir -p`/`tee` (#432).
+# else a temp file — so setup_log_file never dies on a bare `mkdir -p`/`tee`.
 # This matters for prepare-host, which logs BEFORE the data-dir guard runs: on an NFS
 # home under sudo + root_squash the data dir isn't creatable/writable yet, and a
 # cryptic mkdir failure there predates any friendly message. (The full install's
@@ -1629,7 +1627,7 @@ _choose_log_file() {
   local candidate="" dir="${HOST_DATA_DIR:-}" phase="" name
   # TRACEBLOC_LOG_DIR: where the Windows installer wants the core's log when it runs
   # it in tracebloc's WSL distro -- %USERPROFILE%\.tracebloc, as the distro sees it
-  # (client-dev#1810 section 5) -- so the user finds it on Windows, beside the
+  # -- so the user finds it on Windows, beside the
   # host's own files. Unset everywhere else, where the data dir holds the log.
   if [[ -n "${TRACEBLOC_LOG_DIR:-}" ]]; then dir="$TRACEBLOC_LOG_DIR"; fi
   # Both of the Windows installer's runs log there, so the name says which run wrote
@@ -1667,7 +1665,7 @@ setup_log_file() {
 }
 
 # ── Configuration (overridable via env) ──────────────────────────────────────
-# Settings naming (backend#3846): every knob in this block has a TRACEBLOC_
+# Settings naming: every knob in this block has a TRACEBLOC_
 # canonical name -- TRACEBLOC_<legacy>, a leading TB_ replaced (TB_STORAGE_MODE
 # -> TRACEBLOC_STORAGE_MODE) -- and the legacy spelling still works (remove_by
 # 2026-12-31). The rule TRACEBLOC_NAMESPACE / TRACEBLOC_HOST_DATA_DIR below set:
@@ -1708,14 +1706,13 @@ TB_IGNORED_SETTINGS="TRACEBLOC_SERVERS TRACEBLOC_AGENTS TRACEBLOC_K3D_VERSION"
 # The leftover-data guard's non-interactive answer (cluster.sh). --reuse-data /
 # --wipe-data assign TB_LEFTOVER_ACTION after this, so a flag still wins.
 if [[ -n "${TRACEBLOC_LEFTOVER_ACTION:-}" ]]; then TB_LEFTOVER_ACTION="$TRACEBLOC_LEFTOVER_ACTION"; fi
-# RFC-0003 — local dataset storage model. node-local is the DEFAULT as of the
-# D15 flip (client#456, epic backend#1151), superseding the flag-gated prototype
-# from #367. (D15 gates the flip on a green node-local dev training run on the dev
-# environment; that sign-off is tracked on client#456, not asserted here.)
+# Local dataset storage model. node-local is the DEFAULT, superseding the
+# flag-gated prototype. (The flip is gated on a green node-local dev training run
+# on the dev environment; that sign-off is not asserted here.)
 #   node-local (default, Option C): datasets live on k3s local-path INSIDE the
 #                          node — they die with the cluster, are not a
 #                          browsable host folder, and need no chmod 777. This is
-#                          the RFC-0003 goal for the local install. The flip
+#                          the goal for the local install. The flip
 #                          applies to the bash core, which Windows runs too,
 #                          inside tracebloc's WSL distro.
 #   hostpath   (opt-out) : the older model — datasets live in ~/.tracebloc on the
@@ -1726,7 +1723,7 @@ if [[ -n "${TRACEBLOC_LEFTOVER_ACTION:-}" ]]; then TB_LEFTOVER_ACTION="$TRACEBLO
 #                          TRACEBLOC_HOST_DATASET_DIR network mount).
 # Record whether the operator chose the mode or is getting the D15 default: on an
 # existing hostpath cluster the mismatch guard refuses an explicit node-local but
-# adopts hostpath when node-local is only the default (client#456, client-dev#1669).
+# adopts hostpath when node-local is only the default.
 if [[ -n "${TRACEBLOC_STORAGE_MODE:-}" ]]; then TB_STORAGE_MODE="$TRACEBLOC_STORAGE_MODE"; fi
 if [[ -n "${TB_STORAGE_MODE:-}" ]]; then TB_STORAGE_MODE_SOURCE="explicit"; else TB_STORAGE_MODE_SOURCE="default"; fi
 TB_STORAGE_MODE="${TB_STORAGE_MODE:-node-local}"
@@ -1734,10 +1731,10 @@ TB_STORAGE_MODE="${TB_STORAGE_MODE:-node-local}"
 # unset the same — there is no opt-out to "latest" for k3s).
 if [[ -n "${TRACEBLOC_K8S_VERSION:-}" ]]; then K8S_VERSION="$TRACEBLOC_K8S_VERSION"; fi
 K8S_VERSION="${K8S_VERSION:-v1.36.5-k3s1}"
-# Native k3s (RFC-0175 D4): the digests k3s.sh checks its downloads against, and
+# Native k3s: the digests k3s.sh checks its downloads against, and
 # the K8S_VERSION they were resolved for (facts.env K3S_BIN_SHA256_* /
 # K3S_INSTALL_SH_SHA256 and K8S_VERSION, stamped by check-facts.sh --write). Stamped
-# here, not in k3s.sh, because common.sh is in the signed manifest (RFC-0175 D12).
+# here, not in k3s.sh, because common.sh is in the signed manifest.
 # TB_K3S_PIN_K8S_VERSION is a SECOND stamp of the k3s pin, and it exists because
 # K8S_VERSION above takes an environment override: a k3s binary of any other
 # version has no digest here, so the native path refuses an override by name
@@ -1754,13 +1751,13 @@ TB_K3S_INSTALL_SH_SHA256="46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a716
 # The k3s node image the macOS node pulls, by its linux/arm64 manifest digest at the pinned
 # K8S_VERSION (facts.env K3S_IMAGE_ARM64_DIGEST; the image is k3s.sh's
 # _native_k3s_image_ref). No TRACEBLOC_* override, for the same reason.
-# shellcheck disable=SC2034  # read by the macOS node from 2.1 part 3b (RFC-0175 D6)
+# shellcheck disable=SC2034  # read by the macOS node from 2.1 part 3b
 TB_K3S_IMAGE_ARM64_DIGEST="sha256:4ceb591dd1e592b98b7c51ff3bdb7143914e1bee0677e7bf3c4f6addde2c93b3"
-# Apple's `container` runtime for the macOS node (RFC-0175 D6): the release, the
+# Apple's `container` runtime for the macOS node: the release, the
 # package's digest and the Team ID that signs it (facts.env APPLE_CONTAINER_*, stamped
 # by check-facts.sh --write). Stamped here, not in mac-container.sh, for the reason the
 # k3s pins above are. Not overridable from the environment: a different runtime has
-# no digest here. TRACEBLOC_-named since backend#3846 (TB_ is a banned prefix), and
+# no digest here. TRACEBLOC_-named (TB_ is a banned prefix), and
 # assigned outright, so an exported TRACEBLOC_APPLE_* never reaches a reader.
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
 TRACEBLOC_APPLE_CONTAINER_VERSION="1.4.1"
@@ -1796,7 +1793,7 @@ TB_NVIDIA_COMPUTE_CAP_FLOOR="7.5"
 # K8S_VERSION). The tarball is fetched directly from get.helm.sh and verified against
 # its published .sha256sum either way (setup-linux.sh) — helm's get-helm-3
 # script is NOT used: it floats on the mutable helm/helm@main and needs
-# openssl, which minimal cloud images don't ship (#395).
+# openssl, which minimal cloud images don't ship.
 if [[ -n "${TRACEBLOC_HELM_VERSION:-}" ]]; then HELM_VERSION="$TRACEBLOC_HELM_VERSION"; fi
 HELM_VERSION="${HELM_VERSION:-v4.2.3}"
 # The GPU training base image's footprint on a node, in GB (facts.env
@@ -1805,6 +1802,11 @@ HELM_VERSION="${HELM_VERSION:-v4.2.3}"
 # A measurement, so no TRACEBLOC_* override.
 # shellcheck disable=SC2034  # consumed cross-file by summary.sh
 TB_PREPULL_PARENT_DISK_GB="11"
+# The tabular CPU training image's footprint on a node, in GB (facts.env
+# PREPULL_CPU_DISK_GB, measured; stamped by check-facts.sh --write): what summary.sh's
+# CPU training prepull adds to the image store. A measurement, so no TRACEBLOC_* override.
+# shellcheck disable=SC2034  # consumed cross-file by summary.sh
+TB_PREPULL_CPU_DISK_GB="4"
 # Settings naming: TRACEBLOC_HOST_DATA_DIR is the canonical env var, HOST_DATA_DIR
 # the legacy one (remove_by 2026-12-31) -- the same rule as TRACEBLOC_NAMESPACE
 # above: a non-empty canonical wins, else the legacy, else the default. Resolved
@@ -1832,12 +1834,12 @@ tb_export_host_data_dir() {
 }
 # _hostpath_root -- the host directory a native k3s hostpath install's PVs sit under:
 # the root an installed release keeps (TB_HOSTPATH_KEPT, _native_k3s_release_storage),
-# else HOST_DATA_DIR (client-dev#1782). The values file (_hostpath_paths_block) and the
+# else HOST_DATA_DIR. The values file (_hostpath_paths_block) and the
 # summary both read it, so they name the same directory.
 _hostpath_root() {
   if [[ "${TB_HOSTPATH_KEPT:-}" == 1 ]]; then printf '%s' "${TB_HOSTPATH_ROOT:-}"; else printf '%s' "${HOST_DATA_DIR:-}"; fi
 }
-# Optional separate host dir for the big DATASET volume (backend#743). Empty
+# Optional separate host dir for the big DATASET volume. Empty
 # (default) keeps datasets under HOST_DATA_DIR. When set — e.g. a network/NFS
 # mount like /data01/tracebloc — the chart's dataset PV points there, while mysql
 # + logs stay on the local HOST_DATA_DIR (InnoDB over NFS is unsafe).
@@ -1860,7 +1862,7 @@ _tb_system_path() {
 # value), and a relative path is under $HOME. Empty stays empty. ONE rule: the
 # refusals that run before validate_config (_mac_ct_hostpath_dirs,
 # _native_k3s_refuse_windows_drive) read HOST_DATA_DIR through it too, so they judge
-# the folder the install will use (client-dev#2183).
+# the folder the install will use.
 _tb_home_path() {
   local dir="${1:-}"
   [[ -n "$dir" ]] || return 0
@@ -1906,7 +1908,7 @@ validate_config() {
   # node-local forces hostPath.enabled=false, so a HOST_DATASET_DIR network export
   # would be ignored and datasets would silently land on ephemeral local-path
   # storage (gone on 'cluster delete'). Combining the two is a documented follow-up
-  # (backend#743 + RFC-0003); until then, refuse it rather than misroute datasets.
+  # ; until then, refuse it rather than misroute datasets.
   [[ "$TB_STORAGE_MODE" == "node-local" && -n "${HOST_DATASET_DIR:-}" ]] \
     && error "TRACEBLOC_HOST_DATASET_DIR is not supported with node-local storage (datasets would land on ephemeral in-node storage, not the export). Use hostpath mode (TRACEBLOC_STORAGE_MODE=hostpath) for network-mount datasets."
 
@@ -1929,7 +1931,7 @@ validate_config() {
   # bare '~', HOST_DATA_DIR=$HOME, or --data-dir=$HOME; adopting it would make the
   # installer chmod 777 home-level logs/mysql dirs, bind-mount all of $HOME into
   # the cluster, and treat any existing ~/data or ~/mysql as install data
-  # (Bugbot #384).
+  # .
   [[ "$dir" == "$HOME" ]] && \
     error "HOST_DATA_DIR must be a subdirectory of \$HOME, not \$HOME itself (got: $HOST_DATA_DIR)."
   [[ "${dir#$HOME/}" == "$dir" ]] && \
@@ -1937,7 +1939,7 @@ validate_config() {
   HOST_DATA_DIR="$dir"
   tb_export_host_data_dir
 
-  # Optional dataset dir (backend#743): unlike HOST_DATA_DIR it MAY live outside
+  # Optional dataset dir: unlike HOST_DATA_DIR it MAY live outside
   # $HOME (a mounted network volume like /data01). It must already EXIST and be
   # WRITABLE as the host user — we never mkdir a network-share root — and is
   # barred from system paths. The HOST_DATA_DIR rules above are unchanged.
@@ -1961,7 +1963,7 @@ validate_config() {
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 # On macOS, override ARCH with real hardware to avoid Rosetta misdetection
-# Capture-then-match (#680): a SIGPIPE'd producer under pipefail reads as "no
+# Capture-then-match: a SIGPIPE'd producer under pipefail reads as "no
 # match" here, which would leave an Apple Silicon Mac detected as x86_64 and pick
 # the wrong download for every pinned tool.
 if [[ "$OS" == "Darwin" ]]; then
@@ -1993,26 +1995,26 @@ amd64_emulation_remedy() {
 
 # nvidia | amd | apple_silicon | none, or amd_unsupported / nvidia_unsupported for a GPU
 # detect_gpu found and left off, because tracebloc has no training image for it (an AMD
-# GPU; an NVIDIA GPU on a machine that is not x86_64: client-dev#1697, #1698). Every GPU
+# GPU; an NVIDIA GPU on a machine that is not x86_64). Every GPU
 # step keys on exactly nvidia or amd, so an _unsupported vendor sets nothing up.
 GPU_VENDOR="none"
 NVIDIA_DRIVER_OK=false
 # detect-gpu.sh's floor verdict for a present NVIDIA driver: ok | below-hard-floor |
 # below-compute | unreadable. Empty = not judged (no NVIDIA driver on the host yet).
 TB_GPU_FLOOR_VERDICT=""
-# Why the GPU was left off as UNSUPPORTED, for the platform (client-dev#1633): one
+# Why the GPU was left off as UNSUPPORTED, for the platform: one
 # human sentence and the card's name, set by detect-gpu.sh's floor gate on
 # below-compute and below-hard-floor, by detect_gpu for a GPU that is not NVIDIA or an
-# NVIDIA GPU on a machine that is not x86_64 (client-dev#1698), and
+# NVIDIA GPU on a machine that is not x86_64, and
 # by the container runtime's GPU probe for an NVIDIA GPU no container can see
-# (backend#5296), and in tracebloc's WSL distro by the Windows installer's report of an
+# , and in tracebloc's WSL distro by the Windows installer's report of an
 # NVIDIA GPU WSL cannot give it (wsl_cannot_see_gpu) -- ONLY those -- and passed to the chart as
 # env.GPU_UNSUPPORTED_REASON / env.GPU_UNSUPPORTED_NAME (install-client-helm.sh).
 # Empty otherwise: an unreadable host or a failed GPU step is not "unsupported".
 # Assigned, never defaulted from the environment.
 TB_GPU_UNSUPPORTED_REASON=""
 TB_GPU_UNSUPPORTED_NAME=""
-# The kind beside the sentence (backend#5296): compute_too_old | driver_too_old |
+# The kind beside the sentence: compute_too_old | driver_too_old |
 # not_nvidia | runtime_cannot_see_gpu | arch_unsupported, or, in tracebloc's WSL
 # distro, the Windows installer's wsl_cannot_see_gpu; or empty. Passed as
 # env.GPU_UNSUPPORTED_CODE.
@@ -2021,7 +2023,7 @@ TB_GPU_UNSUPPORTED_CODE=""
 TB_GPU_NVIDIA_NAMES=""
 
 # _host_os_label -- this host's operating system as the dashboard shows it
-# (client-runtime#914): "Ubuntu 22.04", "Debian GNU/Linux 12", "macOS 15". Printed
+# : "Ubuntu 22.04", "Debian GNU/Linux 12", "macOS 15". Printed
 # to stdout, empty when it cannot tell. Passed to the chart as env.TRACEBLOC_HOST_OS
 # (install-client-helm.sh _host_os_set_args), and the resource monitor sends it on
 # every heartbeat as `os`. Only the installer can answer: the monitor runs in a pod,
@@ -2092,7 +2094,7 @@ PM_UPDATE=""
 # TRACEBLOC_GPU_WIRED becomes 1 only in native k3s's step c, once k3s's own containerd
 # has registered the NVIDIA runtime (k3s.sh _native_k3s_gpu_wire, slim client 1.1i).
 # So this is the one honest gate for "should we request a GPU for jobs". Requesting nvidia.com/gpu on a
-# node that advertises 0 GPUs strands every job Pending (client#835), so the GPU
+# node that advertises 0 GPUs strands every job Pending, so the GPU
 # chart values (install-client-helm.sh) ride this, not bare GPU_VENDOR detection.
 # Wired means exactly GPU_VENDOR=nvidia and TRACEBLOC_GPU_WIRED=1; any other value of
 # either is "not wired". set -u safe: a unit test that sources only a single lib
@@ -2103,7 +2105,7 @@ _gpu_wired() {
 
 # True when detect_gpu's floor verdict skips the GPU: below-compute (the card is too
 # old for the images), below-hard-floor (the driver is older than the CUDA 13 minimum
-# tracebloc's GPU images need, client-dev#1632) or unreadable (cannot tell). The GPU
+# tracebloc's GPU images need) or unreadable (cannot tell). The GPU
 # steps then install no toolkit and never set TRACEBLOC_GPU_WIRED, so the install runs
 # CPU-only; detect_gpu has already printed why and the remedy. Every verdict that is
 # not ok skips: there is no warning band (2026-10-18). Not judged (no driver yet, the
@@ -2124,12 +2126,12 @@ _gpu_runtime_class() {
   printf '%s' "${TB_K3S_GPU_RUNTIME:-}"
 }
 
-# ── Failure diagnostics (client#681) ─────────────────────────────────────────
+# ── Failure diagnostics ─────────────────────────────────────────
 #  Under `set -euo pipefail` a command that fails outside an if/&&/|| context
 #  kills the installer with NO output at all: the user got a generic "did not
 #  complete", and the install log — which is the WHOLE session tee'd — recorded
 #  nothing about why. A single ERR trap records where it died so both the log
-#  and the closer can name it (#577).
+#  and the closer can name it.
 #
 #  install-k8s.sh arms this with `set -E` (errtrace) so the trap is inherited by
 #  functions and subshells — without it an ERR trap fires only at top level, and
@@ -2145,7 +2147,7 @@ TB_ERR_CMD=""    # what failed. TWO producers, and they differ — read on befor
                  #   error()   → "error: $*", i.e. the message AS INTERPOLATED,
                  #               because a deliberate refusal fires no ERR trap
                  #               and would otherwise leave a benign probe here
-                 #               (#741).
+                 # .
                  #
                  # So the old blanket "this cannot leak a credential into the
                  # log" no longer holds for the error() path, and TB_ERR_CMD
@@ -2153,7 +2155,7 @@ TB_ERR_CMD=""    # what failed. TWO producers, and they differ — read on befor
                  # install_cleanup's `FAILED at … command:` line.
                  #
                  # Every error() call today interpolates only paths, sizes,
-                 # versions and arch names (audited on #741). Keep it that way:
+                 # versions and arch names (audited). Keep it that way:
                  # NEVER interpolate a credential, token or password into an
                  # error() message. If you need one in the text, say
                  # "the credential file at $path", not the value.
@@ -2211,7 +2213,7 @@ _record_err() {
   return 0
 }
 
-# ── Private scratch directories (backend#4279) ───────────────────────────────
+# ── Private scratch directories ───────────────────────────────
 #  A download that lands under a FIXED name in /tmp can be written through by
 #  another local account: /tmp is sticky, so a symlink someone else planted at
 #  that name survives our `rm -f` (it fails silently — we don't own the entry)
@@ -2257,7 +2259,7 @@ tb_scratch_reap() {
 # command's output: LOG_FILE once setup_log_file has run (every real install
 # path), else a private mktemp file made once per shell. The old fallback was a
 # fixed /tmp/tracebloc-spin.log appended with `>>`, which follows a planted
-# symlink the same way (backend#4279). /dev/null only if mktemp itself fails.
+# symlink the same way. /dev/null only if mktemp itself fails.
 _tb_spin_logfile() {
   if [[ -n "${LOG_FILE:-}" ]]; then _TB_SPIN_LOG="$LOG_FILE"; return 0; fi
   [[ -n "${_TB_SPIN_LOG:-}" && -f "$_TB_SPIN_LOG" ]] && return 0
@@ -2266,7 +2268,7 @@ _tb_spin_logfile() {
   return 0
 }
 
-# tb_exit_rc RC — the status an EXIT trap exits with (client-dev#1752). On
+# tb_exit_rc RC — the status an EXIT trap exits with. On
 # macOS's bash 3.2 a `set -u` abort ("unbound variable") reaches the EXIT trap
 # with `$?` = 0, and the trap's own last command then sets the process's status:
 # an installer that died mid-run exited 0 and reported success. `exit N` and a
@@ -2279,7 +2281,7 @@ tb_exit_rc() {
 }
 
 # _tb_failed_footer -- a failed run's end as machines and the install log read it:
-# the failing site (the command text stays in the log, never on screen: #577), the
+# the failing site (the command text stays in the log, never on screen), the
 # log, and the support bundle. A person reads tb_end_failed.
 _tb_failed_footer() {
   echo ""
@@ -2328,14 +2330,14 @@ install_cleanup() {
   exit_code="$(tb_exit_rc "$exit_code")"
   _TB_EXIT_RC="$exit_code"
   [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
-  # Never leave the transient machine credential on disk (#838): provision.sh sets
+  # Never leave the transient machine credential on disk: provision.sh sets
   # _PROVISION_CRED_FILE before minting and removes it after sourcing — this is the
   # backstop for an error/signal between mint and that cleanup.
   [[ -n "${_PROVISION_CRED_FILE:-}" ]] && rm -f "$_PROVISION_CRED_FILE" 2>/dev/null || true
-  # The private download/scratch directories (backend#4279): a fatal error mid
+  # The private download/scratch directories: a fatal error mid
   # download must not leave a partial binary behind in the user's TMPDIR.
   declare -F tb_scratch_reap >/dev/null 2>&1 && tb_scratch_reap
-  # Record WHERE it died, always and first (client#681). The log is the artifact
+  # Record WHERE it died, always and first. The log is the artifact
   # users send to support, and until now a `set -e` death left it with no trace of
   # the failure at all. Logged even on the exit-2 / interrupted paths, so a
   # re-run-required stop that was actually caused by an error is still traceable.
@@ -2351,7 +2353,7 @@ install_cleanup() {
     hint "Re-run required. Complete the step above, then run the script again."
     [[ -n "${LOG_FILE:-}" ]] && hint "Logs: $LOG_FILE"
   elif [[ $exit_code -eq 130 || $exit_code -eq 143 ]]; then
-    # Interrupted, not broken (client#681). install-k8s.sh routes SIGINT/SIGTERM
+    # Interrupted, not broken. install-k8s.sh routes SIGINT/SIGTERM
     # through `exit 130`/`exit 143` so this trap still shreds the transient
     # credential — but funnelling those into "did not complete" told users their
     # own Ctrl-C was an installer failure, and made an interrupted run
@@ -2364,7 +2366,7 @@ install_cleanup() {
     tb_end_of_run "$exit_code"
   fi
 
-  # One structured outcome event per install (backend#1907). Emitted LAST, from
+  # One structured outcome event per install. Emitted LAST, from
   # the EXIT trap, so it runs on every path — success, the re-run-required stop,
   # Ctrl-C, and the fatal one — which is what §6.5 of the telemetry contract
   # requires and what makes a failure RATE computable rather than just a count.
@@ -2504,11 +2506,11 @@ tb_over_ssh() {
   [[ -n "${SSH_CONNECTION:-}" || -n "${SSH_TTY:-}" ]]
 }
 
-# ── The Windows installer's two runs (client-dev#1810 section 5's contract) ──────
+# ── The Windows installer's two runs ──────
 # In tracebloc's WSL distro this core runs twice, and only as the Windows installer
 # runs it: `wsl -d tracebloc -u root -- env TRACEBLOC_SUBSTRATE=k3s
 # TRACEBLOC_WSL_PHASE=<phase> … bash install-k8s.sh`. The sign-in and `client create`
-# are the host CLI's (RFC-0175 D2), and create needs the cluster, so:
+# are the host CLI's, and create needs the cluster, so:
 #   cluster  steps a, b (no CLI), c, then exit 0: the host signs in and creates;
 #   client   the credential on stdin (provision_read_stdin_credential), then steps
 #            a, b (no CLI), c (finds the cluster), d as that credential, e and f.
@@ -2520,7 +2522,7 @@ TB_WSL_PHASES="cluster client"
 # and only its. Refused by name, after the substrate line (main()): in the distro, a
 # substrate other than k3s, a phase outside TB_WSL_PHASES, and a client run with no
 # credential on stdin (step d would sign in, with no CLI here); in any other WSL
-# distro, the run itself, whatever its substrate (RFC-0175 D10: a user's own
+# distro, the run itself, whatever its substrate (a user's own
 # distro is no longer served, and native k3s serves tracebloc's distro only),
 # told apart by probe.sh's _probe_wsl_kernel and _probe_wsl_ours (a WSL kernel,
 # never WSL's environment names alone, which any Linux host can export), so a
@@ -2577,7 +2579,7 @@ tb_wsl_phase() {
 }
 
 # tb_wsl_handover_write -- the cluster run's verdict, handed to the Windows installer
-# (3.2 part 2c, client-dev#1810). The host names a file on the cluster run's line,
+# (3.2 part 2c). The host names a file on the cluster run's line,
 # TRACEBLOC_WSL_HANDOVER, in a folder only this user can open and the host deletes
 # after the install. It reads the file only when the cluster run exits 0, and refuses
 # to go on when the file or its line is missing. So main() writes it last, just before
@@ -2592,13 +2594,13 @@ tb_wsl_phase() {
 #   kubeconfig merge made its own current (k3s.sh), or empty when it pointed at no
 #   other one. The client run merges again after this one, so only this run can tell;
 #   the host puts it on the client run's line (TRACEBLOC_WSL_PREV_KUBE_CONTEXT), and
-#   that run's summary says how to switch back (backend#5025 O-19);
+#   that run's summary says how to switch back;
 #   TRACEBLOC_MACHINE_KIND=, TRACEBLOC_CLOUD_PROVIDER= and TRACEBLOC_HOST_OS=, where
 #   this machine runs (provision.sh's _registration_machine_facts, the facts the
 #   chart's heartbeat gets in this distro), each empty when it cannot be read. The
 #   host runs `client create`, so it puts them in that call's environment, as
 #   provision.sh does for its own create, and the registration says where the
-#   machine runs before its first heartbeat (backend#5797).
+#   machine runs before its first heartbeat.
 # Only the cluster run writes it, and only to a file the host named. A write that
 # fails is an error, so the run never exits 0 without the lines.
 tb_wsl_handover_write() {
@@ -2625,11 +2627,11 @@ tb_wsl_client_state_write() {
   log "handover: TRACEBLOC_CLIENT_STATE=${state} written to ${TRACEBLOC_WSL_HANDOVER}"
 }
 
-# ── The macOS floor (RFC-0175 D6, D10) ───────────────────────────────────────
+# ── The macOS floor ───────────────────────────────────────
 # Apple silicon with macOS 26 or later (D6, decided 2026-09-29). macOS 26 is the last
 # release for Intel Macs, and every M1 or later Mac runs it. This is the floor's one
 # declaration, and its words. A Mac below it is stopped by name on every path, before
-# anything is written (refuse_unsupported_mac; D10, decision F, tracebloc/cli-dev#1056),
+# anything is written (refuse_unsupported_mac),
 # whether or not it already runs tracebloc: one that does keeps the version it runs,
 # unsupported, and is not switched off.
 TB_MACOS_FLOOR_MAJOR=26
@@ -2696,7 +2698,7 @@ tb_upgrade_run() {
 # message serves a new Mac and an installed one, so nothing probes for an install.
 # `tracebloc upgrade` (TRACEBLOC_UPGRADE_CLI, or TB_UPGRADE_CLI from a CLI older than
 # its dual emit) reads any other exit as a failed upgrade and sends the user to the
-# installer again (cli-dev#1056, check 2), so on that path the same stop exits 0.
+# installer again, so on that path the same stop exits 0.
 refuse_unsupported_mac() {
   local verdict why
   verdict="$(tb_mac_floor_verdict)"
@@ -2705,7 +2707,7 @@ refuse_unsupported_mac() {
   why+=" A tracebloc already installed here keeps the version it has, without updates. Nothing was changed on this Mac."
   if [[ "${TRACEBLOC_UPGRADE_CLI:-${TB_UPGRADE_CLI:-0}}" == 1 ]]; then
     warn "$why"
-    _tb_done=1   # an intended exit 0 under install_cleanup (tb_exit_rc, client-dev#1752)
+    _tb_done=1   # an intended exit 0 under install_cleanup (tb_exit_rc)
     exit 0
   fi
   TB_EXIT_REFUSED=1
@@ -2811,8 +2813,8 @@ _tb_substrate_where() {
 #      (_native_k3s_live_probe), which catches one whose record is out of reach;
 #   5. the default (TB_SUBSTRATE_DEFAULT: native k3s).
 # A Mac gets no substrate retired there (TB_SUBSTRATE_RETIRED_MACOS: k3d, slim client
-# 4.1, client-dev#1948), so it has one, the substrate left (_tb_substrate_fresh_here: k3s
-# in Apple's container runtime, RFC-0175 D1/D6). There TRACEBLOC_SUBSTRATE naming a
+# 4.1), so it has one, the substrate left (_tb_substrate_fresh_here: k3s
+# in Apple's container runtime). There TRACEBLOC_SUBSTRATE naming a
 # retired one is refused by name, and every other run resolves the Mac's one: a
 # record from a k3d install does not keep k3d, and reinstall.sh's refuse_k3d_machine
 # refuses such a Mac with the way off k3d (D10); the record's other substrate goes
@@ -2967,7 +2969,7 @@ _tb_record_substrate_in() {
 #  committed to installing. Assigned here, never read from the environment: a
 #  library function a unit test or a harness calls directly writes nothing.
 #  TRACEBLOC_RECORD_ARMED and TRACEBLOC_KUBE_CONTEXT are the canonical names
-#  (backend#3846). cli-dev's install-record drift check and its delete e2e source
+# . cli-dev's install-record drift check and its delete e2e source
 #  this file at a pinned ref and ASSIGN the two after sourcing, under their old
 #  TB_RECORD_ARMED / TB_KUBE_CONTEXT spellings, so the reads below are
 #  canonical-first with the old name as the fallback (blank counts as unset;
@@ -3244,7 +3246,7 @@ tb_record_write() {
   # The user's own later writes keep it; any other record has none.
   if [[ -n "${TB_RECORD_FOR_USER:-}" ]]; then prepared_gpu="$(_tb_json "${TB_RECORD_PREPARED_GPU_RUNTIME:-}")"
   else prepared_gpu="$(_tb_record_prior "$TB_RECORD_PREPARED_GPU_KEY" "$prior")"; fi
-  # k3s_data_fs (client-dev#1976): the filesystem under native k3s's data directory,
+  # k3s_data_fs: the filesystem under native k3s's data directory,
   # read afresh on every write of a native k3s install on Linux, the WSL distro
   # included, by k3s.sh's reader. A Mac writes none: the Mac's node runs
   # tracebloc's pinned VM image.
@@ -3273,8 +3275,8 @@ tb_record_drop() {
 
 # The record's text: SUBSTRATE ($1) and ROOT_COPY ($5) as JSON literals, the
 # previous write's text ($2), its artefact lines ($3) and the time ($4). PREPARED_FOR
-# ($6), K3S_DATA_FS ($7) and PREPARED_GPU ($8), JSON literals, are written only when
-# there is one.
+# ($6), K3S_DATA_FS ($7), PREPARED_GPU ($8) and K3D_CLEARED ($9), JSON literals, are
+# written only when there is one.
 _tb_record_render() {
   local out line n i
   out="{
@@ -3290,6 +3292,7 @@ _tb_record_render() {
   if [[ -n "${6:-}" ]]; then out+=$'\n  "prepared_for": '"$6"','; fi
   if [[ -n "${8:-}" ]]; then out+=$'\n  "'"${TB_RECORD_PREPARED_GPU_KEY}"'": '"$8"','; fi
   if [[ -n "${7:-}" ]]; then out+=$'\n  "k3s_data_fs": '"$7"','; fi
+  if [[ -n "${9:-}" ]]; then out+=$'\n  "k3d_cleared": '"$9"','; fi
   out+="
   \"updated_at\": \"$4\","
   if [[ -z "$3" ]]; then
@@ -3431,12 +3434,14 @@ Usage reporting:
   TRACEBLOC_SKIP_TELEMETRY=1  Turn it off.
   TRACEBLOC_NO_TELEMETRY=1    Also turns it off (legacy name).
   DO_NOT_TRACK=1              Also turns it off.
+  Any of them also keeps the logs of tracebloc's services in your
+  secure environment, and the hourly auto-upgrade keeps it that way.
 
 Windows:
   irm https://tracebloc.io/i.ps1 | iex
 
 Learn more: https://docs.tracebloc.io
 HELP
-  _tb_done=1   # an intended exit 0 under install_cleanup (tb_exit_rc, client-dev#1752)
+  _tb_done=1   # an intended exit 0 under install_cleanup (tb_exit_rc)
   exit 0
 }

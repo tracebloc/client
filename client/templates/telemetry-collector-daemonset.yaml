@@ -20,7 +20,7 @@
 {{- $tc := default (dict) .Values.telemetryCollector -}}
 {{- if eq (include "tracebloc.telemetryCollectorState" .) "enabled" }}
 {{- /*
-  The edge Collector — RFC-BACKEND-1872 D6/D7, backend#1906.
+  The edge Collector.
 
   A DaemonSet because container stdout is written per NODE by the kubelet
   (/var/log/pods), so reading it is a per-node job. A Deployment would see only
@@ -29,9 +29,9 @@
 
   CLASS A ONLY (D12). The receiver's include globs name the control-plane
   containers this chart owns. Training and ingestion pods are Class B and stay out
-  until backend#1908 lands content redaction; the bounding that exists today is
+  until content redaction lands; the bounding that exists today is
   SECRET redaction, not CONTENT redaction, and raw customer cell values have
-  already reached central telemetry once (backend#1879).
+  already reached central telemetry once.
 */}}
 {{/*
   Whether this renders is `tracebloc.telemetryCollectorState` (_helpers.tpl).
@@ -82,8 +82,7 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         # ROOT, SELECTED EXPLICITLY — `runAsNonRoot: false` only PERMITS root, it
-        # does not choose it, and that distinction was a live defect (Bugbot on
-        # #779). The pinned image declares `USER 10001`, as the upstream
+        # does not choose it, and that distinction was a live defect. The pinned image declares `USER 10001`, as the upstream
         # contrib image does, while the kubelet
         # creates a `DirectoryOrCreate` hostPath root-owned 0755. UID 10001 could
         # not write `/var/lib/tracebloc/<release>/telemetry`, so D7's disk-backed
@@ -120,13 +119,13 @@ spec:
         - name: otel-collector
           {{- $tcImage := default (dict) $tc.image }}
           {{- /*
-            REGISTRY PRECEDENCE, matching squid and #585: the global mirror wins,
+            REGISTRY PRECEDENCE, matching squid: the global mirror wins,
             then the per-image registry, then docker.io. Passing
             `$tcImage.registry` alone ignored `global.imageRegistry` entirely, so
             on a mirrored or air-gapped fleet enabling the Collector would
             ImagePullBackOff while every other image pulled from the mirror.
             `| default` on the dig because the chart default for global.imageRegistry
-            is an empty string, which is not absent. (Bugbot on #779.)
+            is an empty string, which is not absent.
           */}}
           image: {{ include "tracebloc.thirdPartyImage" (dict "site" "telemetryCollector.image" "root" $) | quote }}
           imagePullPolicy: IfNotPresent
@@ -180,7 +179,6 @@ spec:
             # a different route. `Directory` fails the pod instead, which is the
             # correct direction for a path we expect to already exist —
             # resource-monitor's /proc and /sys mounts have always used it.
-            # (Bugbot on #779.)
             type: Directory
         - name: queue
           # hostPath, per D7: the queue must survive the pod restart that is the

@@ -47,7 +47,7 @@
   deadline that bounds a slow pull, and a TTL that removes the Job after it
   finishes. The image stays in the node's store.
 
-  THE CLI'S STAGE IMAGE GOES FIRST (cli-dev#1814). `tracebloc data ingest` copies
+  THE CLI'S STAGE IMAGE GOES FIRST. `tracebloc data ingest` copies
   the data through a short-lived stage pod, image alpine:3.20 at the digest the
   CLI pins (cli-dev internal/push/pod.go DefaultStagePodImage), and gives that pod
   60 s to become Ready (StagePodReadyTimeout). On a fresh GPU host its 3.6 MB pull

@@ -12,7 +12,7 @@
                           one node, minAvailable:1 leaves zero allowed voluntary
                           disruptions, so `kubectl drain`/cordon blocks forever
                           and the pod (RWO PVC) has nowhere to reschedule
-                          anyway (tracebloc/client#560).
+                          anyway.
     true  -> force render regardless of topology.
     false -> never render.
 */}}
@@ -20,7 +20,7 @@
 {{- /* Single-node topology gate via the dedicated `.Values.singleNode` signal
      (tri-state: null => hostPath.enabled; true/false => explicit), kept SEPARATE
      from the GPU-fallback env.SINGLE_NODE which may be true on a fixed multi-node
-     cluster. See jobs-manager-pdb.yaml for the full rationale (client#560 / Bugbot). */ -}}
+     cluster. See jobs-manager-pdb.yaml for the full rationale. */ -}}
 {{- $hostPathMode := (default dict .Values.hostPath).enabled | default false -}}
 {{- $singleNode := .Values.singleNode -}}
 {{- $isSingleNode := ternary $singleNode $hostPathMode (kindIs "bool" $singleNode) -}}

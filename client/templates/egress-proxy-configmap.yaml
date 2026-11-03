@@ -1,6 +1,6 @@
 {{- if (default dict .Values.egressProxy).enabled }}
 {{- /*
-  Egress gateway (squid) config — SECURITY §8.2 / client-runtime#102.
+  Egress gateway (squid) config — SECURITY §8.2.
   A forward proxy that ONLY permits HTTPS CONNECT to an FQDN allowlist, so that
   once the training NetworkPolicy drops the 0.0.0.0/0:443 rule, a locked-down
   training pod can still reach the tracebloc backend through this

@@ -19,7 +19,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/*
   tracebloc.fullname — the prefix every resource name this chart creates is built
-  from. backend#2626.
+  from.
 
   DEFAULTS TO `.Release.Name` VERBATIM, and verbatim is load-bearing: no `trunc`,
   no `trimSuffix`, no normalisation. Those are defensible in a fresh chart and
@@ -28,7 +28,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
   firing only for release names over 63 characters is a behaviour change hiding
   behind a default nobody exercises until it breaks an install.
 
-  WHAT MAY USE IT is not a style question -- backend#2621 was reverted over
+  WHAT MAY USE IT is not a style question -- an earlier use was reverted over
   exactly this. The release name appears ~174 times across these templates and is
   at least six different things:
 
@@ -48,8 +48,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
                                          `helm rollback`. Rename it and
                                          auto-upgrade hunts a release that does
                                          not exist and fails every tick: that is
-                                         backend#2620, re-introduced by the fix
-                                         for backend#2621.
+                                         a regression that has already happened twice.
       * on-disk paths                    a LOCATION, not a name. Renaming
                                          orphans a tenant's data.
       * `.Release.Namespace`             unrelated
@@ -70,7 +69,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/*
   tracebloc.sealCheckLabels — the seal-check enumeration contract
-  (RFC-0003 §8.2 / backend#1184; consumed by the tracebloc CLI, cli#393).
+  (consumed by the tracebloc CLI).
 
   Every runnable conformance check in this chart is a `helm.sh/hook: test` Job
   carrying these two labels, so tooling can enumerate the suite without
@@ -133,7 +132,7 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
     - templates/ingestion-authz-configmap.yaml (default authz entry)
   The ingestor subchart's post-install hook runs as this SA; jobs-manager
   validates its token via TokenReview against `ingestionAuthz.allowed`.
-  Nil-guarded: pre-#129 stored values from `--reuse-values` upgrades won't
+  Nil-guarded: older stored values from `--reuse-values` upgrades won't
   have `ingestionAuthz.serviceAccountName`, so default to "ingestor".
 */}}
 {{- define "tracebloc.ingestorServiceAccountName" -}}
@@ -154,8 +153,8 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
 
 {{/*
   tracebloc.resourceMonitorEnabled — the SINGLE reader of "is the resource-monitor
-  on", coalescing the two value shapes during the RFC-0076 alias window
-  (remove_by: 2026-12-31, client#1009):
+  on", coalescing the two value shapes during the alias window
+  (remove_by: 2026-12-31):
 
     legacy scalar   resourceMonitor: <bool>
     new object      resourceMonitor.enabled: <bool>   (D2: <component>.enabled)
@@ -189,8 +188,7 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
 {{- end }}
 
 {{/*
-  The host path whose free/total space becomes the cockpit's Storage meter
-  (backend#3762), defaulting to the node's root filesystem.
+  The host path whose free/total space becomes the cockpit's Storage meter, defaulting to the node's root filesystem.
 
   A HELPER RATHER THAN AN INLINE LOOKUP, for the same reason
   tracebloc.resourceMonitorEnabled is one: `resourceMonitor` is still accepted
@@ -216,13 +214,13 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
 {{- end }}
 
 {{/*
-  The SECOND filesystem the Storage meter measures, or empty (backend#3916).
+  The SECOND filesystem the Storage meter measures, or empty.
 
   The meter reports the client's storage -- every filesystem this client stores
   on -- and `hostStoragePath` above can only name one. An install that relocated
   its datasets off the local tree therefore has a disk the meter cannot see, and
   that is not a narrow case: it is exactly the TRACEBLOC_HOST_DATASET_DIR flow
-  (old name HOST_DATASET_DIR still works; backend#743),
+  (old name HOST_DATASET_DIR still works),
   where the installer bind-mounts the customer's network volume at /tracebloc-data
   and points `hostPath.datasetPath` there, while mysql + logs stay local. Both are
   consumed client storage; measuring either alone reports a plausible wrong number.
@@ -240,7 +238,7 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
     fleet-wide, with no probe to flag it. Comparing against the hostPath root
     (tracebloc.hostPathRoot, /tracebloc by default) is what keeps this to
     installs that moved the tree somewhere real: native k3s sets both to
-    HOST_DATA_DIR, and its datasets have not moved (client-dev#1782).
+    HOST_DATA_DIR, and its datasets have not moved.
 
   The collector de-duplicates by backing device, so a datasetPath that turns out
   to share a disk with the root mount is measured once rather than doubled --
@@ -259,7 +257,7 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
 {{- $hp := default dict .Values.hostPath -}}
 {{- $jd := include "tracebloc.jobDataPath" . -}}
 {{- if $jd -}}
-{{- /* The macOS node (client-dev#2320): the job-data folder is on the Mac, a
+{{- /* The macOS node: the job-data folder is on the Mac, a
        filesystem apart from the node's own disk, where MySQL is. */ -}}
 {{- $jd -}}
 {{- else if $hp.enabled -}}
@@ -356,7 +354,7 @@ client-pvc
   HOST_DATASET_DIR still works), it passes
   hostPath.datasetPath=/tracebloc-data to relocate datasets onto that mount,
   while mysql + logs ALWAYS stay on the local /tracebloc tree (InnoDB over NFS
-  is unsafe — backend#743). The /<release>/data suffix is appended here.
+  is unsafe). The /<release>/data suffix is appended here.
   Nil-guarded (default dict) for `--reuse-values` upgrades predating this key.
 */}}
 {{- define "tracebloc.clientDataHostPath" -}}
@@ -367,7 +365,7 @@ client-pvc
   hostPath base for the mysql and logs PVs: <root>/<release>/{mysql,logs}. The
   historical /tracebloc by default, so a release that sets no root renders
   byte-identically. On native k3s the node IS the host, so the installer sets it
-  to HOST_DATA_DIR itself (client-dev#1782). It is also what an unset
+  to HOST_DATA_DIR itself. It is also what an unset
   datasetPath falls back to, and what tracebloc.resourceMonitorDatasetPath
   compares datasetPath against: the dataset tree moved only if it left the root.
   Nil-guarded (default dict) for `--reuse-values` upgrades predating the key.
@@ -377,7 +375,7 @@ client-pvc
 {{- end -}}
 
 {{/*
-  The macOS node's job-data folder (jobData.path; RFC-0185, client-dev#2320), or
+  The macOS node's job-data folder (jobData.path), or
   "". Nil-guarded (default dict) for `--reuse-values` upgrades predating the key.
 */}}
 {{- define "tracebloc.jobDataPath" -}}
@@ -501,8 +499,8 @@ client-logs-pvc
 {{- end }}
 
 {{/*
-  Durable pause/resume volume (client-runtime#882). Allowed with a 7-day
-  retention by backend#5266 and set per environment (on for dev, stg and prod):
+  Durable pause/resume volume. Allowed with a 7-day
+  retention and set per environment (on for dev, stg and prod):
   `trainingResume.enabled` true or false is the per-edge override and always
   wins; unset (null), the value is trainingResumeEnabledByEnv's for this
   install's environment (tracebloc.clientEnv). "true" or "" so callers can gate
@@ -529,7 +527,7 @@ client-logs-pvc
 {{- end -}}
 
 {{/*
-  Stop-kind signal (client-runtime#882, tracebloc-engine#1539): jobs-manager
+  Stop-kind signal: jobs-manager
   tells a training pod whether its SIGTERM is a pause or a stop, so a paused
   pod exits 0 and reads Completed instead of Error. It holds no weights, so it
   is ON by default, whatever trainingResume says. `stopKindSignal.enabled:
@@ -550,10 +548,10 @@ mysql-pvc
 {{- end }}
 
 {{/*
-  Name of the "this edge was born rotated" marker (backend#947). A CONSTANT
+  Name of the "this edge was born rotated" marker. A CONSTANT
   literal, deliberately NOT fullname/override-following -- like tracebloc.mysqlPvc
   and unlike tracebloc.secretName -- so tracebloc.bakedRootRotationOn may `lookup`
-  it without tripping fullname-override-completeness.sh (backend#2626), which
+  it without tripping fullname-override-completeness.sh, which
   refuses only Secret lookups on the override-following secretName. See the marker
   template (mysql-root-rotated-marker.yaml) and bakedRootRotationOn for why it
   exists: the PVC alone cannot tell a born-rotated edge from an existing un-rotated
@@ -564,7 +562,7 @@ mysql-root-rotated
 {{- end }}
 
 {{/*
-  Name of the Secret that holds the local MySQL passwords (client-dev#1702):
+  Name of the Secret that holds the local MySQL passwords:
   MYSQL_ROOT_PASSWORD, DB_BOOTSTRAP_PASSWORD and TRACEBLOC_CREDMGR / _META /
   _INGEST_PASSWORD (under those names only; secrets.yaml says why). Rendered by
   secrets.yaml with
@@ -605,8 +603,7 @@ mysql-credentials
 */}}
 {{/*
   The name the CHART creates, whatever `existingSecret` says. Not the same
-  question as `registrySecretName`, and RBAC is where the difference bites
-  (Bugbot on client#751).
+  question as `registrySecretName`, and RBAC is where the difference bites.
 
   The auto-upgrade Role in the GPU device-plugin namespace -- `kube-system` by
   default -- pins `get`/`update`/`patch`/`delete` to a `resourceNames` list so
@@ -641,12 +638,11 @@ mysql-credentials
 
   These names are NOT release-scoped on purpose — they match the upstream
   manifests the installer used to `kubectl apply`, so an installer re-run adopts
-  an existing DaemonSet in place instead of orphaning it (client#564).
+  an existing DaemonSet in place instead of orphaning it.
 
   Kept in ONE helper because two templates must agree on them: gpu-device-plugin
   .yaml renders the DaemonSet, and auto-upgrade-rbac.yaml grants the auto-upgrade
-  ServiceAccount update/patch/delete restricted to exactly these resourceNames
-  (backend#1992). If those two ever disagreed, an `helm upgrade --atomic` tick
+  ServiceAccount update/patch/delete restricted to exactly these resourceNames. If those two ever disagreed, an `helm upgrade --atomic` tick
   would 403 in the GPU namespace, roll back, and silently kill auto-upgrade on
   every GPU edge — the failure this narrow Role exists to prevent. Deriving both
   from here makes that drift impossible rather than merely unlikely.
@@ -663,7 +659,7 @@ nvidia-device-plugin-daemonset
 {{- end }}
 
 {{/*
-  The GPU device-plugin DaemonSet's updateStrategy, for BOTH vendors (backend#1969).
+  The GPU device-plugin DaemonSet's updateStrategy, for BOTH vendors.
 
   The plugin is OPTIONAL: a node without it trains on CPU. It must not gate the
   auto-upgrade's `helm upgrade --atomic` (which waits, with `--wait=legacy` under
@@ -727,7 +723,7 @@ read it here, so the monitor can only ever get the plugin's class. Nil-safe for
   tracebloc.autoUpgradeName above. Distinct from auto-upgrade because the
   two CronJobs have different cadences, different RBAC scopes (image-refresh
   is namespace-scoped; auto-upgrade is namespace-scoped plus a narrow
-  ClusterRole for the chart's cluster kinds — backend#953, no longer
+  ClusterRole for the chart's cluster kinds, no longer
   cluster-admin), and customers may reasonably disable one but not the other.
 */}}
 {{- define "tracebloc.imageRefreshName" -}}
@@ -735,8 +731,7 @@ read it here, so the monitor can only ever get the plugin's class. Nil-safe for
 {{- end }}
 
 {{/*
-  Name for the image-refresh Role + RoleBinding in the NODE-AGENTS namespace
-  (#569). DISTINCT from tracebloc.imageRefreshName on purpose.
+  Name for the image-refresh Role + RoleBinding in the NODE-AGENTS namespace. DISTINCT from tracebloc.imageRefreshName on purpose.
 
   `nodeAgents.namespace.name` pointing back at the release namespace is a
   supported layout — node-agents-namespace.yaml documents it and explicitly
@@ -746,7 +741,7 @@ read it here, so the monitor can only ever get the plugin's class. Nil-safe for
   DaemonSet-only Role overwrites the deployments Role, at which point
   image-refresh silently loses patch on jobs-manager and requests-proxy — and
   since those pods now render IfNotPresent, they would have no update path left
-  at all (Bugbot, High).
+  at all.
 
   A separate name is correct in BOTH layouts: split namespaces get one Role
   each, and the collapsed layout gets two complementary Roles (deployments,
@@ -801,8 +796,7 @@ read it here, so the monitor can only ever get the plugin's class. Nil-safe for
 {{- end }}
 
 {{/*
-  The egress gate's send address for the monitors and the telemetry Collector
-  (RFC-0324 D2): its own
+  The egress gate's send address for the monitors and the telemetry Collector: its own
   Service, egress-gate-service.yaml, by its namespaced name, so it resolves from
   the node agents' namespace too. Not requests-proxy-service: that alias is kept
   for pods spawned before the upgrade. scripts/tests/gate-address.sh holds every
@@ -813,7 +807,7 @@ http://egress-gate.{{ .Release.Namespace }}.svc:8888
 {{- end }}
 
 {{/*
-  The egress gate's sender map, TRACEBLOC_EGRESS_GATE_SENDERS (RFC-0324 D2):
+  The egress gate's sender map, TRACEBLOC_EGRESS_GATE_SENDERS:
   "<namespace>/<service account>" of each chart workload that sends through the
   gate, to the identities it may send as, for the workloads this release
   renders. Never engine or ingestor: they prove themselves with a per-job token,
@@ -862,9 +856,9 @@ http://egress-gate.{{ .Release.Namespace }}.svc:8888
   unpinned, the CronJob is rendered and the script skips the pinned
   images at runtime via env flags.
 
-  The three have changed over time: #154 started with jobs-manager +
-  pods-monitor, #158 added the ingestor, the floating-tag migration
-  retired the ingestor pass, and #569 brought resource-monitor under
+  The three have changed over time: it started with jobs-manager +
+  pods-monitor, then added the ingestor, the floating-tag migration
+  retired the ingestor pass, and the resource-monitor came under
   refresh (it had no deliberate update path before). Keep this list in
   sync if more images come under auto-refresh in future.
 
@@ -885,11 +879,11 @@ http://egress-gate.{{ .Release.Namespace }}.svc:8888
   ONE definition, because there are TWO consumers that must agree:
   `tracebloc.imageRefreshEnabled` (does the CronJob render at all?) and the
   CronJob's own RESOURCE_MONITOR_PINNED env (does the script skip this image?).
-  The first cut of #569 wrote the rule twice and they disagreed: the helper
+  Writing the rule twice invites disagreement: the helper
   checked only the digest while the env also treated `resourceMonitor: false` as
   pinned. With the DaemonSet disabled and both class-1 images pinned, the CronJob
   therefore kept rendering a job that skipped every image and exited green every
-  tick, forever — where before #569 that combination retired it (Bugbot).
+  tick, forever — where retiring it was the earlier behaviour.
 
   Two ways to have nothing to do:
     * an HONOURED `images.resourceMonitor.digest` pin (tracebloc.pinFor -- a
@@ -910,6 +904,35 @@ true
 true
 {{- end -}}
 {{- end }}
+
+{{/*
+tracebloc.restrictedDnsOn -- "true" when the restricted DNS resolver runs, over the
+vocabulary values.schema.json admits for restrictedDns.enabled:
+
+  true / "true"     on (restricted-dns-configmap.yaml refuses it with gateway
+                    routing off and an empty allowlist)
+  false / "false"   off: the cluster DNS
+  "" / absent       AUTO: on wherever it can work, i.e. the egress gateway routes
+                    trainings (egressProxy.enabled and routeWorkloads) or
+                    restrictedDns.allowlist names zones
+
+With routing off and no allowlist, pods resolve the backend themselves, which the
+resolver would answer NXDOMAIN. Anything the schema does not admit reads as AUTO.
+*/}}
+{{- define "tracebloc.restrictedDnsOn" -}}
+{{- $rd := default dict .Values.restrictedDns -}}
+{{- $ep := default dict .Values.egressProxy -}}
+{{- $choice := "" -}}
+{{- if and (hasKey $rd "enabled") (not (kindIs "invalid" $rd.enabled)) -}}
+{{- $choice = $rd.enabled | toString | trim | lower -}}
+{{- end -}}
+{{- if eq $choice "true" -}}
+true
+{{- else if eq $choice "false" -}}
+{{- else if or (and $ep.enabled $ep.routeWorkloads) $rd.allowlist -}}
+true
+{{- end -}}
+{{- end -}}
 
 {{/*
 tracebloc.imageRefreshChosen -- "true" when imageRefresh.enabled asks for the
@@ -954,7 +977,7 @@ true
 {{- $jmPinned := include "tracebloc.pinFor" (dict "image" "jobsManager" "root" .) -}}
 {{- $pmPinned := include "tracebloc.pinFor" (dict "image" "podsMonitor" "root" .) -}}
 {{/*
-  #569: resource-monitor came under refresh too, so it joins the "nothing left
+  Resource-monitor came under refresh too, so it joins the "nothing left
   to do" test. requests-proxy deliberately does NOT: it runs the SAME
   tracebloc/jobs-manager image and follows the jobs-manager digest, so
   `$jmPinned` already covers it. (`images.requestsProxy.digest` remains an
@@ -964,8 +987,8 @@ true
 
   "Follows the jobs-manager digest" is only true because
   requests-proxy-deployment.yaml FALLS BACK to `images.jobsManager.digest` when
-  its own key is empty. Without that fallback this test is a silent trap
-  (Bugbot): retiring the CronJob here on a jobs-manager pin would leave the
+  its own key is empty. Without that fallback this test is a silent trap:
+  retiring the CronJob here on a jobs-manager pin would leave the
   proxy rendering the floating tag with nothing left to reconcile it, running a
   different build of the same image forever. If that fallback is ever removed,
   requests-proxy must get its own entry in this test.
@@ -983,17 +1006,17 @@ true
   control-plane images (jobs-manager, pods-monitor, requests-proxy,
   resource-monitor). ONE definition so the four call sites cannot disagree.
 
-  #569 set out to make these pods survive a restart while offline:
+  The policy exists to make these pods survive a restart while offline:
   `Always` forces a registry round-trip on every (re)start, so a restart without
   the registry lands in ImagePullBackOff even with the image cached in
   containerd. The fix is IfNotPresent.
 
   But `Always` is not just fragility — on a floating tag it IS an update path:
-  restart the pod and the kubelet re-resolves the tag. The first cut of #569
-  made IfNotPresent UNCONDITIONAL, which silently removed that path from every
+  restart the pod and the kubelet re-resolves the tag. Making
+  IfNotPresent UNCONDITIONAL would silently remove that path from every
   edge where the replacement (image-refresh's `kubectl set image repo@digest`)
   cannot run — those edges would have frozen on their cached image forever, with
-  a green CronJob and no signal (Bugbot, High). So the policy tracks whether an
+  a green CronJob and no signal. So the policy tracks whether an
   update path actually exists:
 
     1. An HONOURED `digest` pin (tracebloc.effectivePin: set, resolved on the
@@ -1016,7 +1039,7 @@ true
            mirrored reference could pin an image the mirror does not hold.
     3. Otherwise -> Always. No reconcile, no pin, so a floating tag plus a
        restart is the ONLY way that edge can ever move. This is exactly the
-       pre-#569 behaviour, kept for exactly the edges that still depend on it:
+       earlier behaviour, kept for exactly the edges that still depend on it:
        mirror installs (sync the mirror, restart) and edges where image-refresh
        is off -- prod by default, or `imageRefresh.enabled: false` -- (restart
        manually), which is what values.schema.json has always promised those
@@ -1064,12 +1087,12 @@ Always
   for public images: nothing renders and every pull is anonymous by declaration.
 
   `existingSecret` exists because of a config this chart never supported and
-  never noticed (Asad on client#751): `create: false` plus a Secret hand-made in
+  never noticed: `create: false` plus a Secret hand-made in
   the namespace and literally named `regcred`. That worked for exactly one pod
   -- the training pod -- because client-runtime's `job.yaml` carried `regcred`
   as a hardcoded literal, while every chart-rendered pod got no imagePullSecrets
   at all. So those installs were half-authenticated by accident, and the moment
-  backend#2119 replaces that literal with the injected name they would fall to
+  the chart replaces that literal with the injected name they would fall to
   an anonymous pull with nothing louder than an INFO log -- the same silent
   downgrade this PR exists to remove, moved rather than fixed.
 
@@ -1109,7 +1132,7 @@ defaults to "prod" when CLIENT_ENV is omitted or empty.
 Usage: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" "docker.io") }}
 NOTE the resolved tag. This example previously read `.Values.env.CLIENT_ENV`
 and all four image call sites were copied from it, so a documented alias
-became an image tag nothing publishes (backend#1723).
+became an image tag nothing publishes.
 CONTROL-PLANE IMAGES DO NOT CALL THIS DIRECTLY. jobs-manager, pods-monitor,
 resource-monitor and requests-proxy go through tracebloc.controlPlaneImage,
 which decides FIRST whether the values pin may be rendered at all
@@ -1265,7 +1288,7 @@ it was resolved for:
   from a different image, so it has to be said.
 
   REGISTRY IS NOT PART OF THE IDENTITY. `registry` and global.imageRegistry
-  (#585) re-home the same repository path, and a mirror of it carries the same
+  re-home the same repository path, and a mirror of it carries the same
   digests, so the pin survives a registry-only re-home -- global.imageRegistry
   wins over every per-site registry, as before.
 
@@ -1347,13 +1370,13 @@ pin was dropped.
 {{/*
 tracebloc.mirrorPrefix — registry prefix for images whose repository is a
 registry-less path (docker.io implicit), e.g. the alpine/* utility-pod images.
-When a private mirror is set via global.imageRegistry (#585), returns
+When a private mirror is set via global.imageRegistry, returns
 "<registry>/" so an air-gapped install re-homes those images onto the mirror;
 returns "" when no mirror is set, so default installs render byte-identically.
 Nil-guarded for --reset-then-reuse-values upgrades that predate global. Call
 with the ROOT context (e.g. `include "tracebloc.mirrorPrefix" $`).
 
-NO CALLERS IN THIS CHART since backend#4160 moved the last three sites
+NO CALLERS IN THIS CHART since the last three sites moved
 (auto-upgrade, image-refresh, storage-assertions) onto `tracebloc.image`, which
 always names a registry and is what a new site should use. Retained, not
 deleted: a chart that vendors this one can `include` it, and deleting a defined
@@ -1394,7 +1417,7 @@ JOB_IMAGE_HOST sites, the image-refresh CronJob and NOTES.txt cannot disagree
 about where those images live:
 
   1. `global.imageRegistry`      — a private mirror re-homes EVERY image the
-                                    chart pulls (#585), tracebloc/* included.
+                                    chart pulls, tracebloc/* included.
                                     It always wins.
   2. `images.traceblocRegistry`  — the tracebloc-only knob: moves the
                                     tracebloc-published images -- control plane
@@ -1409,14 +1432,14 @@ about where those images live:
                                     environment names the chart no longer
                                     sets.
 
-ROUTED THROUGH HERE SINCE D1 STEP 6 (backend#3397): `tracebloc/mysql-client`.
+ROUTED THROUGH HERE SINCE D1 STEP 6: `tracebloc/mysql-client`.
 It used to be excluded because it was "published only to Docker Hub", and step 6
 ends that -- the image is copied to ghcr.io at the same digests and
 `build-mysql-client.yml` publishes there. Leaving it out would give the chart two
 answers to "where do the tracebloc-published images live", which is the split
 this helper exists to close. It is still FROZEN and digest-pinned; what changed
 is the host, not the bytes (the Hub namespace is retained, frozen, never deleted
--- RFC-BACKEND-2610 step 7, though the chart refuses Docker Hub from 1.9.218).
+-- though the chart refuses Docker Hub from 1.9.218).
 
 NOT routed through here, on purpose: the third-party images (each has its own
 `registry` key), and the ingestor, which is named by full repository
@@ -1455,7 +1478,7 @@ true
 
 {{/*
 tracebloc.assertRegistryIsNotDockerHub -- refuse the render when the tracebloc
-images would be pulled from Docker Hub (backend#4959, client-dev#2159's FR hold).
+images would be pulled from Docker Hub.
 
 Docker Hub is a frozen archive since 2026-09-19. Its tracebloc/* tags are
 control-plane builds from client-runtime 1538927 or older, which read only the
@@ -1605,8 +1628,8 @@ Usage: {{ include "tracebloc.pinFor" (dict "image" "jobsManager" "root" $) }}
 {{- end -}}
 
 {{/*
-tracebloc.prodDefaultPin — the chart-default half of tracebloc.pinFor (RFC-0143
-D1, client-dev#1175): the digest `images.prodDigests` names for this
+tracebloc.prodDefaultPin — the chart-default half of tracebloc.pinFor:
+the digest `images.prodDigests` names for this
 control-plane image, rendered only when
 
   * the resolved CLIENT_ENV (tracebloc.clientEnv, aliases normalised) is prod --
@@ -1642,7 +1665,7 @@ check: renders `images.<image>.digest` when it is non-empty AND
 nothing otherwise. Every word of tracebloc.pinFor's contract above applies
 here; pinFor is this function plus "and the key must be a control-plane image".
 
-EXTRACTED, NOT COPIED (backend#3397, CLAUDE.md rule 9). D1 step 6 routes
+EXTRACTED, NOT COPIED (CLAUDE.md rule 9). D1 step 6 routes
 `tracebloc/mysql-client` through tracebloc.tbRegistry like every other
 tracebloc-published image, so a SECOND image outside the control-plane set now
 needs the pin decision. Re-spelling `and $digest (eq ...)` at that site would
@@ -1798,6 +1821,27 @@ Call with the ROOT context: {{ include "tracebloc.trainingParentPin" . }}
 {{- end -}}
 
 {{/*
+tracebloc.trainingImagePin — the digest the jobs-manager spawns training image
+tracebloc/client-<task>-<arch> by, empty where it spawns the floating
+:<CLIENT_ENV> tag: the map's entry for (task, arch), exactly where
+tracebloc.trainingPins renders the map to the jobs-manager. The runtime's own
+rule (the jobs-manager's training image reference) pins only a
+(task, arch) the map holds, so an absent entry is the tag here too.
+
+The pin rule for a training image, beside tracebloc.trainingParentPin: a
+template hands tracebloc.image this, never the values digest.
+
+Usage: {{ include "tracebloc.trainingImagePin" (dict "task" "tabular_classification" "arch" "cpu" "root" $) }}
+*/}}
+{{- define "tracebloc.trainingImagePin" -}}
+{{- $training := default dict (default dict .root.Values.images).training -}}
+{{- $entry := default dict (get (default dict $training.digests) .task) -}}
+{{- if include "tracebloc.trainingPins" .root -}}
+{{- get $entry .arch | default "" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 tracebloc.appleGpuBundle — the digest of the macOS engine bundle the pinned
 engine release names (images.training.macosBundle.digest, the sha256 of the
 bundle's .tar.gz), when the chart names it to the Mac's Apple GPU runner;
@@ -1807,7 +1851,7 @@ gets TRACEBLOC_APPLE_GPU_BUNDLE_DIGEST.
 
 It holds exactly where tracebloc.trainingPins holds, the bundle is set and
 tracebloc.appleGpuTraining is on.
-RFC-0185 D2's version agreement sends a GPU job to the Mac only when the bundle
+The version agreement sends a GPU job to the Mac only when the bundle
 the runner holds is the one "its engine release names", and only a pinned edge
 runs a named release. A floating edge (dev/staging in auto, pinned=false, a
 mirror that has not declared itself, another registry of the operator's) runs
@@ -1902,8 +1946,7 @@ write the runner's Role only while it holds every rule in it.
 
 {{/*
 tracebloc.runnerDbCredsGrant -- "true" when jobs-manager may hand a Mac GPU
-job's per-experiment db-creds Secret to the Apple GPU runner, else empty
-(RFC-0185 §8 Q5, option 1; client-runtime#1042).
+job's per-experiment db-creds Secret to the Apple GPU runner, else empty.
 
 On a Mac the tracebloc runner, not a kubelet, resolves the pod's MYSQL_USER /
 MYSQL_PASSWORD secretKeyRefs, so it must read that one Secret. jobs-manager
@@ -1954,8 +1997,8 @@ Usage: {{ include "tracebloc.pinIgnored" (dict "image" "jobsManager" "root" $) }
 tracebloc.effectivePin — the digest a WORKLOAD renders: its own honoured pin
 (tracebloc.pinFor), except that requests-proxy, which runs the jobs-manager
 image, follows the honoured jobs-manager pin when it has no honoured pin of its
-own -- so the two pods cannot run different builds of one image (the skew #569
-closed). An IGNORED requests-proxy pin is not a pin, so it falls through to the
+own -- so the two pods cannot run different builds of one image (the skew that
+would otherwise arise). An IGNORED requests-proxy pin is not a pin, so it falls through to the
 jobs-manager decision exactly like an empty one; that is what "follows the
 jobs-manager pin" has always meant. Renders the digest or nothing.
 Usage: {{ include "tracebloc.effectivePin" (dict "image" "requestsProxy" "root" $) }}
@@ -1980,17 +2023,17 @@ directly; their digests have their own registry keys.
 Usage: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) }}
 */}}
 {{/*
-tracebloc.controlPlaneSeedDigest — client-runtime#199. The digest a control-plane
+tracebloc.controlPlaneSeedDigest — the digest a control-plane
 image renders when it carries NO honoured operator pin (tracebloc.effectivePin is
 empty), so a `helm upgrade` re-renders the digest image-refresh last applied
-instead of reverting to the bare `:tag` — the #199 revert that dropped
+instead of reverting to the bare `:tag` — the revert that dropped
 image-refresh's out-of-band `kubectl set image` pin and, on a node with a stale
 `:tag` layer, silently ran an OLD image.
 
 Read from the LIVE workload spec, NOT the `last-refreshed-*` annotation: the live
 spec IS what image-refresh actually applied, so this can never render a digest
 the live spec has already moved past — which closes the flap-lockout DOWNGRADE
-(annotations stuck at D0 while the workload runs D1; @shujaatTracebloc on #1013).
+(annotations stuck at D0 while the workload runs D1).
 
 Gated on image-refresh being the update path (enabled AND resolvable) — the SAME
 gate as controlPlanePullPolicy's IfNotPresent branch, so the pull policy and the
@@ -2001,7 +2044,7 @@ first install), or a ref on a DIFFERENT registry (a mirror flip image-refresh ha
 not yet re-pinned) all yield "" → `:tag`, never a cross-registry ref the kubelet
 rejects with InvalidImageName. The auto-upgrade SA that runs the upgrade `lookup`
 already reads these workloads (its release-ns and node-agents Roles grant all
-verbs), so this adds no RBAC and cannot hit the backend#2469 bootstrap lockout.
+verbs), so this adds no RBAC and cannot hit the bootstrap lockout.
 
 Args: (dict "image" <jobsManager|podsMonitor|requestsProxy|resourceMonitor> "root" $)
 */}}
@@ -2070,7 +2113,7 @@ Precedence (most specific first):
      key is absent) AND the resolved CLIENT_ENV == "prod"  -> `prodDigest`.
   3. otherwise empty -> float on `tag` with imagePullPolicy=Always.
 
-Why the gate is on CLIENT_ENV (backend#1245): dev and staging installs carry
+Why the gate is on CLIENT_ENV: dev and staging installs carry
 `env.CLIENT_ENV: dev|stg` in their user-supplied values while the chart defaults
 CLIENT_ENV to "prod", so this pins prod and floats non-prod with zero per-edge
 action — and because `prodDigest` is a chart DEFAULT, a republished pin reaches
@@ -2087,11 +2130,11 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   Resolved CLIENT_ENV, with the documented aliases normalized to the
   canonical dev|stg|prod keys.
 
-  ONE definition on purpose. Bugbot caught the first cut normalizing inside
-  tracebloc.ingestorTag only, so CLIENT_ENV=production selected the prod
+  ONE definition on purpose. Normalizing inside
+  tracebloc.ingestorTag only would let CLIENT_ENV=production select the prod
   float tag while tracebloc.ingestorDigest still compared the RAW value to
   "prod" and returned nothing -- silently dropping the reproducibility pin
-  (backend#1028/#1245) on an edge that looked correctly configured. Any future
+  on an edge that looked correctly configured. Any future
   consumer of CLIENT_ENV must go through here rather than re-deriving it, the
   same reason ENV_ALIASES lives once in client-runtime proxy_config.
 
@@ -2123,31 +2166,29 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   passwords, perDatasetPvcs without clusterScope, and a missing metrics API.
 */}}
 {{/*
-  Whether the dedicated tb_meta / tb_ingest DB identities are on for THIS edge
-  (backend#1528, backend#1752).
+  Whether the dedicated tb_meta / tb_ingest DB identities are on for THIS edge.
 
   Resolution, highest first:
     1. `serviceDbAccounts` — an explicit operator override, true or false.
     2. `serviceDbAccountsByEnv[<resolved CLIENT_ENV>]` — the fleet default.
 
-  WHY THIS IS KEYED ON THE ENVIRONMENT AT ALL. #1151 records the rollout as
-  "flip per environment, dev first", but there was no mechanism for that: the
+  WHY THIS IS KEYED ON THE ENVIRONMENT AT ALL. The rollout is
+  "flip per environment, dev first", and a single global boolean has no mechanism for that: the
   value was one global boolean, so "per environment" meant editing every edge's
   values by hand and remembering which fleet was where. Nobody could see the
   fleet's posture in one place, and nothing tested it.
 
-  That gap had teeth. data-ingestors#468 removed the ingestor's edgeuser
+  That gap had teeth. An ingestor release removed the ingestor's edgeuser
   fallback, making DB_USER/DB_PASSWORD required, on the stated precondition
   that this flag was "on fleet-wide". It was on nowhere. dev and staging edges
   float on the :dev/:stg ingestor channels, picked the change up the same day,
-  and every ingestion Job now fails at Config() before reading a byte
-  (backend#1752). Prod escaped only because its ingestor is digest-pinned to
+  and every ingestion Job now fails at Config() before reading a byte. Prod escaped only because its ingestor is digest-pinned to
   the 0.7 line -- a caution engineered for D16, not for this, and one that
-  client#490 is about to spend.
+  a pending ingestor bump is about to spend.
 
   Resolving through `tracebloc.clientEnv` (not the raw value) so a documented
   alias like `staging` maps to `stg` and cannot silently miss its entry --
-  backend#1723 was exactly that failure.
+  a failure that has already happened once.
 */}}
 {{- define "tracebloc.serviceDbAccounts" -}}
 {{- $override := (default dict .Values).serviceDbAccounts -}}
@@ -2162,8 +2203,8 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 
 {{/*
   Whether jobs-manager gives each ingestion Job its own backend token for THIS
-  edge (backend#2073): a per-run, ingest-scoped, 24h token minted through the
-  backend's POST /ingest-token/ (client-runtime#868), instead of the edge's
+  edge: a per-run, ingest-scoped, 24h token minted through the
+  backend's POST /ingest-token/, instead of the edge's
   shared backend token. jobs-manager reads TRACEBLOC_INGEST_RUN_TOKEN; a 404
   from the endpoint falls back to the shared token, any other failure fails the
   submit with 502.
@@ -2173,7 +2214,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
     2. `ingestRunTokenByEnv[<resolved CLIENT_ENV>]` -- the fleet default.
 
   Shipped default: on for dev and stg, off for prod. The token is BOUND to one
-  ingestor, and an ingestor without data-ingestors#931 breaks under it; why each
+  ingestor, and an ingestor without the token support breaks under it; why each
   fleet has its answer: see ingestRunTokenByEnv in values.yaml.
 
   NIL-SAFE BOTH WAYS. An edge upgraded with plain `--reuse-values` from a chart
@@ -2196,19 +2237,19 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 
 {{/*
   Whether ingestion Jobs on THIS edge write one immutable ds_<uuid4 hex> table
-  per run (RFC-0003 D16, backend#1204 / backend#1205); jobs-manager forwards
+  per run; jobs-manager forwards
   TRACEBLOC_PER_INGESTION_TABLES into every ingestion Job it spawns.
 
   Resolution, highest first -- identical to tracebloc.ingestRunToken:
     1. `perIngestionTables` -- an explicit operator override, true or false.
     2. `perIngestionTablesByEnv[<resolved CLIENT_ENV>]` -- the fleet default
-       (backend#1834: each fleet turns on once its ingestor is shown to carry
+       (each fleet turns on once its ingestor is shown to carry
        the whole D16 path on a dev edge).
 
   NEVER ON THE prodDigest PIN, whichever answer the two give. A secure
   environment whose ingestor resolves to `images.ingestor.prodDigest` (a prod
   secure environment with service DB accounts off, see tracebloc.ingestorDigest)
-  runs v0.8.2, which predates the ds_ handle fix (backend#2895): under the flag
+  runs v0.8.2, which predates the ds_ handle fix: under the flag
   it reports the dataset's --name instead of its ds_ table, so `tb data delete`
   misses the table. The backend cannot see that secure environment's overrides,
   so the chart refuses the combination.
@@ -2235,18 +2276,18 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 
 {{/*
   Whether jobs-manager mints a throwaway MySQL account per experiment
-  (backend#1528 D10) for THIS edge.
+  for THIS edge.
 
   Resolves identically to tracebloc.serviceDbAccounts / bootstrapDbReparent /
   tracebloc.rotateMysqlRoot -- operator override first, else the
   per-environment default -- and shares the CLIENT_ENV normalization
-  (backend#1723) so a documented alias like `staging` cannot silently miss its
+  so a documented alias like `staging` cannot silently miss its
   entry.
 
   WHY IT WAS THE ODD ONE OUT, AND WHY THAT MATTERED. Every other gate in this
   rollout resolved through a helper with a `…ByEnv` map; this one was read as a
   bare `.Values.perExperimentDbCreds` in five templates. So the flag that
-  backend#1528's LAST step is gated on was the one flag whose fleet posture the
+  the LAST step of the edgeuser retirement is gated on was the one flag whose fleet posture the
   chart could not record. A fleet that had been taken to the per-experiment
   credential shape held that fact only in its stored release values, where a
   values-resetting upgrade drops it -- and dropping it puts the account mint
@@ -2265,10 +2306,10 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 
 {{/*
   Whether to re-parent the account-minting bootstrap off edgeuser onto MySQL
-  root (backend#1528 S3). Resolves identically to tracebloc.serviceDbAccounts —
+  root. Resolves identically to tracebloc.serviceDbAccounts —
   operator override first, else the per-environment default — so the fleet's S3
   posture reads out of one place the same way, and the CLIENT_ENV normalization
-  (backend#1723) is shared. This is the LAST, edgeuser-retiring step. dev has run
+  is shared. This is the LAST, edgeuser-retiring step. dev has run
   the whole ladder and its posture is verified, so a fresh dev install
   should come up retired rather than re-walk the flips by hand. Now baked ON for
   dev, stg and prod (all three fleets retired) -- but on the baked path it resolves
@@ -2276,7 +2317,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   exactly like rotateMysqlRoot, so a baked default re-parents a fresh install while
   leaving an existing un-rotated (blind) edge alone rather than hard-failing its
   render. It MUST move in lockstep with rotate: reparent derives DB_BOOTSTRAP_PASSWORD
-  from the rotation (backend#2738), so gating both on the same helper keeps them
+  from the rotation, so gating both on the same helper keeps them
   consistent -- reparent=true with rotate=false has no password to fall back on and
   hard-fails the render. An explicit override is unchanged (the manual path).
 */}}
@@ -2288,8 +2329,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- $env := include "tracebloc.clientEnv" . -}}
 {{- $byEnv := default dict .Values.bootstrapDbReparentByEnv -}}
 {{- /* Baked reparent follows rotate's RESOLVED value, not bakedRootRotationOn
-       directly: reparent derives DB_BOOTSTRAP_PASSWORD from the rotation
-       (backend#2738), so it must be on iff rotate is on. Gating on
+       directly: reparent derives DB_BOOTSTRAP_PASSWORD from the rotation, so it must be on iff rotate is on. Gating on
        bakedRootRotationOn alone left reparent baked-on when an operator explicitly
        set rotateMysqlRoot=false on an already-rotated edge (Secret still holds
        MYSQL_ROOT_PASSWORD), and reparent then hard-failed the render with no
@@ -2301,10 +2341,8 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- end }}
 
 {{/*
-  Whether to narrow edgeuser to USAGE only at jobs-manager startup (backend#1528
-  S3 close-out). Resolves identically to its three siblings -- operator override
-  first, else the per-environment default -- sharing the CLIENT_ENV normalization
-  (backend#1723).
+  Whether to narrow edgeuser to USAGE only at jobs-manager startup. Resolves identically to its three siblings -- operator override
+  first, else the per-environment default -- sharing the CLIENT_ENV normalization.
 
   WHAT IT IS FOR. mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants
   edgeuser its broad privileges at every FRESH datadir init and cannot branch on a
@@ -2321,7 +2359,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   BAKED ON FOR dev, stg AND prod, and the pairing below is enforced
   rather than documented: this is the last step of the last stage, so it is only
   legal where every predecessor gate is already on -- which every fleet now is
-  (backend#947, the consumer migration off edgeuser verified live on stg and prod),
+  (the consumer migration off edgeuser is verified live on stg and prod),
   so all three carry it as a default. The conditional below still declines the
   default on any edge whose posture is incomplete, so a single-gate override does
   not hard-fail the render.
@@ -2399,14 +2437,14 @@ true
 {{-     $missing = append $missing "perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential" -}}
 {{-   end -}}
 {{-   if $missing -}}
-{{-     fail (printf "narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: %s. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off." (join "; " $missing)) -}}
+{{-     fail (printf "narrowEdgeuser is on but this fleet is not ready to narrow edgeuser. Blocking reasons: %s. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off." (join "; " $missing)) -}}
 {{-   end -}}
 {{- end -}}
 {{- end }}
 
 {{/*
-  Whether to DROP edgeuser entirely at jobs-manager boot (backend#5427) -- the
-  step backend#1528 left as a deliberate operator action, made automatic for edges
+  Whether to DROP edgeuser entirely at jobs-manager boot -- the
+  step that was left as a deliberate operator action, made automatic for edges
   we cannot reach. Resolves like tracebloc.narrowEdgeuser (operator override first,
   else the per-env default), but the BAKED default is additionally conditional on
   narrowEdgeuser ALREADY resolving on: a fleet is only dropped once it is narrowed
@@ -2456,23 +2494,23 @@ true
 {{-     $missing = append $missing "perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential" -}}
 {{-   end -}}
 {{-   if $missing -}}
-{{-     fail (printf "dropEdgeuser is on but this fleet is not ready to retire edgeuser (backend#1528 S3 / backend#5427). Blocking reasons: %s. Dropping now would break a live consumer still authenticating as edgeuser, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent), narrow it, then drop. A DROP is NOT reversible from the S0 snapshot." (join "; " $missing)) -}}
+{{-     fail (printf "dropEdgeuser is on but this fleet is not ready to retire edgeuser. Blocking reasons: %s. Dropping now would break a live consumer still authenticating as edgeuser, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent), narrow it, then drop. A DROP is NOT reversible from the S0 snapshot." (join "; " $missing)) -}}
 {{-   end -}}
 {{- end -}}
 {{- end }}
 
 {{/*
   Whether a BAKED-DEFAULT rotateMysqlRoot / bootstrapDbReparent may resolve ON for
-  THIS render without wedging an existing un-rotated edge (backend#947; @LukasWodka
-  sign-off 2026-09-02; pre-marker case backend#3189). Consulted ONLY on the
+  THIS render without wedging an existing un-rotated edge, including one that predates the
+  marker. Consulted ONLY on the
   baked-default path -- an explicit operator override bypasses this and keeps the
-  backend#2879 fail-closed guard (the deliberate manual-rotation path for our own
+  fail-closed guard (the deliberate manual-rotation path for our own
   accessible existing clusters).
 
-  The cases, per the sign-off:
+  The cases:
     - ALREADY born rotated -- the marker ConfigMap (tracebloc.mysqlRootRotatedMarker)
       is present -> ON. This is the case the PVC alone could not see, and getting it
-      wrong is a ONE-WAY DOOR (backend#947, @LukasWodka): a fresh stg/prod install
+      wrong is a ONE-WAY DOOR: a fresh stg/prod install
       born-rotates and mints root into the Secret, but the chart also CREATES the
       mysql-pvc on that first install (resource-policy: keep), so a PVC-only freshness
       test flips OFF on the very next auto-upgrade -- rotate/reparent both resolve off,
@@ -2481,7 +2519,7 @@ true
       posture this PR retires). The marker is written iff rotation resolved on (see
       mysql-root-rotated-marker.yaml), under a CONSTANT name so this lookup is
       rename-safe.
-    - ALREADY rotated BEFORE the marker shipped (backend#3189) -- the live Secret
+    - ALREADY rotated BEFORE the marker shipped -- the live Secret
       carries a baked MYSQL_ROOT_PASSWORD, minted under the EARLIER
       serviceDbAccountsByEnv / rotateMysqlRootByEnv bake, but no marker was ever laid
       down: that mechanism post-dates the rotation, so those edges never got one.
@@ -2490,8 +2528,7 @@ true
       one-way door described above -- a SILENT loss of root on fleets that were
       already rotated. The live Secret's MYSQL_ROOT_PASSWORD key is the only signal
       that separates such an edge from an existing un-rotated one, so it is read here
-      (see the refusal in the define for why that Secret lookup is rename-safe). Since
-      client-dev#1702 that key lives in `mysql-credentials`; it is read from there,
+      (see the refusal in the define for why that Secret lookup is rename-safe). The key lives in `mysql-credentials`; it is read from there,
       or from the release Secret when that does not exist yet (the first upgrade onto
       the split), as one WHOLE object exactly as secrets.yaml's `$dbSource` -- so a
       root key removed from `mysql-credentials` is not resurrected from the stale
@@ -2505,7 +2542,7 @@ true
     - EXISTING datadir (mysql-pvc present, no marker, no baked root in the Secret), OR
       a BLIND / cluster-less render that cannot prove the datadir fresh -> OFF. Fall
       back to the edge's existing password (the image-baked literal); no mint, no wedge.
-      EXCEPT with selfRotateMysqlRoot on and the cluster visible (backend#5427) -> ON:
+      EXCEPT with selfRotateMysqlRoot on and the cluster visible -> ON:
       mysqld applies the minted password itself at its next start, so the existing
       datadir is rotated rather than wedged.
 
@@ -2517,7 +2554,7 @@ true
   A tier-1 `mysqlRootPassword` PIN also resolves ON: it is an explicit operator
   assertion of root's password (deterministic, no tier-3 mint), so it is the
   cluster-less/blind way to opt a fleet into rotation and it keeps this decidable
-  under `helm template` / helm-unittest (backend#2892's existing escape hatch).
+  under `helm template` / helm-unittest (the existing escape hatch).
 */}}
 {{- define "tracebloc.bakedRootRotationOn" -}}
 {{- if .Values.mysqlRootPassword -}}
@@ -2535,7 +2572,7 @@ true
 {{- end -}}
 {{- /*
     The datadir's presence, live OR declared. `mysqlDatadirExists` is the same
-    values-level surrogate secrets.yaml's root-mint guard uses (backend#2892): it
+    values-level surrogate secrets.yaml's root-mint guard uses: it
     OR-s the live PVC `lookup` so this arm is provable under `helm template` /
     helm-unittest and also covers a LIVE render whose PVC `lookup` cannot see the
     datadir (a not-yet-bound or renamed claim the operator knows exists).
@@ -2543,14 +2580,14 @@ true
 {{- $datadirPresent := (or $pvc .Values.mysqlDatadirExists) -}}
 {{- if and $marker (not .Values.mysqlRootRotationAcknowledged) -}}
 {{- /*
-    BORN-ROTATED, looked up FIRST (backend#947, backend#3226). The marker is
+    BORN-ROTATED, looked up FIRST. The marker is
     written under a CONSTANT name and kept across a helm uninstall
     (resource-policy: keep), so it is the rename-safe "already rotated" signal.
     Consulting it BEFORE the datadir/Secret refusal below means a reinstall over a
     kept datadir whose marker survived resolves ON from the marker and never trips
     the refusal on the Secret that the uninstall deleted.
 
-    GATED ON `mysqlRootRotationAcknowledged` (backend#3255). This marker
+    GATED ON `mysqlRootRotationAcknowledged`. This marker
     (resource-policy: keep) can OUTLIVE the rotation it recorded: an old,
     pre-rotation Secret restored over a datadir whose marker survived leaves the
     marker present but the Secret without MYSQL_ROOT_PASSWORD. Treating the marker as
@@ -2560,10 +2597,10 @@ true
     below, which keep a still-provably-rotated edge ON (its baked Secret) but resolve
     OFF when the marker's rotation is no longer backed by the Secret -- leaving that
     edge image-baked, the ack's documented meaning. UNSET, the marker still wins (the
-    safe born-rotated default), so backend#947 / backend#3189 are unchanged.
+    safe born-rotated default), so the existing behaviour is unchanged.
 
     This is NOT the deleted-Secret reinstall guard: secrets.yaml's credential-
-    collision refusal (backend#2571) already owns a LIVE render with mysql-pvc
+    collision refusal already owns a LIVE render with mysql-pvc
     present and the Secret GONE (copy it back to the name this render wants, or delete
     the datadir), independently of this ack. And the ack makes the SURVIVING marker
     yield WITHOUT deleting it, so an image-baked edge is durable only while the ack
@@ -2575,7 +2612,7 @@ true
 true
 {{- else -}}
 {{- /*
-    RENAME-SAFE BY REFUSAL, not by avoidance (backend#3189). The Secret's name
+    RENAME-SAFE BY REFUSAL, not by avoidance. The Secret's name
     follows fullnameOverride, so a rename moves it and a bare `lookup` would MISS
     and silently read "not rotated" -- exactly the reason the born-rotated signal
     was first recorded in a constant-named marker instead of the Secret. With no
@@ -2583,7 +2620,7 @@ true
     the only signal left; it is read WITH the refusal that turns that silent miss
     into a loud fail. If the datadir is present but no Secret resolves under the
     current name, that is a rename, or a reinstall over a kept datadir whose
-    uninstall deleted the Secret. Since client-dev#1702 the root key's home is the
+    uninstall deleted the Secret. The root key's home is the
     kept, constant-named `mysql-credentials`, so the refusal needs BOTH Secrets
     missing: with that one present the state is readable and nothing is refused --
     which is what makes a reinstall over a kept datadir just work. GATED ON
@@ -2591,8 +2628,8 @@ true
     flag clears ALL of the guard's refuse arms (values.yaml -- the same three in
     secrets.yaml's mint), this one included, so an operator reinstalling over a kept
     datadir of an UN-ROTATED edge (no marker, Secret gone) can acknowledge and
-    proceed on the image-baked password instead of being wedged (backend#3226).
-    This is also what scripts/tests/fullname-override-completeness.sh (backend#2626)
+    proceed on the image-baked password instead of being wedged.
+    This is also what scripts/tests/fullname-override-completeness.sh
     requires of any Secret lookup keyed on the override-following name. Inert on
     every legitimate render: a fresh install has no datadir, an ordinary upgrade has
     the Secret, and a cluster-less render (helm template / helm-unittest / GitOps)
@@ -2602,7 +2639,7 @@ true
 {{-   fail (printf "release %q in namespace %q has MySQL data (PersistentVolumeClaim %q) but neither a Secret named %q (the MySQL passwords' own Secret, kept across helm uninstall) nor one named %q (the release Secret this render resolves to), and no born-rotated marker. bakedRootRotationOn cannot read root's rotation state from a Secret that is not there, and treating the miss as \"not rotated\" would drop MYSQL_ROOT_PASSWORD and revert jobs-manager to the root-equivalent edgeuser this epic retires. TWO CAUSES look like this. (1) A RENAME (fullnameOverride changed on a live release) of a release that never ran a chart with %q: the Secret still exists under the OLD name -- copy it to the name this render wants, then re-run (secrets.yaml prints the exact kubectl/jq command), or put fullnameOverride back to the value this release was last rendered with. (2) A REINSTALL over a kept datadir whose uninstall DELETED both (docs/MIGRATIONS.md): restore them from a backup if you took one. Otherwise a born-rotated edge keeps its marker across the uninstall and this render resolves rotated from it; an un-rotated edge has no marker, so set mysqlRootRotationAcknowledged=true to proceed on the image-baked password -- the ack clears this arm the same way it clears the secrets.yaml mint arms. See docs/MIGRATIONS.md." .Release.Name .Release.Namespace (include "tracebloc.mysqlPvc" .) (include "tracebloc.mysqlCredentialsSecret" .) (include "tracebloc.secretName" .) (include "tracebloc.mysqlCredentialsSecret" .)) -}}
 {{- end -}}
 {{- /*
-    PRE-MARKER ROTATED (backend#3189): the live Secret already carries a baked
+    PRE-MARKER ROTATED: the live Secret already carries a baked
     MYSQL_ROOT_PASSWORD, minted under the EARLIER serviceDbAccountsByEnv /
     rotateMysqlRootByEnv bake, but no marker was ever laid down -- that mechanism
     post-dates the rotation. Same `and $secret $secret.data (hasKey ...)` shape as
@@ -2615,7 +2652,7 @@ true
 true
 {{- else if and $clusterVisible $datadirPresent (include "tracebloc.selfRotateMysqlRootGate" .) -}}
 {{- /*
-    EXISTING UN-ROTATED, SELF-ROTATING (backend#5427). The one case above that
+    EXISTING UN-ROTATED, SELF-ROTATING. The one case above that
     resolves OFF does so because nothing could make the live database accept a
     freshly minted root password. With selfRotateMysqlRoot on, mysqld does it
     itself: the init file (tracebloc.selfRotateMysqlRoot) hands it the minted
@@ -2632,9 +2669,9 @@ true
 
 {{/*
   Whether the chart manages the mysql-client root password from a generated
-  Secret instead of the image's baked default (backend#947 / backend#1528 Phase
+  Secret instead of the image's baked default (Phase
   0). Operator override first (unchanged -- the manual-rotation path, still guarded
-  by backend#2879); else the per-environment default, AND ONLY on a fresh or
+  by the fail-closed refusal); else the per-environment default, AND ONLY on a fresh or
   already-rotated edge (tracebloc.bakedRootRotationOn). Baked TRUE for dev, stg and
   prod now that all three fleets are retired -- but the datadir gate means a baked
   default born-rotates a fresh install while leaving an existing un-rotated (blind)
@@ -2653,7 +2690,7 @@ true
 {{- end }}
 
 {{/*
-  The selfRotateMysqlRoot GATE as set (backend#5427 Part B): operator override
+  The selfRotateMysqlRoot GATE as set (Part B): operator override
   first, else the per-environment default, like its siblings. Consulted directly
   only by tracebloc.bakedRootRotationOn, which cannot ask
   tracebloc.selfRotateMysqlRoot (that one includes rotateMysqlRoot, which
@@ -2663,7 +2700,7 @@ true
   on an edge that predates rotation that is the image's default root password.
   The manual fix (docs/migration-tools/rotate-mysql-root.md) needs cluster
   access, which we do not have on customer edges, and jobs-manager cannot do it
-  either: on such an edge it has no root credential at all (backend#5272).
+  either: on such an edge it has no root credential at all.
   mysqld can, through init_file, which runs at startup without authentication.
 
   True for dev, stg and prod: the rollout flipped one environment at a time,
@@ -2681,17 +2718,17 @@ true
 {{- end }}
 
 {{/*
-  Whether self-rotation is IN EFFECT for this render (backend#5427): the gate on
+  Whether self-rotation is IN EFFECT for this render: the gate on
   AND rotation resolved on, so there is a chart-owned root password for mysqld
   to apply. This is what templates read, never the raw gate.
   The ONE condition every piece is rendered on -- the init container, emptyDir and
   MYSQL_HOME env in mysql-deployment.yaml, and the alphanumeric / bootstrap-pin
   refusals in secrets.yaml -- so they cannot disagree. The init container reads
   root's password from mysql-credentials, the one source every other root reader
-  uses; the chart renders no second copy of it (client-dev#1852).
+  uses; the chart renders no second copy of it.
 
   It is safe to render on ANY edge because the init container decides at
-  runtime, not at render time. Rehearsed on MySQL 5.7.41 and 8.4.11 (backend#5427):
+  runtime, not at render time. Rehearsed on MySQL 5.7.41 and 8.4.11:
     - init_file on a FRESH datadir breaks the image entrypoint's initialisation
       (its temporary server runs init_file too, changes root@localhost, and the
       entrypoint then fails to log in). So the init container writes nothing
@@ -2709,11 +2746,11 @@ true
 {{- end }}
 
 {{/*
-  Refusals for the root self-rotation (backend#5427), called from secrets.yaml with
+  Refusals for the root self-rotation, called from secrets.yaml with
   the root password that render resolved: dict "root" <top context> "password"
   <MYSQL_ROOT_PASSWORD>. A helper rather than inline because they render nothing:
   an inline read of tracebloc.selfRotateMysqlRoot whose only effect is a refusal
-  is a call site gate-byenv-resolution.sh cannot see react (client-dev#1852).
+  is a call site gate-byenv-resolution.sh cannot see react.
   The password itself reaches mysqld from mysql-credentials through the
   mysql-root-init init container, which re-checks the alphanumeric rule at
   runtime for a value written there by hand.
@@ -2722,36 +2759,36 @@ true
 {{- $root := .root -}}
 {{- if (include "tracebloc.selfRotateMysqlRoot" $root) -}}
 {{-   if not (regexMatch "^[A-Za-z0-9]+$" .password) -}}
-{{-     fail "selfRotateMysqlRoot is on, but the MYSQL_ROOT_PASSWORD this release already holds is not alphanumeric ([A-Za-z0-9]+). mysqld would run it inside `ALTER USER ... IDENTIFIED BY '...'` at every start, so a quote or other SQL metacharacter would break the statement (backend#5427). Pin mysqlRootPassword to an alphanumeric value, or set selfRotateMysqlRoot=false for this edge." -}}
+{{-     fail "selfRotateMysqlRoot is on, but the MYSQL_ROOT_PASSWORD this release already holds is not alphanumeric ([A-Za-z0-9]+). mysqld would run it inside `ALTER USER ... IDENTIFIED BY '...'` at every start, so a quote or other SQL metacharacter would break the statement. Pin mysqlRootPassword to an alphanumeric value, or set selfRotateMysqlRoot=false for this edge." -}}
 {{-   end -}}
 {{-   if and $root.Values.bootstrapDbPassword (ne $root.Values.bootstrapDbPassword .password) -}}
-{{-     fail "selfRotateMysqlRoot is on, so mysqld sets root to MYSQL_ROOT_PASSWORD at every start, but bootstrapDbPassword pins a DIFFERENT value. jobs-manager logs in as root with bootstrapDbPassword, so it would be locked out (1045) on every start (backend#5427). Unset bootstrapDbPassword: with rotation on it is derived from root's password (backend#2738)." -}}
+{{-     fail "selfRotateMysqlRoot is on, so mysqld sets root to MYSQL_ROOT_PASSWORD at every start, but bootstrapDbPassword pins a DIFFERENT value. jobs-manager logs in as root with bootstrapDbPassword, so it would be locked out (1045) on every start. Unset bootstrapDbPassword: with rotation on it is derived from root's password." -}}
 {{-   end -}}
 {{- end -}}
 {{- end }}
 
 {{/*
-  The rotateMysqlRoot mint's existing-datadir refusal (backend#2892), called from
+  The rotateMysqlRoot mint's existing-datadir refusal, called from
   secrets.yaml only when an existing datadir is known: dict "root" <top context>
   "pvc" <the datadir PVC's name>. Self-rotation lifts it, because mysqld then
-  applies the minted value at its next start (backend#5427). A helper for the
+  applies the minted value at its next start. A helper for the
   same reason as tracebloc.assertSelfRotateMysqlRootIsSafe.
 */}}
 {{- define "tracebloc.assertRootMintOnExistingDatadirIsSafe" -}}
 {{- if not (include "tracebloc.selfRotateMysqlRoot" .root) -}}
-{{-   fail (printf "rotateMysqlRoot is on for this fleet, but its MySQL datadir already exists (PersistentVolumeClaim %q in namespace %q) and predates the rotation, so root still holds its install-time password. Rendering now would mint a NEW random root password into the Secret that the live database was never told about; because the mysql entrypoint reads MYSQL_ROOT_PASSWORD only at FRESH datadir init, root would then authenticate with neither value and the fleet would lose MySQL auth (helm reports success, jobs-manager CrashLoops on `1045 Access denied for user 'root'`, the upgrade times out on `Deployment not ready`). Enabling the rotation on an existing datadir REQUIRES the one-time, manual `ALTER USER 'root'` migration in docs/migration-tools/rotate-mysql-root.md -- the chart cannot run it (it would have to authenticate as root with the CURRENT password). Follow that runbook: it has you set `mysqlRootRotationAcknowledged=true` to acknowledge the manual step and let this render through. Or, from chart 1.9.205, set `selfRotateMysqlRoot=true` and mysqld runs that ALTER USER itself at its next start, with no manual step and no acknowledgement (backend#5427). A FRESH install needs none of this -- with no datadir yet, root is initialised with the generated value and is born rotated. (A leftover EMPTY datadir -- a first install that failed before MySQL ever initialised, whose PVC persists under resource-policy: keep -- is the same fresh case wearing a PVC: there is no live password to migrate, so set mysqlRootRotationAcknowledged=true and the next init is born rotated; the ALTER USER step then has nothing to run against and is skipped.)" .pvc .root.Release.Namespace) -}}
+{{-   fail (printf "rotateMysqlRoot is on for this fleet, but its MySQL datadir already exists (PersistentVolumeClaim %q in namespace %q) and predates the rotation, so root still holds its install-time password. Rendering now would mint a NEW random root password into the Secret that the live database was never told about; because the mysql entrypoint reads MYSQL_ROOT_PASSWORD only at FRESH datadir init, root would then authenticate with neither value and the fleet would lose MySQL auth (helm reports success, jobs-manager CrashLoops on `1045 Access denied for user 'root'`, the upgrade times out on `Deployment not ready`). Enabling the rotation on an existing datadir REQUIRES the one-time, manual `ALTER USER 'root'` migration in docs/migration-tools/rotate-mysql-root.md -- the chart cannot run it (it would have to authenticate as root with the CURRENT password). Follow that runbook: it has you set `mysqlRootRotationAcknowledged=true` to acknowledge the manual step and let this render through. Or, from chart 1.9.205, set `selfRotateMysqlRoot=true` and mysqld runs that ALTER USER itself at its next start, with no manual step and no acknowledgement. A FRESH install needs none of this -- with no datadir yet, root is initialised with the generated value and is born rotated. (A leftover EMPTY datadir -- a first install that failed before MySQL ever initialised, whose PVC persists under resource-policy: keep -- is the same fresh case wearing a PVC: there is no live password to migrate, so set mysqlRootRotationAcknowledged=true and the next init is born rotated; the ALTER USER step then has nothing to run against and is skipped.)" .pvc .root.Release.Namespace) -}}
 {{- end -}}
 {{- end }}
 
 {{/*
-  RFC-0076 settings-naming (S3): TRACEBLOC_ENV is the canonical name for this
+  Settings naming: TRACEBLOC_ENV is the canonical name for this
   var, CLIENT_ENV the legacy one. Read alias-first -- a non-empty
   env.TRACEBLOC_ENV wins, else a non-empty env.CLIENT_ENV, else "prod" -- so a
   customer values file that still says CLIENT_ENV keeps rendering unchanged.
   A BLANK value on either name is "unset", same as before this alias existed
   (env.CLIENT_ENV="" has always meant prod, per the schema's own closed enum
   and chart-env-vocabulary.sh; TRACEBLOC_ENV="" gets the identical treatment,
-  not the stricter "present-but-blank fails validation" some other RFC-0076
+  not the stricter "present-but-blank fails validation" some other
   readers use, because that would change an existing, tested contract).
   remove_by: 2026-12-31, after which only TRACEBLOC_ENV is read.
 */}}
@@ -2776,7 +2813,7 @@ true
 {{- end }}
 
 {{/*
-  Effective floating tag for spawned ingestion Jobs (backend#1360).
+  Effective floating tag for spawned ingestion Jobs.
 
   Precedence, mirroring tracebloc.ingestorDigest:
     1. `images.ingestor.tag`          explicit override, any environment
@@ -2797,19 +2834,19 @@ true
   This used to be a bare `"0.8"` for every environment, which made a dev or
   staging edge whose `channelTags` are absent — the `--reuse-values` replay
   this branch exists for — spawn the PROD line. That inverts the entire point
-  of backend#1360: dev/stg channels exist so an ingestor change can be
+  of the channel scheme: dev/stg channels exist so an ingestor change can be
   validated on a real edge without a prod release, and an edge silently
   validating prod's image reports on the wrong artifact. It also crosses the
   signing boundary in the safe direction only by accident.
 
   It is worse than a wrong tag today. The prod float has moved past the
-  ordering ceiling documented at values.yaml `prodDigest` (backend#1853): the
+  ordering ceiling documented at values.yaml `prodDigest`: the
   0.8 line no longer carries the ingestor's `edgeuser` DB_USER default that
-  data-ingestors#468 removed. `serviceDbAccountsByEnv` supplies DB_USER on
+  an ingestor release removed. `serviceDbAccountsByEnv` supplies DB_USER on
   dev/stg, so those two survive it — but the coupling is accidental, and the
   same literal is what an out-of-vocabulary CLIENT_ENV lands on, where
   `serviceDbAccountsByEnv` misses too and nothing supplies DB_USER. That is
-  backend#1752 reconstructed from a typo.
+  the same failure reconstructed from a typo.
 
   KEEP THE `prod` ENTRY IN SYNC with values.yaml `channelTags.prod`. It is a
   second copy of the same float and there is no way to read the first from
@@ -2849,8 +2886,7 @@ true
 {{- $clientEnv := include "tracebloc.clientEnv" . -}}
 {{- if and $prodPin (eq $clientEnv "prod") -}}
 {{- /*
-  Two prod pins, chosen by whether this edge has service DB accounts
-  (backend#5099). Ingestors built from data-ingestors#468 on (v0.8.8+) require
+  Two prod pins, chosen by whether this edge has service DB accounts. Ingestors from v0.8.8 on require
   DB_USER, which jobs-manager injects (TB_INGEST_USER) only when
   tracebloc.serviceDbAccounts is on. An edge with it OFF must stay on
   `prodDigest`, inside the safe set {v0.8.0 … v0.8.4} (docs/SECURITY.md §4.1.1).
@@ -2870,7 +2906,7 @@ true
 {{/*
 tracebloc.ingestorPinLabel — one label of the ingestor image this edge spawns,
 read from images.ingestor.pinnedImageLabels by the EXACT digest
-tracebloc.ingestorDigest picks (tracebloc/cli-dev#971). Empty when no digest
+tracebloc.ingestorDigest picks. Empty when no digest
 applies (a floating tag), when that digest has no entry (an operator pin the
 chart never read), or when the entry lacks the key (an image without that
 label). The CLI reads the rendered values before it copies any data.
@@ -2932,7 +2968,7 @@ Usage inside a container's env: list:
 
 {{/*
 tracebloc.mysqlEngineMajor — the MySQL engine major the chart is about to run,
-for the mysql-format-guard init container (backend#723). Resolution mirrors
+for the mysql-format-guard init container. Resolution mirrors
 tracebloc.image's digest-wins precedence:
   digest set   -> the known pins: the chart's 8.4 index digests (the default
                   and every earlier default) map to "8.4", the frozen
@@ -2944,11 +2980,11 @@ tracebloc.image's digest-wins precedence:
 The first sha256 literal below MUST equal the images.mysqlClient.digest default
 in values.yaml — mysql_test.yaml pins the default render to "8.4", so
 re-pinning the digest without updating this helper fails CI instead of silently
-disarming the guard (RFC-0150 P29). The ones after it are earlier 8.4 defaults:
+disarming the guard. The ones after it are earlier 8.4 defaults:
 the installer wrote each into clients' values files (TB_MYSQL_84_DEFAULT_DIGEST),
 so they stay mapped. The last is the 5.7 pin, which no longer renders by default
 but still arms the guard for the edges that carry it.
-Nil-guarded at both levels (backend#4372), as tracebloc.honouredPin is: an
+Nil-guarded at both levels, as tracebloc.honouredPin is: an
 operator's explicit `images.mysqlClient: null` or `images: null`, or a
 `--reuse-values` replay from before the block existed, reads as the template
 fallbacks (tag `prod` -> "5.7", the image the nil block also renders) instead of
@@ -2982,7 +3018,7 @@ tracebloc.durationSeconds — parse a Go/Helm duration string (as accepted by
 `helm --timeout`, e.g. "10m", "30m", "1h", "600s", "1h30m") into a whole
 number of seconds. Sums every `<int><unit>` component so compound durations
 work; recognises s/m/h/d, ignores anything else. Empty/nil input -> 0.
-Used by auto-upgrade-cronjob.yaml (#555, client-dev#1519) so the Job's activeDeadlineSeconds
+Used by auto-upgrade-cronjob.yaml so the Job's activeDeadlineSeconds
 can be kept above 2 x the configured helm timeout (an --atomic upgrade plus its rollback).
 */}}
 {{- define "tracebloc.durationSeconds" -}}
@@ -3001,8 +3037,7 @@ can be kept above 2 x the configured helm timeout (an --atomic upgrade plus its 
 {{- end -}}
 
 {{/*
-  tracebloc.telemetryCollectorName — the edge Collector's resource name
-  (backend#1906). Same shape as tracebloc.resourceMonitorName: release-scoped, so
+  tracebloc.telemetryCollectorName — the edge Collector's resource name. Same shape as tracebloc.resourceMonitorName: release-scoped, so
   two releases on one cluster do not collide in the shared node-agents namespace.
 */}}
 {{- define "tracebloc.telemetryCollectorName" -}}
@@ -3029,11 +3064,11 @@ tracebloc.io/telemetry-collector-state
 {{- end -}}
 
 {{/*
-  tracebloc.telemetryTokenLegacyName — the pre-backend#2625 fixed Secret name.
+  tracebloc.telemetryTokenLegacyName — the earlier fixed Secret name.
 
   The sentinel that tracebloc.telemetryTokenSecretName rewrites to a
   release-scoped name (below). It goes with that helper, the writer's env and
-  telemetry-token-rbac.yaml (tracebloc/tracebloc-engine#2065).
+  telemetry-token-rbac.yaml, all of which go once the writer is removed.
 */}}
 {{- define "tracebloc.telemetryTokenLegacyName" -}}
 tracebloc-telemetry-token
@@ -3041,12 +3076,12 @@ tracebloc-telemetry-token
 
 {{/*
   tracebloc.telemetryTokenSecretName — the name of the Secret jobs-manager writes
-  the edge Collector's ingest token into (backend#2274), which nothing reads any
+  the edge Collector's ingest token into, which nothing reads any
   more. The one resolver behind the writer's env and the RBAC resourceName, so
   they cannot disagree about which Secret they mean
   (scripts/tests/telemetry-token-agreement.sh).
 
-  RELEASE-SCOPED (backend#2625). The name used to be a fixed
+  RELEASE-SCOPED. The name used to be a fixed
   `tracebloc-telemetry-token` in the SHARED node-agents namespace, so two releases
   on one cluster wrote one Secret — last writer wins, and the loser's Collector
   authenticated as the wrong tenant. Scoping the name to the release makes each
@@ -3081,9 +3116,9 @@ tracebloc-telemetry-token
                                there is nothing coherent to collect
 
   NO SECRET IS LOOKED UP. The Collector used to wait for jobs-manager's
-  telemetry-token Secret (backend#2274, backend#2400); it now sends through the
-  egress gate with its own projected service-account token
-  (tracebloc/tracebloc-engine#2065), so nothing on the cluster decides whether
+  telemetry-token Secret; it now sends through the
+  egress gate with its own projected service-account token, so nothing on the
+  cluster decides whether
   it renders. telemetry_collector_test.yaml renders it against a cluster that
   holds no Secret at all, in fleet mode and enabled by the operator.
 
@@ -3099,7 +3134,7 @@ tracebloc-telemetry-token
   that branch never reaches these checks.
 
   WHY THIS IS NOT A BOOLEAN, and why `telemetryCollector.enabled` has no default
-  in values.yaml (backend#1906). `--reset-then-reuse-values` (what auto-upgrade
+  in values.yaml. `--reset-then-reuse-values` (what auto-upgrade
   runs) keeps operator CHOICES, both ways, and drops old chart DEFAULTS, measured
   on a real cluster:
 
@@ -3133,7 +3168,7 @@ enabled
 
   Resolved through `tracebloc.clientEnv` rather than the raw value, so a
   documented alias (`staging`) lands on the same host as its canonical form and
-  cannot silently route an install at the wrong backend — the backend#1745 defect.
+  cannot silently route an install at the wrong backend — a defect that has happened before.
 
   A FOURTH COPY OF THIS MAPPING, and saying so is the point. It also lives in
   `scripts/lib/install-client-helm.sh::_backend_url`,
@@ -3156,8 +3191,7 @@ https://api.tracebloc.io/
 
 {{/*
   tracebloc.nodeAgentsInUse — true when a POD-BEARING tenant of
-  nodeAgents.namespace is enabled (backend#1906, @saadqbal's review of #779;
-  narrowed from "anything the chart owns" by backend#2400).
+  nodeAgents.namespace is enabled (narrowed from "anything the chart owns").
 
   ONE PREDICATE, not N readers. Five templates put something in that namespace
   and each carried its own copy of "is resource-monitor on"; when the Collector
@@ -3169,7 +3203,7 @@ https://api.tracebloc.io/
   "POD-BEARING" IS THE LOAD-BEARING WORD, and it is narrower than the sentence
   this docstring used to open with. Every consumer left is about pods: RBAC that
   patches or deletes DaemonSets there, and the image pull Secret they pull with.
-  backend#2400 added an occupant with no pods — telemetry-token-rbac.yaml's Role
+  A later change added an occupant with no pods — telemetry-token-rbac.yaml's Role
   and RoleBinding, which let jobs-manager write the Collector's token Secret
   before anyone can enable the Collector, and therefore render unconditionally.
   Widening this helper to cover it would make it a constant `true`: measured, that
@@ -3193,7 +3227,7 @@ https://api.tracebloc.io/
 {{- define "tracebloc.nodeAgentsInUse" -}}
 {{- /*
   THE COLLECTOR TENANT IS ASKED THROUGH ITS OWN DECIDER, not through the raw
-  `enabled` key (Bugbot, client#905). `telemetryCollectorState` exists precisely
+  `enabled` key. `telemetryCollectorState` exists precisely
   because `enabled` stopped being the answer: in FLEET MODE the key is ABSENT and
   the state is still `enabled`, so the DaemonSet renders. Reading `$tc.enabled`
   here therefore said "no pod-bearing tenant" about a namespace that was about to
@@ -3212,7 +3246,7 @@ https://api.tracebloc.io/
 {{/*
 tracebloc.gpuEnv -- the jobs-manager's GPU_REQUESTS / GPU_LIMITS env pair, rendered
 ONCE for both containers (api and pods-monitor) so the request == limit invariant
-lives in one place (Saqlain, client#996). Three situations, not two (backend#2216):
+lives in one place. Three situations, not two:
 
   * `env.GPU_LIMITS` absent            -> emits NEITHER var; the runtime keeps its
                                           legacy assume-a-GPU default. A lone
@@ -3224,7 +3258,7 @@ lives in one place (Saqlain, client#996). Three situations, not two (backend#221
   * `env.GPU_LIMITS: ""`               -> both empty: the operator declared CPU-only.
   * `env.GPU_LIMITS: nvidia.com/gpu=N` -> both set; GPU_REQUESTS takes the
                                           operator's value when given, else
-                                          GPU_LIMITS' own (client#995: it used to
+                                          GPU_LIMITS' own (it used to
                                           take a literal "nvidia.com/gpu=1", which
                                           the API server rejects beside any other
                                           limit). Two different explicit values are
@@ -3246,8 +3280,7 @@ TRACEBLOC_GPU_LIMITS), the name every reader takes. The values keys stay
 {{- end }}
 
 {{/*
-tracebloc.inferenceResourceEnv -- the size of an INFERENCE pod (client-runtime#946,
-RFC-0243 D12), rendered ONCE for both containers like `tracebloc.gpuEnv`.
+tracebloc.inferenceResourceEnv -- the size of an INFERENCE pod, rendered ONCE for both containers like `tracebloc.gpuEnv`.
 
   * `env.INFERENCE_RESOURCE_REQUESTS` / `env.INFERENCE_RESOURCE_LIMITS`
       -> TRACEBLOC_INFERENCE_RESOURCE_REQUESTS / _LIMITS, each only when its key
@@ -3261,7 +3294,7 @@ RFC-0243 D12), rendered ONCE for both containers like `tracebloc.gpuEnv`.
                                  operator's value when given, else this one
                                  (Kubernetes needs request == limit).
 
-Canonical TRACEBLOC_ names only: these are new settings (RFC-0076 S6). The keys
+Canonical TRACEBLOC_ names only: these are new settings. The keys
 are excluded from the generic env passthrough, which drops an empty value -- the
 "" that means CPU-only inference.
 */}}
@@ -3285,17 +3318,16 @@ are excluded from the generic env passthrough, which drops an empty value -- the
 {{- end }}
 
 {{/*
-tracebloc.gpuUnsupportedEnv -- why the installer left the GPU off as UNSUPPORTED
-(client-dev#1633): env.GPU_UNSUPPORTED_REASON (one human sentence) and
+tracebloc.gpuUnsupportedEnv -- why the installer left the GPU off as UNSUPPORTED: env.GPU_UNSUPPORTED_REASON (one human sentence) and
 env.GPU_UNSUPPORTED_NAME (the card, e.g. "NVIDIA GeForce GT 710"), which BOTH
 installers set with --set-string, empty unless the card or its driver is too old
 for the GPU images, the GPU is not NVIDIA, or the container runtime cannot see
-the NVIDIA GPU (backend#5296). The resource monitor sends them on every heartbeat as
-gpu_unsupported_reason / gpu_unsupported_name (client-runtime#879), so the web
-app can say why the client runs on CPU (backend#5256). env.GPU_UNSUPPORTED_CODE
+the NVIDIA GPU. The resource monitor sends them on every heartbeat as
+gpu_unsupported_reason / gpu_unsupported_name, so the web
+app can say why the client runs on CPU. env.GPU_UNSUPPORTED_CODE
 is the machine-readable kind beside the sentence (compute_too_old /
 driver_too_old / not_nvidia / runtime_cannot_see_gpu), sent as
-gpu_unsupported_code (backend#5296). The names are a cross-repo contract: do
+gpu_unsupported_code. The names are a cross-repo contract: do
 not rename one side alone.
 
 Each renders only when non-empty, under its TRACEBLOC_ canonical only, the name
@@ -3314,13 +3346,13 @@ its readers take; either spelling of the values key works, the canonical first
 {{- end }}
 
 {{/*
-tracebloc.hostOsEnv -- the host machine's operating system (client-runtime#914):
+tracebloc.hostOsEnv -- the host machine's operating system:
 env.TRACEBLOC_HOST_OS, e.g. "Ubuntu 22.04" or "Windows 11", which the installer
 sets with --set-string (empty when it cannot tell). The resource monitor sends it
 on every heartbeat as `os`, and the web app shows it beside the machine's name.
 Only the installer can answer: the monitor's own /etc/os-release is its image's.
 Renders only when non-empty, and under the canonical name only: the variable is new,
-so it has no legacy spelling (settings naming, backend#3846).
+so it has no legacy spelling (settings naming).
 */}}
 {{- define "tracebloc.hostOsEnv" -}}
 {{- $value := (get (default dict .Values.env) "TRACEBLOC_HOST_OS") | default "" | toString }}
@@ -3385,11 +3417,11 @@ carry into either container, past the other's (or its own) passthrough
 exclusions, plus the operator knobs the chart never
 renders itself and only passes through (the GPU / SHM line and the lines after
 it: every such knob client-runtime's jobs-manager or pods-monitor reads
-TRACEBLOC_<name> first -- the RFC-0067 switches EMIT_OOM_RESCUE / EMIT_TOPOLOGY /
+TRACEBLOC_<name> first -- the switches EMIT_OOM_RESCUE / EMIT_TOPOLOGY /
 TRAINING_RESUME_ENABLED, which jobs-manager also writes onto the training pod
 under both names, and the timing, envelope and ingestion knobs), plus the
 installer-set GPU_UNSUPPORTED_REASON / GPU_UNSUPPORTED_NAME / GPU_UNSUPPORTED_CODE
-(the last line; client-dev#1633, backend#5296), which the resource monitor renders too
+(the last line), which the resource monitor renders too
 (tracebloc.gpuUnsupportedEnv). TB_X maps to
 TRACEBLOC_X. A name excluded from a container's passthrough never reaches this
 helper there, so listing it is inert in that container. The values keys the

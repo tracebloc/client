@@ -1,10 +1,10 @@
 {{- /* Release-scoped, via the one resolver the writer and reader also use, so the
        name-scoped `get`/`patch` grant below pins the SAME Secret jobs-manager
-       writes and the Collector reads (backend#2625). */ -}}
+       writes and the Collector reads. */ -}}
 {{- $tokName := include "tracebloc.telemetryTokenSecretName" . -}}
 {{- /*
-  Lets jobs-manager write and REFRESH the edge Collector's ingest token
-  (backend#2274). The Collector reads its credential through `bearertokenauth`'s
+  Lets jobs-manager write and REFRESH the edge Collector's ingest token.
+  The Collector reads its credential through `bearertokenauth`'s
   `filename` from a projected Secret; jobs-manager is what puts it there, using
   the same DRF token it already sends as `Authorization: Token <token>`.
 
@@ -13,7 +13,7 @@
   release namespace. Each absence has its own reason and they are not the same
   reason, so all three are stated.
 
-  NOT ON `telemetryCollector.enabled` (backend#2400). It was, and that gate was
+  NOT ON `telemetryCollector.enabled`. It was, and that gate was
   half of a deadlock that made the Collector impossible to turn on anywhere: the
   daemonset refuses the release until the Secret exists, jobs-manager only writes
   the Secret when it has the env, and the env only appeared once the Collector was
@@ -43,7 +43,7 @@
   only by coincidence, one in and one out — the same nearly-right-comment failure
   this file was edited to fix, one round later. A list a reader can reproduce with
   `git grep -l nodeAgentsInUse client/templates` does not need to be written down,
-  and written down it can only rot. (@saadqbal, reviews of #784 and #787.)
+  and written down it can only rot.
 
   WHAT AN EDGE THAT NEVER ENABLES THE COLLECTOR PAYS: a Role and a RoleBinding
   that nothing exercises beyond one Secret write per re-authentication. The grant

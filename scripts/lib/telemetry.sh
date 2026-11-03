@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  telemetry.sh — one structured outcome event per install (backend#1907)
+#  telemetry.sh — one structured outcome event per install
 #
-#  RFC-BACKEND-1872 D12's host-process path; the record shape is
+#  The host-process path; the record shape is
 #  rfcs/specs/backend-1872-telemetry-contract.md, where this component is
 #  registered as service.name=installer / tracebloc.component=install (§10.1).
 #
 #  WHY. The installer is the highest-variance, least-observed step in the
 #  product: it runs on machines we have never seen, under package managers,
 #  proxies and shells we do not control, and it reports to nobody. The
-#  backend#736 failures — the CLI landing in ~/.local/bin with PATH advice only
+#  failures — the CLI landing in ~/.local/bin with PATH advice only
 #  printed, apt-get appearing hung because unattended-upgrades held the dpkg
 #  lock — were each invisible until a customer happened to mention one.
 #
@@ -22,11 +22,11 @@
 #  that fail are DROPPED, never trimmed or escaped: a redactor has to imagine
 #  what it is stripping; a shape only admits what it was told to.
 #
-#  WHAT IS NOT HERE. The transport. The 17 Aug decision (rfcs#28) replaced the
-#  Collector gateway with an ingest endpoint on the backend — tracebloc/backend#1905,
+#  WHAT IS NOT HERE. The transport. The 17 Aug decision replaced the
+#  Collector gateway with an ingest endpoint on the backend,
 #  which does not exist yet. _telemetry_deliver therefore writes the event to
 #  the install log and to a bounded local spool, and posts nothing. See the
-#  comment on that function for the one thing #1905 changes.
+#  comment on that function for the one thing that ingest endpoint changes.
 #
 #  Opt-out (on by default): TRACEBLOC_SKIP_TELEMETRY=1 (canonical),
 #  TRACEBLOC_NO_TELEMETRY=1 (legacy alias, remove_by 2026-12-31) or DO_NOT_TRACK=1.
@@ -52,7 +52,7 @@ TB_TELEMETRY_COMPONENT="install"
 # install.sh, which never sources this file and whose EXIT trap only removes
 # `$TMPDIR` (and keeps an abort non-zero), not install_cleanup — so a fetch, manifest or cosign
 # failure emits nothing at all, and `bootstrap` means "install-k8s.sh before
-# step a", not "everything before step a". (saadqbal on client#747; verified —
+# step a", not "everything before step a". (verified —
 # install.sh's only mention of telemetry.sh is the FILES list it downloads.)
 # Extending coverage over the fetch is separate work, not this ticket.
 #
@@ -122,7 +122,7 @@ TB_TELEMETRY_ERROR_CLASSES="unexpected_exit_2 bad_credentials image_pull_failed 
 # common.sh is only ever sourced inside install-k8s.sh's process. Nothing in the
 # bootstrap can name itself here. Kept rather than special-cased out, because the
 # day the bootstrap does get an emitter the name must already be admissible —
-# but do not read its presence as coverage. (saadqbal on client#747.)
+# but do not read its presence as coverage.
 TB_TELEMETRY_SOURCES="install.sh install-k8s.sh common.sh preflight.sh detect-gpu.sh gpu-nvidia.sh gpu-amd.sh setup-macos.sh setup-linux.sh cluster.sh k3s.sh k3s-firewall.sh mac-container.sh gpu-plugins.sh install-client-helm.sh install-cli.sh provision.sh assess.sh reinstall.sh probe.sh summary.sh diagnose.sh telemetry.sh"
 
 # ── The value shapes ─────────────────────────────────────────────────────────
@@ -139,11 +139,11 @@ TB_TELEMETRY_SOURCES="install.sh install-k8s.sh common.sh preflight.sh detect-gp
 #     ","tracebloc.install.injected":"yes",…
 #
 # — a forged attribute AND one record split across two lines of a `.jsonl` spool,
-# so the transport (backend#2217) reads two malformed events. It is the one shape the
+# so the transport reads two malformed events. It is the one shape the
 # "nowhere for a path to go" argument does not cover, because the value that
 # lands is not a path. `[[ $v =~ $RE ]]` anchors at end of STRING (POSIX
 # regexec, no REG_NEWLINE), so the same regex now refuses it. Reproduced on all
-# four shape checks before fixing; found by saadqbal on client#747.
+# four shape checks before fixing.
 #
 # The RHS must stay UNQUOTED — a quoted RHS is a literal string on bash 3.2+,
 # which is the system bash on macOS.
@@ -157,14 +157,14 @@ TB_TELEMETRY_KEY_RE='^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$'
 # came from a release. The generic token shape was not enough on its own —
 # `v1.9.3-<64 arbitrary chars>` satisfies it, which makes the version column a
 # 64-byte free-text channel. telemetry-vocabulary-agreement.sh checks this
-# against install.sh's — byte-for-byte AND, since client#747, verdict-for-verdict
+# against install.sh's — byte-for-byte AND verdict-for-verdict
 # over a corpus, each side evaluated by the operator its own file uses. The byte
 # check alone was not enough and said it was: the two regexes were identical
 # while install.sh's `[[ =~ ]]` refused an input this file's `grep -qE` admitted.
 TB_TELEMETRY_VERSION_RE='^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$'
 
 # How many events the local spool keeps. Bounded because it is a file on a
-# customer's machine that nothing drains until #1905's forwarder exists.
+# customer's machine that nothing drains until the host forwarder exists.
 # Settings naming: TRACEBLOC_TELEMETRY_SPOOL_MAX is canonical, TB_TELEMETRY_SPOOL_MAX
 # the legacy spelling (remove_by 2026-12-31); a non-empty canonical wins.
 TB_TELEMETRY_SPOOL_MAX="${TRACEBLOC_TELEMETRY_SPOOL_MAX:-${TB_TELEMETRY_SPOOL_MAX:-50}}"
@@ -186,7 +186,7 @@ _TB_TELEMETRY_EMITTED=""
 # touching the machine, and it was emitting a full install.run.succeeded: a free
 # success in the denominator of the exact failure RATE this whole ticket exists
 # to produce, and the one people run most while a real install is broken.
-# (Bugbot on client#747; reproduced — `install-k8s.sh --help` spooled an
+# (Reproduced — `install-k8s.sh --help` spooled an
 # install.run.succeeded with phase `bootstrap`.)
 #
 # A latch rather than a phase test, because a genuine failure in the bootstrap
@@ -206,7 +206,7 @@ telemetry_run_started() { _TB_TELEMETRY_RUN_STARTED=1; return 0; }
 # as `cancelled` with NO error.type, i.e. a hard failure REMOVED FROM THE
 # NUMERATOR of the rate this ticket exists to produce rather than misfiled
 # inside it. Silence is worse than a wrong label, and this is the direction
-# nobody notices. (saadqbal on client#747; reproduced end-to-end — a bare
+# nobody notices. (reproduced end-to-end — a bare
 # `grep -q x /nonexistent` in step b spooled install.run.cancelled, no
 # error.type, under the installer's own trap wiring.)
 #
@@ -230,8 +230,8 @@ _TB_TELEMETRY_RERUN_HANDOFF=""
 telemetry_rerun_handoff() { _TB_TELEMETRY_RERUN_HANDOFF=1; return 0; }
 
 # ── "the next run reports this install" ──────────────────────────────────────
-# In tracebloc's WSL distro install.ps1 runs this core twice for ONE install
-# (client-dev#1810 section 5): the cluster run exits 0 after step c, and the client
+# In tracebloc's WSL distro install.ps1 runs this core twice for ONE install:
+# the cluster run exits 0 after step c, and the client
 # run that follows carries the install to its outcome. Reported as it stands, the
 # cluster run's exit 0 is install.run.succeeded: a second success for one install,
 # and a success for an install whose client run may yet fail. So the cluster run
@@ -247,7 +247,7 @@ telemetry_run_handed_on() { _TB_TELEMETRY_RUN_STARTED=""; return 0; }
 # out — a user who typed TRACEBLOC_SKIP_TELEMETRY=please meant it, and guessing
 # wrong in the other direction sends a record they declined.
 #
-# UNION, not fallback (RFC-0076 settings-naming S9, backend#4027): every name is
+# UNION, not fallback (the settings-naming rule): every name is
 # read and ANY one set opts out. TRACEBLOC_SKIP_TELEMETRY is the canonical
 # spelling; TRACEBLOC_NO_TELEMETRY is the legacy alias, kept working until its
 # naming-canon.yml remove_by (2026-12-31) — do not drop it before then. Because
@@ -335,7 +335,7 @@ telemetry_phase_begin() {
 #     `prerequisites` and then killed or given up on.
 #
 # The remainder trick cannot recover it either, because bootstrap had no key at
-# all. Found by Bugbot on client#747; reproduced before fixing.
+# all. Reproduced before fixing.
 #
 # The live delta is ADDED here rather than written by a "close the phase" call in
 # the emit path, so render stays idempotent — the tests call it repeatedly, and a
@@ -402,7 +402,7 @@ telemetry_error_class() {
 
 # telemetry_environment — deployment.environment, or empty for "do not export".
 #
-# tb_client_env is the installer's own alias reduction (backend#1745); calling it
+# tb_client_env is the installer's own alias reduction; calling it
 # rather than re-deciding what `staging` means is what keeps this from becoming
 # a fifth declaration of that vocabulary. An unrecognised value is NOT repaired
 # and NOT guessed: §3.2 says a record filed under a value no query filters on is
@@ -440,7 +440,7 @@ _telemetry_reset() { _TB_TELEMETRY_BUF=""; }
 #    `printf ... | grep -q` under the installer's `set -o pipefail` returns 141
 #    (SIGPIPE) on a MATCH — a successful validation turned into a fatal that
 #    killed the whole run from inside the trap. Same defect, same fix as
-#    summary.sh's _diagnose_not_ready (backend#1778). `[[ =~ ]]` is a shell
+#    summary.sh's _diagnose_not_ready. `[[ =~ ]]` is a shell
 #    builtin with no pipe and no child, so that class cannot recur here at all.
 #    The bats test that drives install_cleanup for real is what caught it; every
 #    unit-level test of these functions passed throughout.
@@ -510,13 +510,12 @@ telemetry_render_event() {
   #
   # A DECLARED EXIT 2 IS NOT A FAILURE. It is the installer's "complete this step
   # and re-run" handoff — install_cleanup has treated it as its own outcome
-  # ("Re-run required") since client#681, and its one live producer is
+  # ("Re-run required") already, and its one live producer is
   # gpu-nvidia.sh:55, which exits 2 after install_nvidia_drivers SUCCEEDED, to ask
   # for a reboot. That call sits under step b, so folding it into failed booked
   # every unattended GPU host's first install as `prerequisites_failed` — a
   # fabricated prerequisite failure in the exact rate this ticket exists to
-  # produce. Same shape as the `--help` bug, opposite direction. (saadqbal on
-  # client#747; reproduced.)
+  # produce. Same shape as the `--help` bug, opposite direction. (Reproduced.)
   #
   # AN UNDECLARED ONE IS. The first version of this keyed on the number, and 2 is
   # not only ours: grep exits 2 on a file error, curl on a failed init, tar on a
@@ -525,8 +524,7 @@ telemetry_render_event() {
   # NUMERATOR rather than misfiled in it, which is the direction nobody notices.
   # So the branch keys on _TB_TELEMETRY_RERUN_HANDOFF, set at the `exit 2` site
   # itself, and an exit 2 nobody claimed falls through to failed with its own
-  # error.type (`unexpected_exit_2`). Fail closed toward counting it. (saadqbal on
-  # client#747; reproduced end-to-end before the change — see the marker's own
+  # error.type (`unexpected_exit_2`). Fail closed toward counting it. (Reproduced end-to-end before the change — see the marker's own
   # comment above.)
   #
   # 130/143 are the signal exits: install-k8s.sh's `trap 'exit 130' INT` IS their
@@ -589,7 +587,7 @@ telemetry_render_event() {
   _telemetry_attr "tracebloc.install.duration_ms" "$total" int
   _telemetry_attr "tracebloc.install.client_state" "$state"
 
-  # The #736 PATH case, as a number. install-cli.sh already computes this — it
+  # The PATH case, as a number. install-cli.sh already computes this — it
   # asks whether a FRESH login shell resolves `tracebloc` — and until now only
   # ever printed advice about it. 1/0 rather than true/false so it sums.
   case "${TRACEBLOC_CLI_ON_FRESH_PATH:-}" in
@@ -632,7 +630,7 @@ telemetry_render_event() {
     # is a confident wrong one: it reads as information, sorts and groups like
     # information, and points at line 9 of nothing. `?:118`, which the ERR trap
     # produces whenever BASH_SOURCE is empty, rendered exactly that.
-    # (Bugbot on client#747; reproduced — `"tracebloc.install.source_line":9`
+    # (Reproduced — `"tracebloc.install.source_line":9`
     # with no source key beside it.)
     #
     # DERIVED, not restated: the condition is _telemetry_source_basename's own
@@ -724,15 +722,13 @@ _telemetry_spool_path() {
   printf '%s/telemetry/pending.jsonl' "${HOST_DATA_DIR:-${HOME}/.tracebloc}"
 }
 
-# _telemetry_deliver JSON — THE TRANSPORT SEAM (tracebloc/backend#1905).
+# _telemetry_deliver JSON — THE TRANSPORT SEAM.
 #
 # Today: the install log, plus a bounded local spool. Nothing is posted anywhere
-# yet; the delivery half is backend#2217.
+# yet; the delivery half is a host transport not yet written.
 #
-# NOT #1906, AND THAT CORRECTION MATTERS MORE THAN THE TICKET NUMBER. Four
-# comments in this file used to say #1906's forwarder would read or drain these
-# files.
-# It cannot. #1906 is an OpenTelemetry Collector running as a pod INSIDE the
+# NOT THE CLUSTER'S COLLECTOR. The cluster-side forwarder cannot read or drain
+# these files: it is an OpenTelemetry Collector running as a pod INSIDE the
 # customer's Kubernetes cluster, reading container stdout through a `file_log`
 # receiver. Neither spool this function writes is container stdout and neither is
 # reachable from a pod: `$HOST_DATA_DIR/telemetry/pending.jsonl` and the
@@ -741,9 +737,8 @@ _telemetry_spool_path() {
 # fallback exists for (`validate_config`, `early_data_dir_guard`) happen when
 # there is no cluster to run a Collector in.
 #
-# So the host transport is its own piece of work, owned by backend#2217, and the
-# reason it was unowned for a while is precisely that these comments pointed at a
-# ticket that could never deliver it.
+# So the host transport is its own piece of work, separate from the cluster
+# Collector, which could never deliver these files.
 #
 # Everything before this function is finished. This function is the change.
 # _telemetry_fallback_dir — a directory whose contents survive this install.
@@ -757,7 +752,7 @@ _telemetry_spool_path() {
 # bootstrap's scratch dir, this file writes the record into it, and the bootstrap
 # deletes it the moment install-k8s.sh returns. The NFS refusal and every other
 # pre-setup_log_file failure then produced no record anywhere, which is the exact
-# hole the fallback was added to close. (saadqbal on client#747; reproduced
+# hole the fallback was added to close. (reproduced
 # end-to-end — the spooled file was gone after the bootstrap exited.)
 #
 # DERIVED, not agreed. The test is "is the running installer inside this
@@ -770,7 +765,7 @@ _telemetry_spool_path() {
 #
 # When TMPDIR is disqualified the record goes to $HOME — outside anything the
 # bootstrap's trap owns, and NOT into $HOME/.tracebloc, which is HOST_DATA_DIR
-# and which telemetry must never create (client#432, and the comment on
+# and which telemetry must never create (the network-data-dir refusal, and the comment on
 # _telemetry_deliver). /tmp is the last resort for a run with no usable HOME.
 _TB_TELEMETRY_SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd -P)" || _TB_TELEMETRY_SRC_DIR=""
 _telemetry_fallback_dir() {
@@ -812,15 +807,14 @@ _telemetry_deliver() {
   local json="$1" spool dir
   # The install log gets it WHERE THERE IS ONE. `log` is a no-op until
   # setup_log_file sets LOG_FILE, and setup_log_file runs AFTER validate_config
-  # and early_data_dir_guard — deliberately, because #432 refuses a network data
+  # and early_data_dir_guard — deliberately, because that guard refuses a network data
   # dir *before* logging starts.
   #
   # An earlier version of this function claimed the log "always" got the event.
   # It did not, and the consequence was the worst possible one: a run refused for
   # being on NFS is a real, actionable field failure, and it was the single case
   # that produced no record anywhere — invisible to the very failure rate this
-  # feature exists to produce. (Found by Bugbot on client#747, which also spotted
-  # that this file's own NFS test masked it by setting LOG_FILE=/dev/null.)
+  # feature exists to produce. (This file's own NFS test masked it by setting LOG_FILE=/dev/null.)
   log "telemetry: $json"
 
   # TELEMETRY MUST NOT CREATE HOST_DATA_DIR. An observer that changes the
@@ -830,14 +824,14 @@ _telemetry_deliver() {
   # unconditionally — including on the path where early_data_dir_guard had just
   # REFUSED that directory for being on a network filesystem and called `error`.
   # The guard skips an existing dir on purpose ("an EXISTING data dir has no
-  # at-risk mkdir here", client#441), so the next run saw the directory this
+  # at-risk mkdir here"), so the next run saw the directory this
   # trap had created, returned 0, and installed MySQL onto NFS — the exact
-  # corruption client#432 exists to prevent, reintroduced by the telemetry that
-  # was only supposed to watch. Found by Bugbot on client#747; reproduced.
+  # corruption that guard exists to prevent, reintroduced by the telemetry that
+  # was only supposed to watch. Reproduced.
   #
   # So: spool INTO the data dir only when it already exists — and when it does
-  # not, into a temp file rather than nowhere. backend#2217's transport reads
-  # both — NOT #1906's Collector, which is a pod and can reach neither file. See
+  # not, into a temp file rather than nowhere. the host transport reads
+  # both — NOT the cluster Collector, which is a pod and can reach neither file. See
   # the note on this function.
   #
   # AND A FAILED WRITE FALLS THROUGH, it does not return. Both of these steps
@@ -846,7 +840,7 @@ _telemetry_deliver() {
   # _choose_log_file has already fallen back to a mktemp log — and on curl|bash
   # that log is inside the bootstrap's own doomed TMPDIR — so `log` above kept
   # nothing either and the event was gone. The fallback existed and was
-  # unreachable exactly when it was needed. (Bugbot on client#747; reproduced both
+  # unreachable exactly when it was needed. (Reproduced both
   # halves — a 0500 data dir with no telemetry/ yet, and a spool path that cannot
   # be appended to. Neither produced a record anywhere.)
   #
@@ -889,10 +883,10 @@ _telemetry_deliver() {
 
 # _telemetry_trim_spool SPOOL — keep the data-dir spool bounded.
 #
-# Bounded because nothing drains it until backend#2217, and an unbounded append
+# Bounded because nothing drains it until the host transport exists, and an unbounded append
 # on a customer's disk is a defect we would be shipping on purpose. The trim is
-# `tail -n`, i.e. DROP-OLDEST — and that is deliberately NOT what RFC-BACKEND-1872
-# D7's overflow row now says. D7 was amended to drop-newest because
+# `tail -n`, i.e. DROP-OLDEST — and that is deliberately NOT what the telemetry
+# contract's overflow row says: it was amended to drop-newest because
 # `exporterhelper` sheds at the entrance and offers nothing else, which is a
 # constraint on the edge Collector's queue, not a preference. This spool is our
 # own code and can do what D7 originally wanted, so it does: the newest records
@@ -915,7 +909,7 @@ _telemetry_trim_spool() {
       # trap under 022. Nothing sensitive is in the
       # record by construction, so this is defence in depth; it is here because
       # a file this installer creates should not depend on which line it died
-      # on for its mode. (saadqbal on client#747; reproduced — spool 644.)
+      # on for its mode. (Reproduced — spool 644.)
       # BEFORE the mv, not after it: a chmod on the spool afterwards would
       # leave a window in which the file is world-readable, and — the thing
       # that matters more — a second chmod on the spool is unreachable belt and

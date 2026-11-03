@@ -20,9 +20,8 @@
   the problem is loud.
 */}}
 {{/*
-  THREE OUTCOMES, NOT TWO (backend#2469). The comment above used to say `lookup`
-  "returns empty during `helm template`", which is true, and then treated
-  connected-and-permitted as the only other case. There is a third: connected and
+  THREE OUTCOMES, NOT TWO. `lookup` returns empty during `helm template`, and
+  connected-and-permitted is not the only other case. There is a third: connected and
   FORBIDDEN, which RAISES rather than returning empty, and helm cannot catch it.
 
   `APIService` is cluster-scoped, and Kubernetes' built-in `admin` ClusterRole does
@@ -44,8 +43,8 @@
 
   The general rule: ANY new `lookup` of a resource the CURRENT ServiceAccount
   cannot already read locks the unattended path permanently. `apiservices` is
-  already granted (backend#953), so keeping that as the only privileged call is
-  what makes this safe. (Bugbot High on client#823.)
+  already granted, so keeping that as the only privileged call is
+  what makes this safe.
 
   `nodeAgents.metricsServerPreflight: false` is therefore the whole escape hatch,
   and it gates the ONLY privileged call rather than a fallback. It does not skip
@@ -67,13 +66,13 @@
     `default true false` returns TRUE -- metricsServerPreflight: false would never
     have taken this branch and the opt-out would have been inert while looking
     present. Exactly the "mechanism that appears to verify something but is not
-    connected to it" shape backend#1729 is about. (Bugbot Medium on client#823.)
+    connected to it" shape.
   */}}
   {{- if and (hasKey (default dict .Values.nodeAgents) "metricsServerPreflight") (not .Values.nodeAgents.metricsServerPreflight) -}}
     {{- $preflight = "skipped-by-values" -}}
   {{- else -}}
     {{- if not (lookup "apiregistration.k8s.io/v1" "APIService" "" "v1beta1.metrics.k8s.io") -}}
-      {{- fail "resourceMonitor is enabled but the metrics.k8s.io/v1beta1 API is not registered. Install metrics-server (https://github.com/kubernetes-sigs/metrics-server) or set resourceMonitor.enabled: false. See SECURITY.md.\n\nIf THIS line was instead an `apiservices ... is forbidden` error, the problem is the caller's RBAC, not metrics-server: APIService is cluster-scoped and the built-in `admin` ClusterRole excludes it. Set nodeAgents.metricsServerPreflight: false to skip this check, or run the upgrade with cluster-scope read on apiservices (backend#2469)." -}}
+      {{- fail "resourceMonitor is enabled but the metrics.k8s.io/v1beta1 API is not registered. Install metrics-server (https://github.com/kubernetes-sigs/metrics-server) or set resourceMonitor.enabled: false. See SECURITY.md.\n\nIf THIS line was instead an `apiservices ... is forbidden` error, the problem is the caller's RBAC, not metrics-server: APIService is cluster-scoped and the built-in `admin` ClusterRole excludes it. Set nodeAgents.metricsServerPreflight: false to skip this check, or run the upgrade with cluster-scope read on apiservices." -}}
     {{- end -}}
     {{- $preflight = "satisfied-by-apiservice" -}}
   {{- end -}}
@@ -87,7 +86,7 @@ metadata:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
     # WHICH check decided this render. A skipped preflight must not be
-    # indistinguishable from a passed one (client#2469).
+    # indistinguishable from a passed one.
     tracebloc.io/metrics-server-preflight: {{ $preflight | quote }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
@@ -96,12 +95,12 @@ spec:
   selector:
     matchLabels:
       app: {{ include "tracebloc.resourceMonitorName" . }}
-  # #569 (Bugbot): #569 made this DaemonSet a `kubectl set image` target, and the
+  # The image refresh makes this DaemonSet a `kubectl set image` target, and the
   # refresh tick then BLOCKS on `rollout status` for up to imageRefresh.rolloutTimeout
   # (10m). The Kubernetes default is maxUnavailable: 1 — strictly one node at a time —
   # so on a multi-node cluster a single digest change takes (nodes x pull+start time)
   # to converge and blows that wait long before the image is bad. The tick then fails,
-  # the digest annotation never advances, and three of those trip the #563 flap lockout
+  # the digest annotation never advances, and three of those trip the flap lockout
   # for every control-plane image, not just this one.
   #
   # 10% widens the wave enough that rollout time scales with the cluster instead of
@@ -162,7 +161,7 @@ spec:
             only on the registry it was resolved on).
           */}}
           image: {{ include "tracebloc.controlPlaneImage" (dict "image" "resourceMonitor" "root" $) | quote }}
-          # #569: IfNotPresent wherever an update path exists without `Always` --
+          # IfNotPresent wherever an update path exists without `Always` --
           # see tracebloc.controlPlanePullPolicy. `Always` made every node's pod
           # re-pull on restart, so an offline restart wedged the DaemonSet in
           # ImagePullBackOff fleet-wide. This DaemonSet previously had NO
@@ -184,7 +183,7 @@ spec:
             - name: host-sys
               mountPath: /host/sys
               readOnly: true
-            # The node's filesystem, for the Storage meter (backend#3762). The
+            # The node's filesystem, for the Storage meter. The
             # cockpit shows the WHOLE storage available to the client, not
             # `client-pvc`: `pvc.data` is a request, not a reservation, so on the
             # hostPath / local-path setups this chart supports it describes a
@@ -204,7 +203,7 @@ spec:
               readOnly: true
             {{- if $datasetPath }}
             # The DATASET filesystem, when datasets were relocated off the local
-            # tree (backend#3916). The meter measures the client's storage, and
+            # tree. The meter measures the client's storage, and
             # `hostStoragePath` above names one filesystem -- on a
             # TRACEBLOC_HOST_DATASET_DIR (old name HOST_DATASET_DIR still works)
             # install the datasets, the one thing that grows without anyone
@@ -242,7 +241,7 @@ spec:
               value: {{ .Release.Namespace | quote }}
             - name: TRACEBLOC_MONITOR_INTERVAL
               value: "30"
-            # The egress gate, which the heartbeat goes through (RFC-0324 D2).
+            # The egress gate, which the heartbeat goes through.
             - name: TRACEBLOC_REQUESTS_PROXY_URL
               value: {{ include "tracebloc.egressGateSendUrl" . | quote }}
             {{- if $datasetPath }}
@@ -266,7 +265,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
                   key: TRACEBLOC_CLIENT_PASSWORD
-            {{- /* Corporate egress proxy (client-runtime#154): resource-monitor
+            {{- /* Corporate egress proxy: resource-monitor
                  was the only backend-calling workload without proxyEnv, so its
                  auth/heartbeat POSTs dialed direct and failed behind a proxy.
                  Renders nothing when HTTP_PROXY_HOST is unset. requests honours
@@ -274,11 +273,11 @@ spec:
                  cluster-internal ranges, and the k8s python client ignores
                  ambient proxy env, so in-cluster calls are unaffected. */ -}}
             {{- include "tracebloc.proxyEnv" . | nindent 12 }}
-            {{- /* Why the GPU was left off as unsupported (client-dev#1633): the
-                 monitor puts both on every heartbeat (client-runtime#879).
+            {{- /* Why the GPU was left off as unsupported: the
+                 monitor puts both on every heartbeat.
                  Renders nothing unless an installer set them. */ -}}
             {{- include "tracebloc.gpuUnsupportedEnv" . | nindent 12 }}
-            {{- /* The host's OS (client-runtime#914), sent on every heartbeat as
+            {{- /* The host's OS, sent on every heartbeat as
                  `os`. Renders nothing unless an installer set it. */ -}}
             {{- include "tracebloc.hostOsEnv" . | nindent 12 }}
             {{- /* The machine's kind, cloud and CPU name, read by the installer
@@ -318,7 +317,7 @@ spec:
         # `type: Directory`, not DirectoryOrCreate, and deliberately: creating a
         # missing dataset mount would hand the meter a fresh empty directory on
         # the ROOT disk and read it as the dataset volume -- a wrong number
-        # reported confidently, which is the defect backend#3916 is about. Fail
+        # reported confidently, which is the defect to avoid. Fail
         # visibly instead. The installer's node sees the host's folders at their
         # own paths (native k3s is the host; the macOS node mounts them), so the
         # path is on the node in the flows that set this.

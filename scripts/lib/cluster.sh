@@ -10,7 +10,7 @@
 _ensure_tracebloc_dirs() {
   mkdir -p "$HOST_DATA_DIR" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql"
   chmod -R 777 "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql" 2>/dev/null || true
-  # backend#743: the dataset dir goes under HOST_DATASET_DIR (a network mount,
+  # the dataset dir goes under HOST_DATASET_DIR (a network mount,
   # bind-mounted at /tracebloc-data) when set, else stays local under HOST_DATA_DIR.
   local data_base="${HOST_DATASET_DIR:-$HOST_DATA_DIR}"
   mkdir -p "$data_base/data"
@@ -20,7 +20,7 @@ _ensure_tracebloc_dirs() {
 # Modes the two SHARED hostPath dirs must end up with. Named constants because the
 # same pair is spelled out in the chart's init-writable-data
 # (client/templates/jobs-manager-deployment.yaml) too, and the two have to be
-# diffable by eye rather than drifting (#667, #673); hostpath-prep.bats holds them
+# diffable by eye rather than drifting; hostpath-prep.bats holds them
 # equal.
 #
 # Both get setgid (2) so new entries inherit the group. They differ in the sticky bit,
@@ -28,7 +28,7 @@ _ensure_tracebloc_dirs() {
 #   data -> 2777  setgid + world-write, NO sticky. Sticky permits an unlink only by the
 #                 entry's owner, the dir's owner, or root; `data delete` removes a tree
 #                 the INGEST wrote (uid 65534) from a pod running as 65532, so sticky
-#                 here makes the delete impossible — table dropped, files stranded (#667).
+#                 here makes the delete impossible — table dropped, files stranded.
 #   logs -> 3777  setgid + sticky. Nothing has to delete another writer's logs, so the
 #                 /tmp-style protection costs nothing there.
 TB_SHARED_DIR_MODE="2777"
@@ -36,14 +36,14 @@ TB_LOGS_DIR_MODE="3777"
 
 # Echo the path:mode pairs this release needs, one per line — the same shape the chart's
 # init-writable-data uses, so hostpath-prep.bats can diff the two without re-deriving the
-# layout (#673).
+# layout.
 #
-# backend#743: the dataset dir goes under HOST_DATASET_DIR (network mount) when set, else
+# the dataset dir goes under HOST_DATASET_DIR (network mount) when set, else
 # stays local. logs (and mysql, below) always stay on the local HOST_DATA_DIR.
 _release_dirs_spec() {
   local release="$1"
   # An installed native-k3s hostpath release keeps the root and dataset dir it was made
-  # with (_native_k3s_release_storage, client-dev#1782): those are the dirs its PVs name,
+  # with (_native_k3s_release_storage): those are the dirs its PVs name,
   # so those are the ones to prepare, not this run's. _hostpath_root is HOST_DATA_DIR
   # unless a release's root is kept.
   local root; root="$(_hostpath_root)"; root="${root:-$HOST_DATA_DIR}"
@@ -68,7 +68,7 @@ _ensure_release_dirs() {
   # mysql is deliberately left on the flat recursive 777 this function has always used:
   # it has ONE writer (uid 999) and its own init container in the chart, and its datadir
   # permissions are the database's business — the same reason it is out of scope for
-  # init-writable-data (#654, #673).
+  # init-writable-data.
   mkdir -p "$base/mysql"
   chmod -R 777 "$base/mysql" 2>/dev/null || true
   local entry dir mode
@@ -124,7 +124,7 @@ _node_proxy_env() {
   printf 'NO_PROXY=%s\nno_proxy=%s\n' "$no_proxy_val" "$no_proxy_val"
 }
 
-# --- Corporate MITM CA trust for in-node containerd pulls (#424) --------------
+# --- Corporate MITM CA trust for in-node containerd pulls --------------
 # Proxy REACHABILITY reaches the nodes (above), but on a TLS-inspecting network
 # the nodes still don't TRUST the corporate CA, so every in-node containerd pull
 # (rancher/k3s, tracebloc images) fails x509 — then masked into a
@@ -166,13 +166,13 @@ _resolve_ca_bundle() {
 }
 
 # Wire the resolved corporate CA into the HOST tools that do NOT honor a CA env on
-# their own (#583). git (OpenSSL-backed) honors GIT_SSL_CAINFO on Linux + macOS. The
+# their own. git (OpenSSL-backed) honors GIT_SSL_CAINFO on Linux + macOS. The
 # Go tools (cosign/helm) read SSL_CERT_FILE on LINUX only — on macOS Go uses the
 # system Keychain and IGNORES SSL_CERT_FILE (Bugbot), so there the CA must live in the
-# Keychain (or use the offline path, #584). curl ALREADY honors the user's own
+# Keychain (or use the offline path). curl ALREADY honors the user's own
 # CURL_CA_BUNDLE natively, so we do NOT re-export it (it's replace-not-augment, and a
 # corp-root-only bundle would drop the public roots). The node is trusted
-# separately, through registries.yaml (#424). Idempotent; no-op when no CA is configured;
+# separately, through registries.yaml. Idempotent; no-op when no CA is configured;
 # fails fast on a set-but-unreadable bundle. The announce names only what actually
 # takes effect on this platform.
 wire_ca_trust() {
@@ -206,7 +206,7 @@ wire_ca_trust() {
   # install-k8s.sh) or the operator set it to the same file -- is WIRED, not a
   # foreign pre-set to keep-and-verify. Reporting it as "keeping your pre-set, verify
   # it" was misleading for a value the installer itself set, and hid the cosign/helm
-  # wiring (Bugbot client#631). Only a DIFFERENT pre-set bundle takes the kept branch.
+  # wiring. Only a DIFFERENT pre-set bundle takes the kept branch.
   # `-ef` compares by file identity, robust to relative/absolute/symlink differences.
   if [[ -z "${SSL_CERT_FILE:-}" || "${SSL_CERT_FILE}" -ef "$ca" ]]; then
     export SSL_CERT_FILE="$ca";  wired="cosign, helm"
@@ -223,17 +223,17 @@ wire_ca_trust() {
   return 0
 }
 
-# --- kubelet config drop-in (backend#2634, mechanism shared with backend#2460) ---
+# --- kubelet config drop-in (one file, shared with the node reservation below) ---
 #
 # WHY A CONFIG FILE AND NOT `--kubelet-arg` (read before "simplifying" this)
 # `EvictionHard`, `KubeReserved` and `SystemReserved` are MAPS and the kubelet
 # replaces them WHOLESALE. k3s ships `imagefs.available` / `nodefs.available`
 # defaults, so a CLI write of one eviction key silently drops both disk
-# thresholds -- the failure backend#2223 and backend#2443 exist to prevent.
+# thresholds -- the failure this file exists to prevent.
 # `scripts/tests/kubelet-arg-map-safety.sh` refuses those settings as CLI args
 # for exactly this reason. Image GC is scalar and would survive the CLI, but it
 # has to live beside the eviction thresholds it interacts with (`imagefs`
-# governs both), and #2460 needs the maps here anyway. One file, authored whole.
+# governs both), and the node reservation needs the maps here anyway. One file, authored whole.
 #
 # MEASURED, not assumed (2026-08-31, k3d v5.8.3 / rancher/k3s:v1.36.3-k3s1,
 # server + agent): with this file mounted and `--kubelet-arg=config=` pointing at
@@ -246,7 +246,7 @@ wire_ca_trust() {
 # 00-k3s-defaults.conf` and copies the file named by `--kubelet-arg=config=` into
 # the same directory as `10-cli-config.conf`. The kubelet merges config-dir
 # drop-ins in lexical order, KEY BY KEY -- so this file already IS the drop-in
-# backend#2460 asked for, and a map it sets is merged with k3s's, not swapped for
+# the node reservation needs, and a map it sets is merged with k3s's, not swapped for
 # it: a probe writing `evictionHard: {memory.available: 500Mi, imagefs.available:
 # 7%}` read back as {imagefs 7%, memory.available 500Mi, nodefs.available 5%} --
 # k3s's untouched `nodefs` key survived. (An earlier version of this comment said
@@ -276,7 +276,7 @@ TB_KUBELET_IMAGE_GC_HIGH_PERCENT=75
 TB_KUBELET_IMAGE_GC_LOW_PERCENT=60
 TB_KUBELET_IMAGE_MIN_GC_AGE="2m"
 
-# --- the node reservation (backend#2460) ---------------------------------------
+# --- the node reservation ---------------------------------------
 #
 # On every node this installer has ever provisioned, `allocatable == capacity`:
 # k3s sets no kube-reserved, no system-reserved and no memory eviction threshold
@@ -337,7 +337,7 @@ TRACEBLOC_KUBELET_SYSTEM_RESERVED_MEM_MIB_WINDOWS_K3S=1024
 TRACEBLOC_KUBELET_EVICTION_MEM_MIB=256
 # ── end generated reservation ─────────────────────────────────────────────────
 
-# Where native k3s reads it (RFC-0175 D4): the host IS the node, so there is no
+# Where native k3s reads it: the host IS the node, so there is no
 # mount, and this one path is both what the writer writes and what k3s.sh's
 # config.yaml names in `kubelet-arg: config=`. Mode 0644, so the e2e readback
 # (e2e_assert_node_reservation) can read it without root.
@@ -356,11 +356,11 @@ _kubelet_config_path() {
 # can drive the writer as either platform (and as one with no record) on whatever
 # host runs the tests.
 #
-# NOT THE KERNEL NAME (backend#3861). Inside a WSL2 distro `uname -s` is `Linux`,
+# NOT THE KERNEL NAME. Inside a WSL2 distro `uname -s` is `Linux`,
 # so a kernel-name key would select TRACEBLOC_KUBELET_*_LINUX, a row measured on a
 # Linux host, for a node inside the WSL2 VM. The measurement harness
 # (scripts/tests/measure-node-reservation.sh) stopped believing that rule under
-# client#1078; this is the apply side learning the same distinction, through the
+# a later change; this is the apply side learning the same distinction, through the
 # SAME detector (`_probe_wsl`, scripts/lib/probe.sh) rather than a copy of it.
 # Inside WSL only native k3s has a key; any other substrate there is `unknown`, a
 # run the installer refuses (refuse_wsl_run, common.sh), and no row is measured for
@@ -375,22 +375,22 @@ _kubelet_config_path() {
 #
 # NATIVE k3s IS ITS OWN KEY, `linux_k3s` (TRACEBLOC_SUBSTRATE_RESOLVED=k3s on Linux outside WSL).
 # It is measured on native k3s itself, on Ubuntu 22.04 and 24.04, amd64 and arm64
-# (client-dev#1469). The `linux` key was a k3d node on Linux outside WSL, which
+# . The `linux` key was a k3d node on Linux outside WSL, which
 # slim client 4.1 retired: its three records went with it, so the table has no
 # `linux` row, and k3d on Linux outside WSL is `unknown`, as wherever the create
 # path refuses the host (install_linux refuses it first). A run that reached it
 # would reserve nothing and say so, never borrow `linux_k3s`, a number measured on
 # another substrate (rule 1).
 #
-# k3s ON A MAC IS `darwin_k3s` (slim client 2.1, tracebloc/client-dev#1615): the node
+# k3s ON A MAC IS `darwin_k3s` (slim client 2.1): the node
 # is one k3s container in an Apple container VM (mac-container.sh), measured as
 # that (scripts/spec/node-reservation/darwin-arm64-k3s.json, on the macOS node).
 # It is a Mac's only key: a Mac gets no other substrate since slim client 4.1
-# (TB_SUBSTRATE_RETIRED_MACOS, client-dev#1948), so any other one there is `unknown`,
+# (TB_SUBSTRATE_RETIRED_MACOS), so any other one there is `unknown`,
 # the answer the measurement harness's own refusal of it agrees with.
 #
 # k3s INSIDE WSL IS `windows_k3s` in tracebloc's own distro (_probe_wsl_ours,
-# client-dev#1810 part 2): the generator's own key for a record the harness stamps
+# the Windows installer's second run): the generator's own key for a record the harness stamps
 # Windows (a WSL2 shell) on substrate k3s
 # (gen-node-reservation-embed.sh --key Windows k3s). Measured in that distro on
 # Windows Server 2025 (windows-amd64-wsl2-server-2025-k3s.json, e2e-test-agent run
@@ -439,7 +439,7 @@ _kubelet_reservation_measured() {
 }
 
 # The warning for a platform with no measured reservation, said ONCE per run
-# (backend#2460: the operator is told rather than handed a number borrowed from
+# (the operator is told rather than handed a number borrowed from
 # another platform; "cannot tell" is a finding, not a default). Every step that
 # learns it calls this, so one install never warns twice about the same node:
 # on native k3s the pre-create fit gate. Silent for a measured platform.
@@ -512,7 +512,7 @@ _kubelet_reservation_values() {
 # process substitution was an asynchronous child, its SIGCHLD landed while the
 # lines after it were being printed into the caller's pipe, and bash 3.2's
 # printf reports the interrupted write (EINTR) rather than retrying it: macOS
-# runners failed the install on it (client-dev#1564).
+# runners failed the install on it.
 _render_kubelet_config() {
   local platform out line
   platform="$(_kubelet_reservation_platform)"
@@ -554,13 +554,13 @@ _export_host_no_proxy() {
   done
 }
 
-# ── Leftover-data guard (RFC-0003 §4 / D3, #376) ─────────────────────────────
+# ── Leftover-data guard ─────────────────────────────
 # The installer used to `mkdir -p` its data dirs and silently adopt whatever was
 # already there — data left by an earlier install (different layout, older
 # version, custom dir) got picked up by the next install, so a "fresh" install
 # was not guaranteed fresh. This guard detects real leftover data at install
 # time and forces a choice instead of adopting it. It doubles as the migration
-# prompt for the node-local transition (#367): existing ~/.tracebloc data is
+# prompt for the node-local transition: existing ~/.tracebloc data is
 # never silently stranded.
 #
 # Where prompts READ from (mirrors provision.sh/install-client-helm.sh so the
@@ -573,7 +573,7 @@ _export_host_no_proxy() {
 # `curl|bash`), so `-r` would route those runs into the interactive branch where
 # the `read` then fails immediately and the guard aborts with the generic abort
 # text instead of the non-interactive guidance that lists --reuse-data/--wipe-data
-# (Bugbot #384). Mirrors the openability probe assess.sh already uses.
+# . Mirrors the openability probe assess.sh already uses.
 _tty_usable() { { : <"$TRACEBLOC_TTY"; } 2>/dev/null; }
 
 # Echo each dir under HOST_DATA_DIR that holds real client data — a MySQL data
@@ -606,12 +606,12 @@ _leftover_data_dirs() {
     # Skip symlinked per-release dirs: base is physically resolved (validate_config
     # uses `cd -P`), so a real subdir can't escape it — but a symlink could point
     # anywhere, and $base/<link>/mysql would let the wipe's rm -rf follow it
-    # outside HOST_DATA_DIR (Bugbot #384). Not walking symlinks keeps scope honest.
+    # outside HOST_DATA_DIR. Not walking symlinks keeps scope honest.
     [[ -d "$sub" && ! -L "${sub%/}" ]] || continue
     # Skip the flat-layout data dirs themselves — they are already candidates
     # above. Descending into them would mislabel a real MySQL datadir's nested
     # `mysql` system schema ($base/mysql/mysql) as a second leftover root, which
-    # confuses the prompt and doubles up wipe targets (Bugbot #384).
+    # confuses the prompt and doubles up wipe targets.
     case "${sub%/}" in "$base/mysql"|"$base/data") continue ;; esac
     # Likewise a volume the native scan already named: when the operator's data dir
     # IS the storage path, a pvc-* volume is a root, and the `mysql` system schema
@@ -622,12 +622,12 @@ _leftover_data_dirs() {
   local d
   for d in "${candidates[@]}"; do  # set-u-safe: seeded with mysql and data at its declaration
     # ! -L: never treat a symlink as a data dir — it would let the wipe traverse
-    # outside HOST_DATA_DIR (Bugbot #384). A symlinked data path is out of scope.
+    # outside HOST_DATA_DIR. A symlinked data path is out of scope.
     [[ -d "$d" && ! -L "$d" ]] || continue
 
     # Fail closed on an unlistable dir: a root/container-owned mysql/data dir the
     # host user can't read/enter can't be proven empty, so treat it as a leftover
-    # rather than mistake it for a clean slate and adopt it (Bugbot #384; same
+    # rather than mistake it for a clean slate and adopt it (same
     # ownership case the wipe path treats as fatal). This is the common shape —
     # the whole data dir is owned by the container uid. No temp file, so it can't
     # itself fail open (an earlier mktemp-based version could when mktemp failed).
@@ -766,7 +766,7 @@ _read_sanitized() {
 # storage path, and every removal and its check run as root (through sudo; k3s owns
 # the volumes). It never runs while the k3s service may be running.
 _wipe_leftover_data() {
-  # Belt-and-suspenders (Lukas review, #384): never wipe unless HOST_DATA_DIR is
+  # Belt-and-suspenders: never wipe unless HOST_DATA_DIR is
   # a non-empty path strictly under $HOME — exactly what validate_config enforces.
   # This guards the rm below even if a future refactor ever calls the guard before
   # validate_config: an empty HOST_DATA_DIR would collapse the "$HOST_DATA_DIR"/*
@@ -852,7 +852,7 @@ guard_leftover_data() {
   # Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) words each line for its own storage: the data
   # lies in the storage path as well as HOST_DATA_DIR (_leftover_where). Under
   # node-local (native_nl) a fresh install gives its volumes new directories, so
-  # nothing found is adopted. Under hostpath (client-dev#1782) the chart's PVs name
+  # nothing found is adopted. Under hostpath the chart's PVs name
   # HOST_DATA_DIR itself, so what lies there IS adopted; only a k3s
   # volume (pvc-*) is not.
   local where k3s="" native_nl="" frozen=""
@@ -876,20 +876,20 @@ guard_leftover_data() {
   [[ -n "$k3s" && "${TB_K3S_PREPARED:-}" == 1 ]] && wipe=""
   warn "Existing tracebloc data found under ${where}:"
   # vols: a native scan's volume is a pvc-* directory; the data dir scan only ever
-  # yields .../mysql and .../data (client-dev#1782).
+  # yields .../mysql and .../data.
   local vols="" kept=""
   for d in "${found[@]}"; do hint "  • ${d}"; case "${d##*/}" in pvc-*) vols=1 ;; *) kept=1 ;; esac; done  # set-u-safe: the empty-found check above returns first
   # hostpath on native k3s never mounts a k3s volume, so every line below words what
-  # was found (Bugbot on #1790): only k3s volumes (hp_vols=all) and nothing is
+  # was found: only k3s volumes (hp_vols=all) and nothing is
   # adopted; k3s volumes beside data under HOST_DATA_DIR (some) and only the data is.
   local hp_vols=""
   if [[ -n "$k3s" && "${TB_STORAGE_MODE:-node-local}" == "hostpath" && -n "$vols" ]]; then
     if [[ -n "$kept" ]]; then hp_vols=some; else hp_vols=all; fi
   fi
   # The "silently adopt" warning is true ONLY for hostpath. Under node-local (the
-  # default since D15, client#456) a fresh install does NOT adopt this data — the
+  # default since the storage-model flip) a fresh install does NOT adopt this data — the
   # cluster starts empty in-node and the host data is stranded. Leading with the
-  # adopt claim there would contradict the very next line (client#456 Bugbot).
+  # adopt claim there would contradict the very next line.
   if [[ -n "$native_nl" ]]; then
     hint "A fresh native k3s install does NOT adopt this data: its volumes get new directories, so the data would be stranded, not used."
   elif [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
@@ -911,7 +911,7 @@ guard_leftover_data() {
         hint "  [r] keep  — leave the existing data on disk, unused (a fresh install starts empty; it is NOT adopted)"
       elif [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
         # node-local can't adopt the host data (no /tracebloc bind-mount) — the
-        # cluster starts empty in-node — so don't offer "reuse = adopt" here (#367).
+        # cluster starts empty in-node — so don't offer "reuse = adopt" here.
         hint "  [r] keep  — leave the existing data on disk, unused (node-local starts empty; it is NOT adopted)"
       elif [[ "$hp_vols" == all ]]; then
         hint "  [r] keep  — leave the k3s volumes on disk, unused (hostpath does not mount them; they are NOT adopted)"
@@ -970,8 +970,8 @@ guard_leftover_data() {
         hint "Your existing data is left on disk, untouched but unused. Re-ingest it after setup ('tracebloc data ingest')."
         log "native k3s: left ${where} on disk (NOT adopted)."
       elif [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
-        # node-local starts empty in-node — the host data is NOT adopted (RFC-0003
-        # §4 / #367). Keep the files on disk but say so plainly, so "reuse" never
+        # node-local starts empty in-node — the host data is NOT adopted (the local
+        # storage model). Keep the files on disk but say so plainly, so "reuse" never
         # silently claims an adoption that node-local can't actually do.
         warn "node-local storage can't adopt ${HOST_DATA_DIR} — the new cluster starts empty inside the node."
         hint "Your existing data is left on disk, untouched but unused. Re-ingest it after setup ('tracebloc data ingest'), or use hostpath storage (TRACEBLOC_STORAGE_MODE=hostpath) to keep using it in place."
@@ -1071,12 +1071,12 @@ _TB_LOCAL_API_HOST_PORT_DEFAULT="47910"
 _TB_LOCAL_API_NODE_PORT_DEFAULT="30910"
 # The NodePort range the chart's values.schema.json allows for localApi.nodePort
 # (Kubernetes' default service-node-port-range); local-api-port.bats holds them to
-# the schema (client-dev#1688).
+# the schema.
 _TB_LOCAL_API_NODE_PORT_MIN="30000"
 _TB_LOCAL_API_NODE_PORT_MAX="32767"
 # Overridable, for a host whose 47910 is spoken for, and resolved IN PLACE: the
 # TRACEBLOC_ name is both the env input and the value every reader reads
-# (backend#3846 folded the TB_-prefixed internal copies into it; TB_ is banned).
+# (the TB_-prefixed internal copies into it; TB_ is banned).
 TRACEBLOC_LOCAL_API_HOST_PORT="${TRACEBLOC_LOCAL_API_HOST_PORT:-$_TB_LOCAL_API_HOST_PORT_DEFAULT}"
 TRACEBLOC_LOCAL_API_NODE_PORT="${TRACEBLOC_LOCAL_API_NODE_PORT:-$_TB_LOCAL_API_NODE_PORT_DEFAULT}"
 TB_LOCAL_API_MAPPED=0
@@ -1090,7 +1090,7 @@ _local_api_wanted() {
 
 # Whether something on this machine already listens on the host port. A
 # connect that succeeds means busy; bash's /dev/tcp works in 3.2 as well.
-# Bounded (client-dev#1664): /dev/tcp has no connect timeout of its own, so a
+# Bounded: /dev/tcp has no connect timeout of its own, so a
 # listener whose backlog is full -- a SYN nobody answers -- held the install for
 # the kernel's whole SYN-retry window. The deadline (1 s) reads as "not busy".
 _local_api_host_port_busy() {
@@ -1101,9 +1101,9 @@ _local_api_host_port_busy() {
 # Whether both ports are ones the install can take (digits only): the host port
 # any TCP port (1..65535), the node port one the chart's schema accepts
 # (30000..32767) -- anything else reaches the node and fails `helm install` on
-# localApi.nodePort (client-dev#1688). The overrides are free text; a bad one must
+# localApi.nodePort. The overrides are free text; a bad one must
 # turn the feature off, never reach the node's create and fail the install
-# (client-dev#1665).
+# .
 _local_api_port_valid() {
   local p="$TRACEBLOC_LOCAL_API_HOST_PORT" n="$TRACEBLOC_LOCAL_API_NODE_PORT"
   [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1

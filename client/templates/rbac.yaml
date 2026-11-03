@@ -35,8 +35,8 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
     verbs: ["get", "list"]
-  # backend#1876: jobs-manager's check_pending_jobs GPU->CPU fallback
-  # (client-runtime#217) calls list_node() to decide whether an overdue
+  # jobs-manager's check_pending_jobs GPU->CPU fallback
+  # calls list_node() to decide whether an overdue
   # Pending GPU pod is waiting for a GPU node to autoscale in (leave it) or
   # genuinely has no GPU node (downgrade to CPU). `nodes` is cluster-scoped,
   # so — like tokenreviews below — it can only be granted here, in the
@@ -46,7 +46,7 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["list"]
-  # client-runtime#21: jobs-manager's POST /internal/submit-ingestion-run
+  # jobs-manager's POST /internal/submit-ingestion-run
   # endpoint authenticates callers (the ingestor subchart's post-install
   # hook) via TokenReview, then creates a per-run ConfigMap (ingest.yaml)
   # and Secret (BACKEND_TOKEN) before spawning the ingestor Job.
@@ -61,16 +61,16 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps", "secrets"]
     # `get` is required by jobs-manager's orphan-resource verify path
-    # (client-runtime#52) and the missing-row self-heal (client-runtime#54):
+    # and the missing-row self-heal:
     # on a create-409 it reads the existing ConfigMap/Secret to confirm the
     # content matches before reusing it. Without `get`, those reads return
     # Forbidden and the endpoint 500s instead of the intended 409/replay.
     verbs: ["create", "get"]
 {{- if (include "tracebloc.stopKindSignalEnabled" .) }}
-  # Stop-kind signal (client-runtime#882): jobs-manager's stop_job annotates
+  # Stop-kind signal: jobs-manager's stop_job annotates
   # each of the Job's pods with tracebloc.io/stop-kind (pause | stop) before the
   # Foreground delete; the training pod reads it through a downward-API file and
-  # exits 0 on a pause (tracebloc-engine#1588). Without `patch` the annotation
+  # exits 0 on a pause. Without `patch` the annotation
   # 403s (logged, the stop still runs) and a pause ends as Error. Gated on the
   # same switch the runtime reads (stopKindSignal, on by default; trainingResume
   # implies it), so an install that turns the signal off grants nothing it does
@@ -84,13 +84,13 @@ rules:
   # per-job cred Secret. `delete` alone handles delete-by-name at Job end, but
   # the orphan reaper must LIST cred Secrets to find any whose Job died before
   # cleanup — without `list` that enumeration 403s and orphaned credential
-  # material accumulates in etcd (backend#2692). Same shape as the perDatasetPvcs
+  # material accumulates in etcd. Same shape as the perDatasetPvcs
   # GC grant (`list` + `delete`). `list` on secrets does widen exposure
   # namespace-wide, so it stays a deliberate, flag-gated grant scoped to
   # `secrets` alone (never configmaps) — least privilege, and byte-for-byte
   # unchanged when off (Saqlain review).
   #
-  # `patch` IS THE SECOND CYCLE (backend#2795). Cycle 1 CREATES the cred Secret
+  # `patch` IS THE SECOND CYCLE. Cycle 1 CREATES the cred Secret
   # and is covered by `create` above; cycle 2 reuses the experiment's Secret and
   # PATCHES it, which nothing here granted. Measured on dev, experiment 15044:
   #
@@ -115,7 +115,7 @@ rules:
     verbs: ["list", "delete", "patch"]
 {{- end }}
 {{- if .Values.perDatasetPvcs }}
-  # Per-dataset PVCs only (RFC-0003 D9 Track B, client-runtime#203/#261):
+  # Per-dataset PVCs only:
   # jobs-manager provisions one static hostPath PV + pre-bound PVC per
   # dataset handle before spawning a training Job (`create`; PV `get`/`patch`
   # to recover a Released PV's claimRef for reuse) and garbage-collects
@@ -175,7 +175,7 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
     verbs: ["get", "list"]
-  # client-runtime#21: ingestion endpoint creates a per-run ConfigMap
+  # ingestion endpoint creates a per-run ConfigMap
   # (ingest.yaml) and Secret (BACKEND_TOKEN) before spawning the Job.
   # TokenReview is omitted here (cluster-scoped API; not grantable by a
   # namespace Role). Customers using clusterScope: false won't be able
@@ -183,14 +183,14 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps", "secrets"]
     # `get` is required by jobs-manager's orphan-resource verify path
-    # (client-runtime#52) and the missing-row self-heal (client-runtime#54):
+    # and the missing-row self-heal:
     # on a create-409 it reads the existing ConfigMap/Secret to confirm the
     # content matches before reusing it. Without `get`, those reads return
     # Forbidden and the endpoint 500s instead of the intended 409/replay.
     verbs: ["create", "get"]
 {{- if (include "tracebloc.stopKindSignalEnabled" .) }}
   # Stop-kind signal: the same gated grant as the ClusterRole branch above
-  # (client-runtime#882) -- pods are namespaced, so a Role can.
+  # -- pods are namespaced, so a Role can.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["patch"]
@@ -200,13 +200,13 @@ rules:
   # per-job cred Secret. `delete` alone handles delete-by-name at Job end, but
   # the orphan reaper must LIST cred Secrets to find any whose Job died before
   # cleanup — without `list` that enumeration 403s and orphaned credential
-  # material accumulates in etcd (backend#2692). Same shape as the perDatasetPvcs
+  # material accumulates in etcd. Same shape as the perDatasetPvcs
   # GC grant (`list` + `delete`). `list` on secrets does widen exposure
   # namespace-wide, so it stays a deliberate, flag-gated grant scoped to
   # `secrets` alone (never configmaps) — least privilege, and byte-for-byte
   # unchanged when off (Saqlain review).
   #
-  # `patch` IS THE SECOND CYCLE (backend#2795). Cycle 1 CREATES the cred Secret
+  # `patch` IS THE SECOND CYCLE. Cycle 1 CREATES the cred Secret
   # and is covered by `create` above; cycle 2 reuses the experiment's Secret and
   # PATCHES it, which nothing here granted. Measured on dev, experiment 15044:
   #
@@ -298,7 +298,7 @@ roleRef:
 {{- end }}
 ---
 {{/*
-  RFC-0185 §8 Q5, option 1. For each Mac GPU job, jobs-manager creates a Role
+  For each Mac GPU job, jobs-manager creates a Role
   that may `get` that job's db-creds Secret by name, and a RoleBinding of it to
   the runner's ServiceAccount (tracebloc-runner). It creates both before the
   Job, patches ownerReferences onto them so they go with the Job, and deletes

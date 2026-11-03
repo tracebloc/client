@@ -1,9 +1,8 @@
 # =============================================================================
-#  install-wsl.ps1 -- the Windows distro path (RFC-0175 D2, D7; client-dev#1810)
+#  install-wsl.ps1 -- the Windows distro path
 #
 #  install.ps1 runs this as a child process (powershell.exe -File): it is the one
-#  Windows install path since the PowerShell core was retired (client-dev#1810
-#  part 5). It is in install.ps1's $Files and in the signed manifest, so on the
+#  Windows install path since the PowerShell core was retired. It is in install.ps1's $Files and in the signed manifest, so on the
 #  customer path it runs only after install.ps1 has verified it.
 #
 #  -CoreDir is the one tree it may use:
@@ -12,7 +11,7 @@
 #      out as under scripts/);
 #    - for e2e, a commit's own scripts/ directory, with a manifest.sha256
 #      generated from that commit by scripts/gen-manifest.sh (it is never
-#      committed, backend#2868).
+#      committed).
 #  Either way, every file this script uses from the tree is checked again against
 #  the tree's manifest.sha256, and a tree that fails is refused by name. Nothing
 #  here or in install.ps1 skips that check. The signature over the manifest is
@@ -28,7 +27,7 @@
 #       (the declared "restart, then re-run" code, which the e2e harness reads)
 #
 #  Its steps are the numbered sections below, and Invoke-WslInstall, at the end,
-#  runs them in order (client-dev#1810 part 1): WSL ready, the import and its disk,
+#  runs them in order: WSL ready, the import and its disk,
 #  the logon task, the host's CA roots, the core, the record, then the account's
 #  example use case (Invoke-HostExample).
 # =============================================================================
@@ -119,7 +118,7 @@ function Confirm-CoreDir {
 }
 
 # =============================================================================
-#  1. WSL ready (RFC-0175 D7)
+#  1. WSL ready
 # =============================================================================
 # The first step of the WSL path: WSL at or above the floor, or a plain stop.
 # Enabling WSL needs an administrator once per machine, and no option avoids it
@@ -138,8 +137,8 @@ function Confirm-CoreDir {
 #
 # The values S-W measures are named here, so its rows change values, not code.
 
-# TODO(S-W row 1, backend#5416): the floor is RFC-0175 D7's, WSL 2.5 (cgroup v2
-# by default). Row 1 records `wsl --version` on the managed laptop; set it here.
+# TODO: the floor is WSL 2.5 (cgroup v2
+# by default). Record `wsl --version` on the managed laptop; set it here.
 $WslMinVersion = '2.5'
 
 # The one IT command D7 names. The refusal prints it, and the elevated step
@@ -194,15 +193,15 @@ $WslPlatformWmiStates = @{ 1 = 'enabled'; 2 = 'disabled'; 3 = 'disabled' }
 $WslProbeTimeoutSec  = 30
 $WslEnableTimeoutSec = 1200
 # The first command that enters the distro STARTS it, and a cold start is not
-# bounded by the 30 s a `wsl --version` gets. 300 s is the bound S-W's kit gives
-# the distro to be running after a logon (backend#5416 rows 5c and 8), not a
+# bounded by the 30 s a `wsl --version` gets. 300 s is the bound the spike kit gives
+# the distro to be running after a logon, not a
 # measured worst case: the VM measured 10 s, and the first start right after the
 # import is unmeasured.
 $WslDistroStartTimeoutSec = 300
 # `wsl --manage --set-sparse` and `--resize` rewrite the distro's VHDX, and that
 # work grows with the disk, so it is not bounded by the 30 s a `wsl --version`
 # gets either: on a probe budget a slow disk timed out while wsl.exe kept going.
-# 600 s is a bound, not a measured worst case (client-dev#2036).
+# 600 s is a bound, not a measured worst case.
 $WslDiskTimeoutSec = 600
 
 # "2.5" or "2.5.10.0" as a four-part [version], so 2.5.0 and 2.5.0.0 compare equal
@@ -243,7 +242,7 @@ function ConvertFrom-WslVersionText {
 # stripped: an old wsl.exe ignores WSL_UTF8 and writes UTF-16LE, which reads as a
 # NUL between every letter, and a reader that matches the raw text (k3s's state,
 # the trust bundle's certificates) then misses. Stripped here, once, so no reader
-# has to remember to (client-dev#2128). -FilePath is a seam for the test suite.
+# has to remember to. -FilePath is a seam for the test suite.
 function Invoke-WslProbe {
   param([string]$FilePath = 'wsl.exe', [string[]]$ArgumentList = @('--version'), [int]$TimeoutSec = $WslProbeTimeoutSec)
   $r = [pscustomobject]@{ Started = $false; TimedOut = $false; ExitCode = $null; Output = ''; ErrorOutput = ''; StartError = ''; NativeErrorCode = $null }
@@ -285,7 +284,7 @@ function Invoke-WslProbe {
   return $r
 }
 
-# TODO(S-W row 2, backend#5470): the hook for an organisation's policy refusing
+# TODO (S-W row 2): the hook for an organisation's policy refusing
 # wsl.exe (AppLocker or WDAC). How such a refusal looks on a managed laptop -- the
 # start error, its code, an event-log entry -- is what row 2 records, so this does
 # not guess: it answers "not blocked", and a blocked wsl.exe reads as "cannot tell",
@@ -562,8 +561,7 @@ function Confirm-WslReady {
   return 'restart'
 }
 
-# WSL's networking mode, read from the user's own .wslconfig (client-dev#1810, S-W's
-# run of record, row 10; rfcs#241 decision 2): the distro runs on WSL's default NAT
+# WSL's networking mode, read from the user's own .wslconfig: the distro runs on WSL's default NAT
 # only. networkingMode is a global [wsl2] key, so a user's mirrored setting reaches
 # our distro too, and on the laptop (WSL 2.7.11) a mirrored distro's node never came
 # up: containerd's pull timed out and autoProxy gave k3s no proxy. NAT pulled on both
@@ -601,7 +599,7 @@ function Assert-WslNetworkingNat {
 #  2. The distro image: the WSL distro's root filesystem.
 #
 #  On Windows the core is to run inside our own WSL distro, imported from a root
-#  filesystem that 3.1 (client-dev#1809) publishes to ghcr.io. Get-WslDistroImage
+#  filesystem that 3.1 publishes to ghcr.io. Get-WslDistroImage
 #  fetches it by its layer digest, and Confirm-WslDistroImage refuses it unless it is
 #  exactly the bytes the release pins: the length first, which is cheap and names
 #  a truncated or padded download, then the sha256. A refused file is deleted at
@@ -613,7 +611,7 @@ function Assert-WslNetworkingNat {
 #  unelevated (S-W row 3: 8.4 s, no consent.exe), then the disk. The pins are
 #  facts.env's WSL_ROOTFS_*, stamped below, and Get-WslDistroImage takes them unless
 #  told otherwise.
-#  Still to come, each waiting on the row of spike S-W (backend#5416) that decides it:
+#  Still to come, each waiting on the row of spike S-W that decides it:
 #    The per-user logon task that keeps the distro running is section 3's.
 #    The proxy inside the distro (row 10) crosses on the core's runs (section 5);
 #      the host-side fetch below honours HTTPS_PROXY like every bootstrap
@@ -677,7 +675,7 @@ function Get-GhcrPullToken {
 # Receive-WslDistroImage's clock, one step: a liveness dot every $Clock.TickSeconds,
 # and the stall bound. $false when under $Clock.StallBytes arrived in the last
 # $Clock.StallSeconds (curl's --speed-limit 1024 --speed-time 60, the Mac kernel
-# fetch's bound). A slow download that is still moving is never stopped (#468).
+# fetch's bound). A slow download that is still moving is never stopped.
 function Test-WslDownloadMoving {
   param([hashtable]$Clock)
   $now = Get-Date
@@ -863,7 +861,7 @@ function Confirm-WslDistroImage {
   }
 }
 
-# THE DISTRO'S DISK (S-W row 11, backend#5416). An imported distro's VHDX gets
+# THE DISTRO'S DISK (S-W row 11). An imported distro's VHDX gets
 # WSL's default virtual size, about 1 TiB, and the node's capacity is that, not
 # what the host has. On S-W's machine the node reported 1,055,762,868 KiB while C:
 # had 110 GB free, so kubelet's eviction (at 5 % of capacity free) could never
@@ -1412,7 +1410,7 @@ function Import-WslDistro {
   return 'imported'
 }
 
-# THE HOST'S CA ROOTS IN THE DISTRO (S-W row 9, client-dev#1810 part 1, "Proxy and
+# THE HOST'S CA ROOTS IN THE DISTRO ("Proxy and
 # CA"). Behind a proxy that inspects TLS, every TLS client in the distro (curl, and
 # containerd's image pulls) has to trust the CA that IT put in the host's root
 # store, and Ubuntu's own roots do not hold it. Add-WslHostRootTrust hands the
@@ -1567,17 +1565,17 @@ function Add-WslHostRootTrust {
 #  WSL stops a distro seconds after its last wsl.exe exits, and k3s with it (S-W
 #  row 5a). A task of the daily user's own, at their logon, holds one wsl.exe open
 #  in the distro for the session: `sleep infinity`, started by a launcher that
-#  shows no window. It is S-W row 5b's block (backend#5416's kit), the launcher
-#  that row chose, registered unelevated at the Task Scheduler root as
+#  shows no window. It is the spike kit's block, the launcher
+#  it chose, registered unelevated at the Task Scheduler root as
 #  tracebloc-keepalive, which the install record names \tracebloc-keepalive.
 #
 #  It waits only for the distro to run. k3s Ready is the core's own wait, in its
 #  cluster run, on the core's one TB_API_WAIT_S budget (180 s), so no wait here
-#  may stand in for that one. That budget covers a distro start
-#  (client-dev#1935): our distro was Ready within 30-40 s of a host reboot in
+#  may stand in for that one. That budget covers a distro start:
+# our distro was Ready within 30-40 s of a host reboot in
 #  five e2e runs, and S-W's stock image 22 s after `wsl --terminate` (its `ready`
 #  row). The 191 s once cited here was one row-4 reading on that stock image, a
-#  re-run with k3s already installed (backend#5471); S-W draws no timing from
+#  re-run with k3s already installed; S-W draws no timing from
 #  row 4. Our distro carries no cloud-init and no snapd, which the stock image
 #  runs at every start; wsl-distro.sh test refuses a build that does.
 #
@@ -1594,7 +1592,7 @@ $KeepaliveStartTimeoutSec = 60
 
 # THE LAUNCHER, named here and nowhere else: a program under %WINDIR% and its
 # arguments, put in front of wsl.exe. conhost --headless runs it with no console
-# window (S-W row 5b, backend#5471, Windows 11); wsl.exe started directly showed
+# window (S-W row 5b, Windows 11); wsl.exe started directly showed
 # one. @() starts wsl.exe directly.
 $KeepaliveLauncher = @('System32\conhost.exe', '--headless')
 
@@ -1668,7 +1666,7 @@ function Register-KeepaliveTask {
 #
 #  On the distro path the core runs inside WSL, but nvidia-smi.exe, the driver and
 #  the GPUs Windows lists live on the Windows host, so the GPU check stays here
-#  (RFC-0175 D2, W21). Find-Gpu, Confirm-NvidiaDriver and Get-NvidiaFloorVerdict,
+# (W21). Find-Gpu, Confirm-NvidiaDriver and Get-NvidiaFloorVerdict,
 #  with everything they call, came over unchanged from the PowerShell core that
 #  part 5 retired, and their behaviour is held by install-wsl-host.Tests.ps1. Info,
 #  Ok and Warn are this file's own output helpers, which print the same lines
@@ -1829,7 +1827,7 @@ function Confirm-NvidiaDriver {
     # Bounded (installer external-call timeout rule / Bugbot): a wedged driver must not hang the
     # install -- and Find-Gpu now runs before the fast path, so an unbounded nvidia-smi would hang
     # every "nothing to do" re-run too.
-    # -StdoutOnly on BOTH queries (Bugbot on client-dev#1447): the verdict reads every line
+    # -StdoutOnly on BOTH queries: the verdict reads every line
     # as a version and calls any other line unreadable, so a successful nvidia-smi that also
     # printed a warning to stderr would lose a working GPU. The bash twin reads stdout only
     # too (a command substitution, with 2>/dev/null). A failing query keeps its stderr.
@@ -1842,7 +1840,7 @@ function Confirm-NvidiaDriver {
       return
     }
     $driverVer = ([string]$dr.Output -split "`n" | Select-Object -First 1).Trim()
-    $script:NVIDIA_DRIVER_VERSION = $driverVer   # quoted back in a GPU-skip reason (#616)
+    $script:NVIDIA_DRIVER_VERSION = $driverVer   # quoted back in a GPU-skip reason
     # compute_cap is its own query: a driver too old to know it fails that query alone,
     # and the floor still reads the driver version.
     $cr = Invoke-BoundedProcess -FileName $nvSmi -Arguments @("--query-gpu=compute_cap","--format=csv,noheader") -TimeoutSec 15 -StdoutOnly
@@ -1854,7 +1852,7 @@ function Confirm-NvidiaDriver {
       Sort-Object { ConvertTo-FloorVersion $_ } | Select-Object -First 1)
     $capVer = if ($capVer.Count -gt 0) { [string]$capVer[0] } else { "unknown" }
     # The card's name: the verdict classifies it by name when the driver cannot report
-    # compute_cap (client-dev#1631). A failed query is no name, never a guess.
+    # compute_cap. A failed query is no name, never a guess.
     $nr = Invoke-BoundedProcess -FileName $nvSmi -Arguments @("--query-gpu=name","--format=csv,noheader") -TimeoutSec 15 -StdoutOnly
     $nameOut = if ($nr.Code -eq 0) { [string]$nr.Output } else { "" }
     $verdict = Get-NvidiaFloorVerdict -DriverOutput ([string]$dr.Output) -CapOutput $capOut -DriverFloor $NVIDIA_DRIVER_FLOOR -CapFloor $NVIDIA_COMPUTE_CAP_FLOOR -HardFloor $NVIDIA_DRIVER_HARD_FLOOR -NameOutput $nameOut
@@ -1867,7 +1865,7 @@ function Confirm-NvidiaDriver {
     if ($verdict -eq "ok") {
       $script:NVIDIA_DRIVER_OK = $true
       Ok "NVIDIA GPU ready (driver $driverVer)"
-      # Expectation-setting only, never a gate (#387): entry-level cards pass
+      # Expectation-setting only, never a gate: entry-level cards pass
       # every check but are too small for real training (field: a 2 GB GT 710
       # installed fine and could never fit a model).
       try {
@@ -1880,8 +1878,8 @@ function Confirm-NvidiaDriver {
     } elseif ($verdict -eq "below-compute") {
       $oldName = Get-NvidiaPreTuringName $nameOut
       if ($capVer -eq "unknown" -and $oldName) {
-        # Classified by name: the driver could not report the compute capability
-        # (client-dev#1631), so the card is named instead of a number.
+        # Classified by name: the driver could not report the compute capability,
+        # so the card is named instead of a number.
         $script:GPU_SKIP_REASON = "this NVIDIA GPU ($oldName) is too old for tracebloc's GPU images, which need compute capability $NVIDIA_COMPUTE_CAP_FLOOR or newer -- running CPU-only"
         Warn "This NVIDIA GPU ($oldName) is too old for tracebloc's GPU images, which need compute capability $NVIDIA_COMPUTE_CAP_FLOOR or newer -- this machine will run in CPU mode."
         $script:GPU_UNSUPPORTED_REASON = "This GPU is too old for tracebloc's GPU training images, which need compute capability $NVIDIA_COMPUTE_CAP_FLOOR or newer (NVIDIA Turing or later), so this machine runs on CPU."
@@ -1895,7 +1893,7 @@ function Confirm-NvidiaDriver {
       Hint "GPU training needs a newer card (NVIDIA Turing or later). Everything else works on CPU."
     } elseif ($verdict -eq "below-hard-floor") {
       # Below the CUDA 13 minimum tracebloc's GPU images need (torch 2.14.1+cu130) the
-      # GPU would be advertised and unusable (client-dev#1632), so it is left off: there
+      # GPU would be advertised and unusable, so it is left off: there
       # is no warning band (2026-10-18). The update is to the driver floor, and the GPU
       # is set up only by a run on the new driver, so the hint says to re-run the installer.
       $script:GPU_SKIP_REASON = "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_HARD_FLOOR, the driver tracebloc's GPU training images need (CUDA 13) -- running CPU-only"
@@ -1926,7 +1924,7 @@ function ConvertTo-GpuNormalisedName([string]$Name) {
   return " $($n.Trim()) "
 }
 
-# Get-GpuNotNvidiaName -- pure twin of detect-gpu.sh's _gpu_not_nvidia_name (backend#5296):
+# Get-GpuNotNvidiaName -- pure twin of detect-gpu.sh's _gpu_not_nvidia_name:
 # $Names are GPU names (Win32_VideoController.Name). Returns the GPU to report as not_nvidia
 # when there is a GPU of a $GPU_NOT_NVIDIA_VENDOR_RE vendor and NO NVIDIA one; "" otherwise.
 # Any NVIDIA GPU wins: NVIDIA plus an iGPU is an NVIDIA machine. A discrete AMD card is named
@@ -1956,7 +1954,7 @@ function Set-GpuNotNvidia([string]$Name) {
 }
 
 # Test-GpuArchSupported -- $true unless Windows runs on arm64: the GPU training images are
-# linux/amd64 only (client-dev#1698). Reads the environment, never Err: an unknown value is
+# linux/amd64 only. Reads the environment, never Err: an unknown value is
 # not arm64. PROCESSOR_ARCHITEW6432 is the machine's own answer in an x64-emulated shell.
 function Test-GpuArchSupported {
   return -not ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64")
@@ -1982,7 +1980,7 @@ function Find-Gpu {
     $gpus = @(Get-CimInstance Win32_VideoController |
             Where-Object { $_.Name -notmatch "Microsoft|Basic|VirtualBox" })
     # NVIDIA first, wherever WMI lists it: an NVIDIA card beside an Intel iGPU or an AMD card
-    # is an NVIDIA machine (backend#5296), never judged by whichever adapter came first.
+    # is an NVIDIA machine, never judged by whichever adapter came first.
     $nv = @($gpus | Where-Object { $_.Name -match "NVIDIA" })
     $amd = @($gpus | Where-Object { $_.Name -match "AMD|Radeon" })
     if ($nv.Count -gt 0) {
@@ -2006,7 +2004,7 @@ function Find-Gpu {
   if ($script:GPU_VENDOR -eq "nvidia" -and -not (Test-GpuArchSupported)) { Set-GpuArchUnsupported $nv[0].Name }
   if ($script:GPU_VENDOR -eq "nvidia") { Confirm-NvidiaDriver }
 
-  # No ROCm training image exists, on any platform (client-dev#1697): CPU mode, never
+  # No ROCm training image exists, on any platform: CPU mode, never
   # "use Linux for AMD".
   if ($script:GPU_VENDOR -eq "amd") {
     Warn "tracebloc's GPU training images need an NVIDIA GPU, so the AMD GPU is not set up -- this machine will run in CPU mode."
@@ -2016,7 +2014,7 @@ function Find-Gpu {
 }
 
 # =============================================================================
-#  4b. The GPU WSL can give the distro (S-W row 13, client-dev#1810).
+#  4b. The GPU WSL can give the distro (S-W row 13).
 #
 #  Find-Gpu and Confirm-NvidiaDriver judge the card and its driver against the
 #  floors, as on every platform. WSL adds two rules of its own, NVIDIA's CUDA on WSL
@@ -2105,7 +2103,7 @@ function Confirm-NvidiaWslGpu {
 # single token: one with no whitespace and no `"` goes as it is; otherwise it is
 # wrapped in `"`, a `"` inside becomes `\"`, a run of N `\` before a `"` becomes
 # 2N+1, a run of N `\` at the end becomes 2N, and any other `\` stays; the empty
-# string becomes `""`. Callers pass raw arguments and never pre-quote (backend#2455).
+# string becomes `""`. Callers pass raw arguments and never pre-quote.
 function ConvertTo-Win32Arg {
   param([Parameter(Mandatory)][AllowEmptyString()][string]$Arg)
   if ($Arg -ne "" -and $Arg -notmatch '[\s"]') { return $Arg }
@@ -2125,7 +2123,7 @@ function ConvertTo-Win32Arg {
       # [string] cast, not the bare [char] from string indexing: under Windows
       # PowerShell 5.1 (the installer's relaunch host) the StringBuilder.Append
       # binder can bind a [char] to a numeric overload and write the code point
-      # instead of the character; Append([string]) is unambiguous (Bugbot #845).
+      # instead of the character; Append([string]) is unambiguous.
       [void]$sb.Append('\' * $nBackslash); [void]$sb.Append([string]$Arg[$i])
       $i++
     }
@@ -2143,7 +2141,7 @@ function Invoke-BoundedProcess {
   # output cannot tolerate the merge: a warning the program writes to stderr lands in
   # the same string and the value no longer reads. The host GPU check's nvidia-smi
   # queries (section 4) are exactly that; the merge once made a FALSE REFUSAL after
-  # the cluster was already up (@saadqbal / Bugbot on #817).
+  # the cluster was already up
   #
   # Only the success path is isolated. The failure/timeout paths keep their merged or
   # synthetic text, which is pure diagnostics -- and every caller checks .Code before
@@ -2191,7 +2189,7 @@ function Invoke-BoundedProcess {
   # stdout pipe, blocks because nobody is draining it yet, therefore stops reading
   # stdin, therefore our Write() blocks -- and WaitForExit() below is never reached, so
   # the HARD timeout this function exists to provide does not fire at all. Not 124:
-  # no return, ever. Measured on backend#2246 -- `/bin/cat` with a 200 KB payload and
+  # no return, ever. Measured: `/bin/cat` with a 200 KB payload and
   # -TimeoutSec 20 ran past a 60s outer watchdog, while the same call with the readers
   # started first returns the child's real verdict. Starting a ReadToEndAsync() before
   # the write costs nothing and is the documented way out of the classic redirect
@@ -2214,7 +2212,7 @@ function Invoke-BoundedProcess {
     # returned regardless of -StdoutOnly, so a failing caller keeps the child's
     # stderr diagnostics -- gating on $StdoutOnly alone silently discarded them,
     # and the child then looked like it produced nothing rather than like we threw
-    # its stderr away (client#828). The timeout arm below is the other failure path
+    # its stderr away. The timeout arm below is the other failure path
     # and keeps its synthetic text for the same reason.
     $isolate = $StdoutOnly -and $proc.ExitCode -eq 0
     return [pscustomobject]@{ Code = $proc.ExitCode; Output = $(if ($isolate) { $outTask.Result } else { $outTask.Result + $errTask.Result }) }
@@ -2227,8 +2225,7 @@ function Invoke-BoundedProcess {
 # =============================================================================
 #  5. The core: install-k8s.sh, run twice inside the distro.
 #
-#  The caller contract is client-dev#1810's (issue comment 6141263609), and part 2
-#  builds the core's side to it. RFC-0175 D2 puts the account steps on the HOST
+#  The caller contract: the core builds its side to it. The design puts the account steps on the HOST
 #  CLI, and `client create` is keyed on the cluster's kube-system UID, so:
 #    0. the host CLI, installed for this user by its own installer;
 #    1. the core's cluster run: checks, step b without the CLI, the cluster, and
@@ -2247,7 +2244,7 @@ function Invoke-BoundedProcess {
 #
 #  Invoke-WslInstall settles the preset pair before anything is written: a client ID
 #  with no password gets it asked for at a console (Read-HostPresetPassword), and
-#  half a pair or a value with a line break stops it before the import (client-dev#2321).
+#  half a pair or a value with a line break stops it before the import.
 #  It runs Invoke-WslCore once the import and the logon task (sections 2 and 3) have
 #  the distro running.
 #  The cluster run hands the account steps what its stop-and-check gate found
@@ -2261,8 +2258,8 @@ function Invoke-BoundedProcess {
 #  over the context kubectl pointed at before it, which the client run's line
 #  carries (TRACEBLOC_WSL_PREV_KUBE_CONTEXT): that run merges the kubeconfig again,
 #  after the cluster run made its own context current, and its summary says how to
-#  switch back (backend#5025 O-19). And where this machine runs, which the account
-#  steps put in `client create`'s environment, as provision.sh does (backend#5797).
+#  switch back. And where this machine runs, which the account
+#  steps put in `client create`'s environment, as provision.sh does.
 #    TODO(S-W): measure that /dev/tty answers in the distro while stdin is a pipe.
 #    TODO(part 4): the refusal for another account's client names no removal
 #      command yet: `tracebloc delete` removes the distro path's client once
@@ -2283,7 +2280,7 @@ $CorePhaseClient = 'client'
 #   - the stage, both names lib/common.sh's tb_client_env reads (canonical first,
 #     then the legacy one), so the core installs against the backend the host CLI
 #     signs in to: the CLI reads the same two on Windows. Without them the core
-#     falls back to prod while the CLI mints the credential on stg (client-dev#1810);
+#     falls back to prod while the CLI mints the credential on stg;
 #   - every telemetry opt-out the core honours (lib/telemetry.sh's
 #     TB_TELEMETRY_OPT_OUT_VARS), so an opt-out set on Windows still opts out.
 # Pester tests hold the stage names and the opt-outs to those declarations. Each
@@ -2332,8 +2329,8 @@ $CoreSettingsNotUsed = [ordered]@{
   TRACEBLOC_SKIP_REBOOT_PROMPT = 'nothing installs a GPU driver in the tracebloc WSL distro, so there is no reboot to skip'
 }
 
-# THE HOST'S PROXY IN THE DISTRO (S-W row 10, client-dev#1810 part 1, "Proxy and
-# CA"; RFC-0175 D7: NAT, with the proxy on k3s's unit). Both runs get every name
+# THE HOST'S PROXY IN THE DISTRO ("Proxy and
+# CA"; NAT, with the proxy on k3s's unit). Both runs get every name
 # lib/cluster.sh's _node_proxy_env hands a cluster node, and the NO_PROXY pair its
 # _augment_no_proxy reads. Pester holds both lists to cluster.sh. Nothing is
 # written here, because the core already owns the write:
@@ -2424,10 +2421,10 @@ $TRACEBLOC_CLI_INSTALL_URL = "https://github.com/tracebloc/cli/releases/latest/d
 # tb_wsl_handover_write), the reason that asks for a new credential, and the flag
 # the client run gets then (provision.sh's). The second line is the context kubectl
 # pointed at before the cluster run, which the client run gets by the variable
-# k3s.sh's kubeconfig merge reads (backend#5025 O-19). The last three are where this
+# k3s.sh's kubeconfig merge reads. The last three are where this
 # machine runs (provision.sh's _registration_machine_facts), by the names
 # provision.sh puts in its own `client create`'s environment, which the host's create
-# gets the same way (backend#5797). Pester holds each to the core's.
+# gets the same way. Pester holds each to the core's.
 $CoreHandoverVar = 'TRACEBLOC_WSL_HANDOVER'
 $CoreHandoverFile = 'handover.env'
 $CoreHandoverKey = 'INSTALL_STATE_REASON'
@@ -2442,7 +2439,7 @@ $CoreClientHandoverFile = 'client.env'
 $CoreClientStateKey = 'TRACEBLOC_CLIENT_STATE'
 $ClientConnectedState = 'connected'
 # The machine name and provider `client create` sets, by the names provision.sh puts
-# in its own create's environment (backend#5255). Pester holds them to provision.sh's.
+# in its own create's environment. Pester holds them to provision.sh's.
 $MachineLabelKeys = @('TRACEBLOC_MACHINE_NAME', 'TRACEBLOC_CLIENT_PROVIDER')
 $CredentialReissuedVar = 'TRACEBLOC_CREDENTIAL_REISSUED'
 
@@ -2638,8 +2635,7 @@ function New-PrivateDirectory {
 }
 
 # The CLI installer's launch: Start-TraceblocCliInstaller and the functions it
-# calls, which came over unchanged from the retired PowerShell core (backend#4405:
-# four ways to start the child, each refusal logged with its cause).
+# calls, which came over unchanged from the retired PowerShell core (four ways to start the child, each refusal logged with its cause).
 # install-wsl-host.Tests.ps1 holds their behaviour.
 function Format-CliLaunchError($err) {
   $ex = $err.Exception
@@ -2722,7 +2718,7 @@ function Start-TraceblocCliInstaller {
 # this process's PATH, else $null. The bootstrap calls it by this path: the User
 # PATH entry that installer adds reaches only windows opened after it. PREFIXONLY
 # skips PATH: that installer cannot change this process's PATH, so a hit there is
-# never the CLI it just installed (client-dev#2088).
+# never the CLI it just installed.
 function Find-HostCli {
   param([switch]$PrefixOnly)
   $prefix = $env:TRACEBLOC_INSTALL_PREFIX
@@ -2738,11 +2734,11 @@ function Find-HostCli {
   return $null
 }
 
-# The retired PowerShell core (removed with client-dev#2133) kept its tools in
+# The retired PowerShell core  kept its tools in
 # %ProgramFiles%\tracebloc\bin and put that folder on the MACHINE PATH. Nothing
 # since removes the entry: `tracebloc delete` cleans the user-scope CLI folder and
 # its user PATH entry only, so a machine that ever ran the old core keeps a system
-# PATH entry naming a folder that is gone (client-dev#2846). Clear-RetiredToolPath
+# PATH entry naming a folder that is gone. Clear-RetiredToolPath
 # removes exactly that entry, and only while the folder is gone: a folder still
 # there is left alone with its entry. The Machine PATH is an administrator's to
 # write. Elevated, the entry goes; not, one hint says so and the install goes on.
@@ -2751,7 +2747,7 @@ function Find-HostCli {
 # The Machine PATH is read and written through its registry value, not
 # [Environment]::Get/SetEnvironmentVariable(..., 'Machine'): Windows ships it as
 # REG_EXPAND_SZ, and that pair returns it expanded and writes it back as REG_SZ,
-# baking every %VAR% entry into its value (backend#2916, the retired core's
+# baking every %VAR% entry into its value (the retired core's
 # lesson). Seams for the suite: Get-MachinePath and Set-MachinePath.
 $MachineEnvironmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
 function Get-MachinePath {
@@ -2835,7 +2831,7 @@ function Install-HostCli {
     $null = $p.Handle
     if ($p.WaitForExit($TimeoutSec * 1000)) {
       # Only the overload with no deadline waits for the redirected streams, and
-      # until they drain ExitCode can read $null (backend#2849).
+      # until they drain ExitCode can read $null.
       try { $p.WaitForExit() } catch { }
       if ($p.ExitCode -ne 0) { $why = "its installer exited $(Format-ExitCode $p.ExitCode)" }
     } else {
@@ -2856,7 +2852,7 @@ function Install-HostCli {
   Remove-Item -LiteralPath $out, $err -Force -ErrorAction SilentlyContinue
   # A clean exit is proven only by the exe where that installer puts it: a
   # tracebloc on this process's PATH predates it, and is kept below only as the
-  # CLI already here, with a warning (client-dev#2088).
+  # CLI already here, with a warning.
   if (-not $why) {
     $cli = Find-HostCli -PrefixOnly
     if ($cli) {
@@ -2898,8 +2894,7 @@ function ConvertTo-SanitizedInput {
   # unbounded: one leaves the 'D' of an unrecognised SS3-shaped pair behind and
   # the floor stops firing on the very shape this is about, while unbounded
   # swallows a whole ASCII name (ESC N C h e l l o) yet spares a non-Latin one,
-  # making keep-vs-reject depend on the script the name is written in (Bugbot,
-  # #736). An escape final is one byte, an intro plus a final is two, and every
+  # making keep-vs-reject depend on the script the name is written in (An escape final is one byte, an intro plus a final is two, and every
   # keyboard-input escape family fits in that. The probe is a yes/no only -- it is
   # never returned. Nothing but residue => return empty, which callers already
   # treat as "no answer" (re-prompt, or auto-name).
@@ -3003,7 +2998,7 @@ function Format-HostCliStderr {
 }
 
 # One answer from the host CLI, bounded, captured, with its stdin closed: a probe
-# never reads input (client-dev#1784). Returns its exit code, its
+# never reads input. Returns its exit code, its
 # stdout lines, ErrorText (what it wrote to stderr, kept apart: the reason a probe
 # failed, and this script keeps no log to put it in) and TimedOut (it did not
 # answer within TimeoutSec, so it was stopped, with what it had said by then). A
@@ -3045,8 +3040,8 @@ function Invoke-HostCliProbe {
 }
 
 # The tracebloc CLI's floor, as the verified core declares it: lib/assess.sh's
-# TB_CLI_MIN_VERSION default, the floor the bash installer holds its CLI to
-# (backend#4959). Read from that file, never restated here. A core it cannot be
+# TB_CLI_MIN_VERSION default, the floor the bash installer holds its CLI to.
+# Read from that file, never restated here. A core it cannot be
 # read from cannot be checked against, so that is refused by name. $CoreDir is
 # the flattened tree Confirm-CoreDir verifies: lib/ sits directly under it.
 function Get-CoreCliFloor {
@@ -3061,8 +3056,8 @@ function Get-CoreCliFloor {
   return $found[0]
 }
 
-# Stops the install when the CLI Install-HostCli left is below the core's floor
-# (backend#4959). Install-HostCli keeps the CLI already here when its update fails;
+# Stops the install when the CLI Install-HostCli left is below the core's floor.
+# Install-HostCli keeps the CLI already here when its update fails;
 # below the floor that CLI cannot find the client this chart installs and the
 # platform refuses it, so going on would register this machine with a CLI that
 # cannot use it. A version the CLI does not report, or reports as anything but
@@ -3245,7 +3240,7 @@ function Invoke-HostCliNoInput {
 # that as the credential: so the login's URL and code never reached the screen (the
 # user waited ten minutes for a code they were not shown), and a CLI line would sit
 # in front of the credential bytes, which the client run's [byte[]] -Stdin cannot
-# take (client-dev#1810).
+# take.
 function Get-HostClientCredential {
   param([string]$Cli, [switch]$Reissue, [System.Collections.IDictionary]$Facts)
   $dir = Join-Path (Join-Path $env:LOCALAPPDATA 'tracebloc') ('credential-' + [guid]::NewGuid().ToString('N'))
@@ -3401,7 +3396,7 @@ function Get-HostPresetCredential {
   return ,[System.Text.Encoding]::UTF8.GetBytes($text)
 }
 
-# The preset pair's refusals, before anything is written (client-dev#2321): the
+# The preset pair's refusals, before anything is written: the
 # clients page's Windows "+" command sets TRACEBLOC_CLIENT_ID alone, and a refusal
 # raised only in the core run came after the distro import and the keepalive task.
 # The environment does not change in between, so Invoke-WslCore reads the same pair
@@ -3423,7 +3418,7 @@ function Invoke-WslCore {
     $cli = Install-HostCli -Optional:($null -ne $credential)
     Clear-RetiredToolPath
     # Install-HostCli keeps an older CLI when its update fails: one below the
-    # floor stops here, before the distro is touched (backend#4959).
+    # floor stops here, before the distro is touched.
     if ($cli) { Assert-HostCliFloor -Cli $cli -CoreDir $CoreDir }
     $core = ConvertTo-DistroPath -Path $CoreDir
     $kubeconfig = ConvertTo-DistroPath -Path (Get-HostKubeconfigTarget)
@@ -3551,7 +3546,7 @@ function Invoke-HostExample {
 #  deletes it with everything it names. So the host record carries the core's
 #  top-level fields, read back from the core's own record and never restated here,
 #  and the artefacts the Windows path creates on the host, in the order it creates
-#  them (RFC-0175 D12; the kinds and their ids are install-record.schema.json's):
+#  them (the kinds and their ids are install-record.schema.json's):
 #    wsl-distro    tracebloc, path its import folder, %LOCALAPPDATA%\tracebloc\wsl
 #    logon-task    \tracebloc-keepalive, no path
 #    kube-context  the context the core merged into the host kubeconfig, path that
@@ -3605,7 +3600,7 @@ function Read-HostInstallRecord {
   try { return (Get-Content -Raw -LiteralPath $path -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop) } catch { return $null }
 }
 
-# THE RETIRED WINDOWS INSTALL (client-dev#1949, RFC-0175 D10). This installer no
+# THE RETIRED WINDOWS INSTALL. This installer no
 # longer sets up tracebloc's earlier Windows install, nor moves a machine off it.
 # The distro beside one would be a second client, and both would want the
 # Kubernetes API port on localhost. So one is refused by name before WSL is

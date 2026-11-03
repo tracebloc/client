@@ -20,7 +20,7 @@
 {{- $tc := default (dict) .Values.telemetryCollector -}}
 {{- if eq (include "tracebloc.telemetryCollectorState" .) "enabled" }}
 {{- /*
-  The edge Collector's pipeline — RFC-BACKEND-1872 D6/D7, backend#1906.
+  The edge Collector's pipeline.
 
   file_log -> transform (redaction floor) -> batch -> otlp_http
 
@@ -43,7 +43,7 @@ data:
     extensions:
       # The Collector's own service-account token, projected by the kubelet, which
       # rotates it; the extension re-reads the file when it changes. The egress gate
-      # has the Kubernetes API review it (RFC-0324 D2).
+      # has the Kubernetes API review it.
       bearertokenauth:
         scheme: Bearer
         filename: /var/run/secrets/tracebloc/collector/token
@@ -64,7 +64,7 @@ data:
           {{- $logs := trimSuffix "/" ($tc.hostLogsPath | default "/var/log/pods") }}
           {{- /*
             BUILT AS A LIST, THEN CHECKED — a Collector with no includes must not
-            render (backend#2341). The reachable route is an explicit null:
+            render. The reachable route is an explicit null:
             `--set telemetryCollector.classAContainers=null` DELETES the key, and a
             deleted key does not coalesce back from values.yaml, so the list
             silently shrinks. `minItems: 1` in values.schema.json rejects an EMPTY
@@ -83,7 +83,7 @@ data:
           */}}
           {{- $includes := list }}
           {{- /*
-            TWO RECEIVERS, SPLIT BY HOW LONG THE POD LIVES (backend#2964).
+            TWO RECEIVERS, SPLIT BY HOW LONG THE POD LIVES.
 
             `start_at` decides where a file with NO stored offset is read from.
             For the long-lived workloads `end` is right: a fresh install must not
@@ -128,7 +128,7 @@ data:
             NODE-AGENTS namespace, separately. resource-monitor is a DaemonSet in
             `nodeAgents.namespace`, not the release namespace, so scoping every
             path to `.Release.Namespace` missed it entirely — a Collector healthy
-            and blind to a whole Class A component. (Bugbot on #779.)
+            and blind to a whole Class A component.
           */}}
           {{- /*
             SCOPED TO THIS RELEASE'S PODS. The kubelet's directory is
@@ -140,7 +140,7 @@ data:
             pod-name wildcard under that shared namespace matched EVERY release's
             resource-monitor, and one edge's Collector would have ingested another
             edge's Class A logs and shipped them under its own ingest token — a
-            cross-tenant leak, not a noisy metric. (Bugbot on #779.)
+            cross-tenant leak, not a noisy metric.
 
             DaemonSet pods are named `<daemonsetName>-<hash>` and the DaemonSet name
             is release-scoped, so the release prefix is what distinguishes them.
@@ -187,8 +187,7 @@ data:
         # read from — so after a restart every file looks new, `end` wins, and
         # everything written while the Collector was down is skipped. D7's disk
         # queue covers records already ingested; this covers the read side, and
-        # the restart-during-a-backend-outage path needs both. (Bugbot on #779 —
-        # and the comment that used to sit here asserted the opposite, which is
+        # the restart-during-a-backend-outage path needs both. The comment that used to sit here asserted the opposite, which is
         # worse than no comment: it described a persistence this config did not
         # have.)
         #
@@ -210,7 +209,7 @@ data:
             id: container-parser
       {{- if $jobIncludes }}
 
-      # THE SHORT-LIVED PODS (backend#2964): the auto-upgrade CronJob and the
+      # THE SHORT-LIVED PODS: the auto-upgrade CronJob and the
       # image-refresh Job. Same parsing, same persisted offsets (`file_storage`
       # keys offsets by component, so this receiver's never collide with the
       # one above), but `beginning` for a file with no stored offset -- so a pod
@@ -233,7 +232,7 @@ data:
       {{- end }}
 
     processors:
-      # THE REDACTION FLOOR — GENERATED, never hand-written (backend#2378).
+      # THE REDACTION FLOOR — GENERATED, never hand-written.
       #
       # The rule "which strings must be scrubbed before a log leaves a
       # customer's cluster" has ONE declaration: client-runtime's
@@ -246,7 +245,7 @@ data:
       # hand from controller.py's `_LOG_REDACTIONS`. The two agreed only for as
       # long as one person changed both in one sitting, and the comment on this
       # line used to say so — "a cross-repo second copy that cannot be
-      # machine-checked from here". backend#1908 is what that cost: the generic
+      # machine-checked from here". What that cost: the generic
       # pattern anchored its keyword with a word boundary on both sides, so
       # every environment-variable spelling of a secret (AZURE_CLIENT_SECRET=,
       # MYSQL_PASSWORD=, DJANGO_SECRET_KEY=, AWS_SECRET_ACCESS_KEY=) fell
@@ -310,8 +309,7 @@ data:
       # The id names where the records land; the persisted queue below is keyed
       # by it, so a new id would strand what each node has buffered.
       otlp_http/backend:
-        # The egress gate's OTLP route for the `collector.records` row (RFC-0324
-        # Q8): the gate checks each export and sends it on with its own login.
+        # The egress gate's OTLP route for the `collector.records` row: the gate checks each export and sends it on with its own login.
         logs_endpoint: {{ printf "%s/v1/otlp/collector.records" (include "tracebloc.egressGateSendUrl" .) | quote }}
         encoding: json
         # The gate reads JSON only; gzip on this in-cluster hop would be refused.

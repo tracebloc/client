@@ -36,7 +36,7 @@ data:
   # one-line `curl --data-binary @body.json` — no python, no jq, no
   # shell-escaping the multi-line YAML scalar.
   #
-  # `image_digest` is OPTIONAL in the POST body (client-runtime#40):
+  # `image_digest` is OPTIONAL in the POST body:
   # when omitted, jobs-manager uses whatever the client chart resolved
   # for the cluster — the prod pin `images.ingestor.prodDigest` on prod,
   # the floating `images.ingestor.tag` off-prod — both kept current by

@@ -67,7 +67,7 @@ install_rocm() {
     deb_name="$(_find_package_name "$deb_dir" "deb")"
     [[ -z "$deb_name" ]] && error "No amdgpu-install .deb found at ${deb_dir}"
 
-    # Private directory, not a fixed /tmp name (backend#4279): the .deb is handed
+    # Private directory, not a fixed /tmp name: the .deb is handed
     # to `sudo apt-get install`, so a file another account owns at that name in
     # sticky /tmp could be swapped between our download and root installing it.
     local deb_tmp="" deb_path

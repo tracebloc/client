@@ -45,7 +45,7 @@ TB_CLI_SIGNED_IN=""
 # unconditionally on the user's shell PATH (so the summary CTA may say "run it
 # now"); false for a $HOME bin (~/.local/bin, ~/bin) or an empty path — those may
 # be on THIS installer's PATH only via the ~/.local/bin prepend or a just-edited
-# rc, which the shell the user returns to hasn't read (Bugbot #371).
+# rc, which the shell the user returns to hasn't read.
 _cli_at_system_dir() {
   case "${1:-}" in
     "" | "${HOME%/}"/*) return 1 ;;
@@ -59,7 +59,7 @@ _cli_at_system_dir() {
 # command into, so a CLI in ~/.local/bin is usable there right away when the user's
 # PATH already had ~/.local/bin -- the common case on a re-install. Without this,
 # such a user was told "open a new terminal" while their shell already found the
-# CLI (backend#5025 O-103). Conservative: an unset or empty TRACEBLOC_LAUNCH_PATH, or a BIN
+# CLI. Conservative: an unset or empty TRACEBLOC_LAUNCH_PATH, or a BIN
 # that is not an absolute path, is "no". A bootstrap older than common.sh has already
 # prepended ~/.local/bin by the time common.sh captures the PATH, so common.sh drops
 # that leading entry from the capture instead of trusting it.
@@ -87,7 +87,7 @@ _cli_usable_in_launch_shell() {
 # from the installer, never from `command -v`: the installer runs as a child
 # process, so where it put the binary never reaches THIS PATH. A lookup finds
 # ~/.local/bin only on the curl|bash path (install.sh prepends it) and ~/bin
-# never, and may return an older package-manager copy instead (client-dev#1390).
+# never, and may return an older package-manager copy instead.
 _cli_reported_path() {
   local line p=""
   [[ -r "${1:-}" ]] || return 0
@@ -142,7 +142,7 @@ _cli_path_export_line() {
 # startup files:
 #   1. login shell    ("$SHELL" -lic)  → ~/.profile / ~/.zprofile / ~/.bash_profile
 #   2. non-login shell ("$SHELL" -ic)  → ~/.bashrc / ~/.zshrc
-# A pass requires BOTH (cli#61 was "works in my login shell, missing in a plain
+# A pass requires BOTH (it catches "works in my login shell, missing in a plain
 # `bash` subshell"). Indirected into its own function so the bats suite can stub
 # it without spawning real shells. Never fatal: returns non-zero on "not found".
 _cli_on_fresh_path() {
@@ -152,7 +152,7 @@ _cli_on_fresh_path() {
   return 0
 }
 
-# Post-install self-verification (#738). Proves the CLI is actually usable from
+# Post-install self-verification. Proves the CLI is actually usable from
 # a fresh terminal and prints a VERIFIED next command — or, if a new shell would
 # NOT find it, the EXACT shell-correct PATH fix instead of a vague "open a new
 # terminal". ALWAYS returns 0: the client is connected by Step 5, so a CLI
@@ -167,7 +167,7 @@ _cli_version_short() {
 # _cli_first_install_next_step — the pointer at the install summary's "What to do
 # next" (`tracebloc data ingest ./data`). A first install prints that summary; a
 # `tracebloc upgrade` runs the full flow and ends on the summary's upgrade line, so
-# there the pointer names a step that never comes (client-dev#1642, backend#6787).
+# there the pointer names a step that never comes.
 # See tb_upgrade_run.
 _cli_first_install_next_step() {
   tb_upgrade_run && return 0
@@ -182,7 +182,7 @@ _verify_tracebloc_cli() {
     # launched this installer fixed its PATH at login (before the dir existed)
     # and won't see it until it re-reads its rc — so the very next `tracebloc …`
     # the user types HERE fails with command-not-found even though a new terminal
-    # works (#304). Only claim "verified on your PATH" when THIS shell resolves it
+    # works. Only claim "verified on your PATH" when THIS shell resolves it
     # too; otherwise be honest and say how to use it now.
     # `tracebloc version` is the real proof; keep it cosmetic (never let a failing
     # version call or a SIGPIPE flip the outcome). The canonical "tracebloc
@@ -190,14 +190,14 @@ _verify_tracebloc_cli() {
     # A fresh terminal WILL resolve tracebloc (that's this whole branch). The
     # summary CTA uses this to pick "open a new terminal" (case A) over the
     # PATH-fix guidance it must give when even a new shell can't find it (case B,
-    # the outer fall-through below) — Bugbot #371.
+    # the outer fall-through below).
     TRACEBLOC_CLI_ON_FRESH_PATH=1
     local ver; ver="$(_cli_version_short)"
     # Whether the summary's CTA + this step may say "run it NOW" vs "open a new
     # terminal" — gate on WHERE the CLI landed, not `has tracebloc` (this process's
     # PATH was mutated with ~/.local/bin by install.sh, so it resolves the CLI even
     # when the user's returning shell won't). Only a system dir is unconditionally
-    # on that shell's PATH (Bugbot #371).
+    # on that shell's PATH.
     if has tracebloc && _cli_usable_in_launch_shell "$(command -v tracebloc 2>/dev/null)"; then
       TB_CLI_USABLE_NOW=1
       # Usable right now AND in new terminals — the fully-clean verdict, collapsed
@@ -217,7 +217,7 @@ _verify_tracebloc_cli() {
       return 0
     fi
     # Installed and persisted for NEW terminals, but off the PATH of the shell that
-    # launched this installer (it fixed its PATH at login, #304). The summary's last
+    # launched this installer (it fixed its PATH at login). The summary's last
     # line says to open a new terminal (_cli_runnable_now); how to load it here is logged.
     TB_CLI_USABLE_NOW=0
     local rc; rc="$(_cli_rc_for_shell || true)"
@@ -230,7 +230,7 @@ _verify_tracebloc_cli() {
   # ~/.local/bin, which isn't on PATH). Tell the user precisely how to fix it
   # for THEIR shell — not a generic "open a new terminal" that won't help.
   # Not usable now AND a new shell won't resolve it either (case B): the summary
-  # CTA must point at the PATH fix below, NOT "open a new terminal" (Bugbot #371).
+  # CTA must point at the PATH fix below, NOT "open a new terminal".
   TB_CLI_USABLE_NOW=0
   TRACEBLOC_CLI_ON_FRESH_PATH=0
   # `|| true` so a hiccup in rc-resolution can't trip the orchestrator's set -e.
@@ -257,7 +257,7 @@ _verify_tracebloc_cli() {
 install_tracebloc_cli() {
   # No step framing here: this is called from provision_client (Step 3) on the
   # browser-auth path and, non-fatally, on the dual-mode path — the caller owns
-  # the step heading. (#838 reorder: the CLI installs BEFORE Helm now.)
+  # the step heading. The CLI installs BEFORE Helm.
   # Remember the version already installed (if any) so the final ✔ can show a
   # clean "vX → vY" update instead of an already-present / re-running / installing
   # pileup. Cosmetic — a failing `tracebloc version` just yields "" (guarded).
@@ -274,7 +274,7 @@ install_tracebloc_cli() {
   # user's shell unconditionally, so if the CLI step is later skipped or fails
   # (download/installer/temp-dir miss → early return, _verify never runs), the
   # summary must still say "Run" — not send a user with a working system tracebloc
-  # to a new terminal (Bugbot #371). Gate on _cli_at_system_dir, NOT bare `has`:
+  # to a new terminal. Gate on _cli_at_system_dir, NOT bare `has`:
   # install.sh prepends ~/.local/bin to THIS process, which would false-positive a
   # ~/.local/bin install the returning shell can't yet see.
   # shellcheck disable=SC2034  # consumed cross-file by summary.sh (_cli_runnable_now)
@@ -314,7 +314,10 @@ install_tracebloc_cli() {
   _cli_out="$(mktemp)" || _cli_out=""
   # Appended, never truncated: without a temp file the fallback is the install log.
   # Under umask 022, not the core's 077 (common.sh): the CLI it installs is for this
-  # user's every shell, and under 077 it landed 0700 (client-dev#2880).
+  # user's every shell, and under 077 it would land 0700.
+  # It inherits TRACEBLOC_COSIGN, the pinned cosign the shim or install.sh already
+  # checked, and reuses it on the same checksum check instead of downloading it
+  # again (cli install.sh ensure_cosign): keep it in the environment.
   ( umask 022; sh "$installer" ) >> "${_cli_out:-${LOG_FILE:-/dev/null}}" 2>&1 &
   # Set and unset, not a prefix assignment: a prefix on a function can outlive the call.
   _TB_SPIN_QUIET=1
@@ -350,7 +353,7 @@ install_tracebloc_cli() {
 
 # require_tracebloc_cli_floor — run right after install_tracebloc_cli: stop the
 # install when the CLI this machine is left with is below TB_CLI_MIN_VERSION, the
-# floor assess.sh declares (backend#4959). install_tracebloc_cli never fails the
+# floor assess.sh declares. install_tracebloc_cli never fails the
 # run: a download or install that does not work keeps the CLI already here. Below
 # the floor that CLI cannot find the client this chart installs and the platform
 # refuses it, so going on would set up a client the machine's own CLI cannot use.

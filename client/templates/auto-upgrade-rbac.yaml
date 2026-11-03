@@ -9,9 +9,9 @@ metadata:
     {{- include "tracebloc.labels" . | nindent 4 }}
     app.kubernetes.io/component: auto-upgrade
 {{/*
-  backend#953 (Sec-II): the auto-upgrade CronJob used to bind its
-  ServiceAccount to the built-in `cluster-admin` ClusterRole. Anything that
-  compromised this Pod, its token, or the chart repo at repoUrl then held a
+  Binding the auto-upgrade ServiceAccount to the built-in `cluster-admin`
+  ClusterRole is refused: anything that
+  compromised this Pod, its token, or the chart repo at repoUrl would hold a
   STANDING grant to read every Secret in every namespace, exec into any pod,
   and mutate any workload cluster-wide — a large blast radius for a component
   whose only job is `helm upgrade` of THIS release.
@@ -148,30 +148,29 @@ rules:
   # runs it. BOTH reads below are load-bearing; missing either aborts every
   # subsequent auto-upgrade tick.
   #
-  # CORRECTION (backend#2469): this comment used to say a 403 makes `lookup`
-  # "return empty, which the template's `fail` misreads as metrics-server
-  # missing". That is WRONG, and the difference matters. A forbidden `lookup`
+  # A 403 does NOT make `lookup` return empty (which the template's `fail`
+  # would misread as metrics-server missing). A forbidden `lookup`
   # RAISES -- helm aborts the render with `error calling lookup: ... is
   # forbidden` and never reaches the `fail`, so the whole release dies rather
   # than producing a misleading message. Measured, with the error text, while
   # enabling the edge Collector on tb-client-dev-templates. `lookup` has three
   # outcomes, not two: sees the cluster, returns empty (offline), or raises.
   #
-  # NO NEW READS HERE. backend#2469 briefly added a `deployments` get so the
-  # preflight could probe a metrics-server Deployment first. That is a fleet-wide
+  # NO NEW READS HERE. Do not add a `deployments` get so the
+  # preflight can probe a metrics-server Deployment first. That is a fleet-wide
   # lockout: the tick that would APPLY the grant is the tick that needs it, so the
   # first auto-upgrade onto such a chart 403s, --atomic rolls back, and the grant
   # can never arrive. Any new `lookup` of a resource this SA cannot ALREADY read
   # has the same shape. The preflight's escape hatch is a values flag instead.
-  # (Bugbot High on client#823.)
-  # The preflight's only privileged call (backend#953 Bugbot).
+  #
+  # The preflight's only privileged call.
   - apiGroups: ["apiregistration.k8s.io"]
     resources: ["apiservices"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
-# NOTE the `-scoped` suffix: releases before backend#953 already have a
+# NOTE the `-scoped` suffix: releases before the scoped grant already have a
 # ClusterRoleBinding named exactly `{{ include "tracebloc.autoUpgradeName" . }}`
 # whose roleRef is the built-in `cluster-admin`. A ClusterRoleBinding's roleRef
 # is IMMUTABLE, so reusing that name here would make the first `helm upgrade`
@@ -199,7 +198,7 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 {{- if ne .Values.nodeAgents.namespace.name .Release.Namespace }}
 {{/*
-  backend#953 (Bugbot): when node-agents run in their OWN namespace (the
+  When node-agents run in their OWN namespace (the
   default `tracebloc-node-agents`), the chart also templates namespaced objects
   there — resource-monitor DaemonSet + ServiceAccount (+ SCC on OpenShift), the
   optional registry Secret, the image-refresh Role/RoleBinding, and the
@@ -209,14 +208,12 @@ roleRef:
   control there. `*` verbs include escalate/bind, so a Role/RoleBinding in that
   namespace can be re-applied on upgrade.
 
-  NO TENANT CONDITION (backend#2400, Bugbot on #801). This carried
-  `tracebloc.nodeAgentsInUse` and a comment claiming it rendered "exactly when
-  those objects exist" — a restatement of another template's gate, and it went
-  false the moment backend#2400 made the token Role/RoleBinding render with no
-  flag at all. On `resourceMonitor: false` with the Collector off, the chart then
+  NO TENANT CONDITION. Gating on `tracebloc.nodeAgentsInUse` restates another
+  template's gate, and it goes false the moment the token Role/RoleBinding
+  render with no flag at all. On `resourceMonitor: false` with the Collector off, the chart then
   put two objects in that namespace that auto-upgrade could not apply, so the next
   hourly tick would 403 and ROLL BACK, and no later chart could land on that edge
-  either. That is the same paired-construct break backend#2400 exists to fix, one
+  either. That is the same paired-construct break, one
   template over.
 
   THIS TRACKS THE APPLIER, NOT THE TENANTS. auto-upgrade re-applies the WHOLE
@@ -268,7 +265,7 @@ roleRef:
 {{- /*
   Nil-safe read of the GPU device-plugin namespace, mirroring
   docker-registry-secret.yaml exactly: a `--reset-then-reuse-values` upgrade from
-  a release predating client#564 carries no `gpu` key, and Go template `and` is
+  a release predating the `gpu` values carries no `gpu` key, and Go template `and` is
   not short-circuit, so `and .Values.gpu .Values.gpu.devicePlugin.enabled` would
   still evaluate `.enabled` on a nil and panic. Coalescing each level to an empty
   dict BEFORE any field access removes the nil entirely.
@@ -278,12 +275,12 @@ roleRef:
 {{- if and $dp.enabled (ne $gpuNs .Release.Namespace) }}
 {{- $gpuRoleName := printf "%s-gpu-device-plugin" (include "tracebloc.autoUpgradeName" .) }}
 {{/*
-  backend#1992 (Bugbot, staging hop 2026-08-14): a Linux GPU install templates
+  A Linux GPU install templates
   NAMESPACED objects into `gpu.devicePlugin.namespace` (kube-system by default) —
   the vendor DaemonSet (gpu-device-plugin.yaml) and, on an authenticated
   mirror, the mirrored dockerconfigjson pull Secret (docker-registry-secret.yaml).
   The release-namespace Role above does not reach that namespace and the
-  ClusterRole enumerates only CLUSTER-scoped kinds, so after the #953
+  ClusterRole enumerates only CLUSTER-scoped kinds, so after the
   cluster-admin cutover a `helm upgrade --atomic --wait` tick would 403 there,
   roll back, and leave the auto-upgrade CronJob permanently failed — on a
   customer GPU edge, not in CI, and disabling the very channel that would deliver
@@ -295,7 +292,7 @@ roleRef:
   kube-system, which holds the service-account tokens of kube-controller-manager
   and friends. `*` on `*` there — or even a plain namespace-wide `secrets: list` —
   would let anything that compromised this Pod read those tokens and become
-  cluster-admin, which is precisely the blast radius backend#953 set out to
+  cluster-admin, which is precisely the blast radius the scoped grant exists to
   remove. So the grant below is derived from what the chart actually renders here
   and nothing else, and the write verbs are pinned to those objects by name:
 
@@ -332,7 +329,7 @@ roleRef:
   does not own in kube-system.
 
   No flag-day: the upgrade that first ships this rides the same release as the
-  #953 cutover, so it is still performed by the previous cluster-admin-bound SA,
+  cluster-admin cutover, so it is still performed by the previous cluster-admin-bound SA,
   which can create these objects; every later tick runs under this scoped grant.
   Adding a new object to this namespace in a future chart version REQUIRES
   extending the rules below in the same release.
@@ -366,7 +363,7 @@ rules:
   # (`dockerRegistry.existingSecret`). Resolving it through
   # `tracebloc.registrySecretName` would grant this ServiceAccount get + DELETE
   # on a bring-your-own dockerconfigjson living in kube-system — rights over a
-  # Secret the chart does not own (Bugbot on client#751). Naming the chart's own
+  # Secret the chart does not own. Naming the chart's own
   # secret also keeps `create: true` -> `existingSecret` migrations working: the
   # orphaned mirror is still deletable, where a list that followed
   # `existingSecret` would 403 on it and stall every later upgrade tick.
@@ -412,7 +409,7 @@ roleRef:
 {{- $runnerLease := include "tracebloc.appleGpuRunnerRbacName" . }}
 {{- $leaseRoleName := printf "%s-apple-gpu-runner" (include "tracebloc.autoUpgradeName" .) }}
 {{/*
-  cli-dev#1305: with the Apple GPU runner on, the chart renders the runner's
+  with the Apple GPU runner on, the chart renders the runner's
   Role and RoleBinding in kube-node-lease (apple-gpu-runner-rbac.yaml), where
   the runner's node keeps its heartbeat. Neither the release-namespace Role nor
   the ClusterRole above reaches that namespace, and helm re-applies both objects

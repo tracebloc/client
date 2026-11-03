@@ -1,5 +1,5 @@
 {{- /*
-GPU device-plugin DaemonSet — Helm-managed (client#564).
+GPU device-plugin DaemonSet — Helm-managed.
 
 Historically the installer applied the vendor GPU device plugin with an
 imperative `kubectl apply` of an upstream manifest fetched at install time
@@ -20,19 +20,19 @@ upstream manifests place it. Helm still tracks and removes a resource in a
 namespace other than the release namespace.
 
 NOTE: deliberately NO `helm.sh/resource-policy: keep` here — the whole point of
-#564 is that this object shares the release lifecycle and IS removed on
+the Helm-managed DaemonSet is that this object shares the release lifecycle and IS removed on
 uninstall (contrast the PVCs in docs/MIGRATIONS.md, which are kept on purpose).
 
 Windows: tracebloc's WSL distro runs this plugin as Linux does. The core inside
 the distro is Linux's, so it enables the plugin with runtimeClassName nvidia
-when the GPU is wired (client-dev#1810 part 3). From v0.19.1 the plugin finds
+when the GPU is wired. From v0.19.1 the plugin finds
 WSL by itself (`/dev/dxg`, its default `auto` discovery) and advertises one
-shared device, `all`: RFC-0175 D8's Windows device (W26), measured on v0.20.1 by
-spike S-W. v0.14.5's NVML plugin registered 0 GPUs there and pinned the resource
+shared device, `all`: the Windows device, measured on v0.20.1 by a
+spike. v0.14.5's NVML plugin registered 0 GPUs there and pinned the resource
 at 0.
 
 Client v1.10.2 and older ran a PowerShell core on Windows (install-k8s.ps1,
-retired in client-dev#2133) that left this disabled and advertised the GPU
+since retired) that left this disabled and advertised the GPU
 itself through a node-status patch.
 */ -}}
 {{- /*
@@ -53,7 +53,7 @@ the nil, so no evaluation order matters.
 {{- fail (printf "gpu.devicePlugin.enabled is true but gpu.devicePlugin.vendor is %q; set it to \"nvidia\" or \"amd\"" $vendor) }}
 {{- end }}
 {{- /*
-OpenShift: refused, not rendered (backend#5812). Both DaemonSets below run as
+OpenShift: refused, not rendered. Both DaemonSets below run as
 their namespace's `default` ServiceAccount and mount hostPaths (AMD also runs
 privileged), and no SCC this chart renders lists that ServiceAccount, so under
 OpenShift's default `restricted-v2` their pods are refused at admission and a
@@ -68,7 +68,7 @@ the plugin. Nil-safe for --reuse-values, like $gpu / $dp above.
 {{- fail (printf "gpu.devicePlugin.enabled is true with openshift.scc.enabled: the chart's %s device-plugin DaemonSet mounts hostPaths under its namespace's default ServiceAccount, which no chart SCC admits. On OpenShift, install the plugin with the %s GPU Operator and set gpu.devicePlugin.enabled=false" $vendor (ternary "NVIDIA" "AMD" (eq $vendor "nvidia"))) }}
 {{- end }}
 {{- $ns := $dp.namespace | default "kube-system" }}
-{{- /* global.imageRegistry (#585 mirror / air-gap) re-homes the plugin image
+{{- /* global.imageRegistry (mirror / air-gap) re-homes the plugin image
      exactly like every other chart image -- tracebloc.thirdPartyImage applies
      it, nil-safe for reuse-values. */ -}}
 {{- if eq $vendor "nvidia" }}
@@ -80,7 +80,7 @@ metadata:
   # installer used to apply; v0.20.1's keeps both), so an installer re-run adopts
   # an existing DaemonSet in place rather than orphaning it. The name comes from a
   # shared helper because auto-upgrade-rbac.yaml restricts the auto-upgrade SA's
-  # write verbs in this namespace to exactly this resourceName (backend#1992) —
+  # write verbs in this namespace to exactly this resourceName —
   # one declaration, so the two cannot drift into a 403.
   name: {{ include "tracebloc.gpuDevicePluginName" $vendor }}
   namespace: {{ $ns }}
@@ -90,7 +90,7 @@ spec:
   selector:
     matchLabels:
       name: nvidia-device-plugin-ds
-  # Never gates the auto-upgrade's --atomic wait (backend#1969): see the helper.
+  # Never gates the auto-upgrade's --atomic wait: see the helper.
   updateStrategy:
     {{- include "tracebloc.gpuDevicePluginUpdateStrategy" . | nindent 4 }}
   template:
@@ -101,19 +101,19 @@ spec:
              embeds helm.sh/chart + app.kubernetes.io/version, so a chart bump would
              change the pod template and needlessly rolling-restart the plugin
              (resource-monitor keeps versioned labels off its pod template for the
-             same reason — client#564 / Bugbot). */ -}}
+             same reason). */ -}}
         {{- include "tracebloc.selectorLabels" . | nindent 8 }}
     spec:
       {{- with include "tracebloc.nvidiaPluginRuntimeClass" . }}
-      # client#835: run the plugin under the `nvidia` RuntimeClass so its pod gets
+      # run the plugin under the `nvidia` RuntimeClass so its pod gets
       # the GPU (the node's containerd invokes the NVIDIA runtime) and NVML can
       # enumerate GPUs — otherwise the pod runs under the default runtime, sees no
       # device, and registers 0. The Linux installer sets this to "nvidia" only when
       # the GPU is wired. k3s creates the RuntimeClass when it finds the host's
-      # NVIDIA toolkit, inside tracebloc's WSL distro too (client-dev#1810 part 3).
+      # NVIDIA toolkit, inside tracebloc's WSL distro too.
       # Left unset on
       # CPU, and by the PowerShell core, whose path doesn't run this plugin, until
-      # client-dev#2133 retires it.
+      # it is retired.
       runtimeClassName: {{ . | quote }}
       {{- end }}
       # NOT NEEDED, and no ServiceAccount is named — so without this the pod
@@ -141,13 +141,14 @@ spec:
         {{- $nvRes := ($nv.resources | default dict) }}
         - name: nvidia-device-plugin-ctr
           image: {{ include "tracebloc.thirdPartyImage" (dict "site" "gpu.devicePlugin.nvidia" "root" $) | quote }}
-          # EXPLICIT, not emergent (backend#2009). The kubelet defaults the pull
+          # EXPLICIT, not emergent. The kubelet defaults the pull
           # policy from the image reference — `:latest` → Always, a digest or any
-          # other tag → IfNotPresent. backend#4160 pins AMD by digest and NVIDIA
+          # other tag → IfNotPresent. The AMD image is pinned by digest and NVIDIA
           # is on a fixed tag, so both resolve to IfNotPresent today; but its own
           # re-home instructions say to CLEAR the digest, and a re-home left on
           # a floating tag would silently revert to Always (the
-          # ImagePullBackOff-on-offline-restart trap #569). Stating the policy makes it independent of the reference.
+          # ImagePullBackOff-on-offline-restart trap). Stating the policy makes it
+          # independent of the reference.
           imagePullPolicy: IfNotPresent
           env:
             # Optional GPU: a node without a working NVIDIA runtime must not
@@ -159,7 +160,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-          # GUARANTEED QoS, deliberately (backend#2871). Vendored from the upstream
+          # GUARANTEED QoS, deliberately. Vendored from the upstream
           # manifest, which ships no resources at all -- so before this the pod was
           # the only BestEffort workload in the chart alongside its AMD twin, i.e. the
           # kernel OOM-killer's FIRST victim on the node.
@@ -195,7 +196,7 @@ spec:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  # Shared helper — see the NVIDIA DaemonSet above (backend#1992).
+  # Shared helper — see the NVIDIA DaemonSet above.
   name: {{ include "tracebloc.gpuDevicePluginName" $vendor }}
   namespace: {{ $ns }}
   labels:
@@ -204,15 +205,14 @@ spec:
   selector:
     matchLabels:
       name: amdgpu-dp-ds
-  # Never gates the auto-upgrade's --atomic wait (backend#1969): see the helper.
+  # Never gates the auto-upgrade's --atomic wait: see the helper.
   updateStrategy:
     {{- include "tracebloc.gpuDevicePluginUpdateStrategy" . | nindent 4 }}
   template:
     metadata:
       labels:
         name: amdgpu-dp-ds
-        {{- /* version-free identity labels only — see the nvidia pod template above
-             (client#564 / Bugbot). */ -}}
+        {{- /* version-free identity labels only — see the nvidia pod template above. */ -}}
         {{- include "tracebloc.selectorLabels" . | nindent 8 }}
     spec:
       # NOT NEEDED, and no ServiceAccount is named — so without this the pod
@@ -238,14 +238,14 @@ spec:
       containers:
         {{- $am := $dp.amd | default dict }}
         {{- $amRes := ($am.resources | default dict) }}
-        # The reference comes from tracebloc.thirdPartyImage (backend#4296): a nil
+        # The reference comes from tracebloc.thirdPartyImage: a nil
         # or empty `amd` block renders the chart default IN FULL, digest included,
         # and an unset `tag` falls back to the pinned release, never `latest`
-        # (backend#2009) -- the one declaration is tracebloc.thirdPartyImageDefaults.
+        # -- the one declaration is tracebloc.thirdPartyImageDefaults.
         - name: amdgpu-dp-cntr
           image: {{ include "tracebloc.thirdPartyImage" (dict "site" "gpu.devicePlugin.amd" "root" $) | quote }}
-          # EXPLICIT — see the nvidia twin above (backend#2009). This is the
-          # vendor #2009 was filed about: values.yaml shipped `tag: latest`.
+          # EXPLICIT — see the nvidia twin above. This is the
+          # vendor whose values.yaml shipped `tag: latest`.
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true

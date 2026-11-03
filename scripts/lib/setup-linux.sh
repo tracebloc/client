@@ -11,7 +11,7 @@
 # to a no-sudo ~/.local/bin). Defaulted here so any caller that reaches the
 # install_* functions WITHOUT going through _set_tools_target — the bats suite,
 # e2e harnesses — still gets the system behaviour, not an empty TRACEBLOC_TOOLS_DIR
-# (kubectl → "/kubectl") or a spurious no-sudo branch (Bugbot #1175 r2).
+# (kubectl → "/kubectl") or a spurious no-sudo branch.
 : "${TRACEBLOC_TOOLS_DIR:=/usr/local/bin}"
 : "${TRACEBLOC_TOOLS_SUDO:=sudo}"
 
@@ -28,15 +28,15 @@ setup_pm() {
   # `tb_root env` because sudo resets the environment by default.
   #
   # apt also waits *indefinitely* on the dpkg lock while apt-daily / unattended-
-  # upgrades hold it on a freshly-booted host (#210); -o DPkg::Lock::Timeout
+  # upgrades hold it on a freshly-booted host; -o DPkg::Lock::Timeout
   # bounds that wait so the install fails with a clear error rather than hanging
   # silently behind the spinner. The waits (240 s update, 540 s install) sit just
-  # under the spin_cmd_bounded deadlines (300 s / 600 s) the callers wrap them in
-  # (client-dev#2048): a held lock then ends as apt's own lock error, handled as
+  # under the spin_cmd_bounded deadlines (300 s / 600 s) the callers wrap them in:
+  # a held lock then ends as apt's own lock error, handled as
   # a failed install, and never as the deadline's "mirror stalled".
   if   has apt-get; then PM_UPDATE="tb_root apt-get update -qq -o DPkg::Lock::Timeout=240"; PM_INSTALL="tb_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -q -o DPkg::Lock::Timeout=540 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
     # A 0600 NVIDIA toolkit source list or keyring an older installer wrote fails every
-    # apt-get update: repaired before this run's first one (client-dev#2879).
+    # apt-get update: repaired before this run's first one.
     if declare -F _nvidia_toolkit_repo_files_readable >/dev/null; then _nvidia_toolkit_repo_files_readable; fi
   elif has dnf;     then PM_UPDATE="tb_root dnf makecache -q";             PM_INSTALL="tb_root dnf install -y -q"
   elif has yum;     then PM_UPDATE="tb_root yum makecache -q";             PM_INSTALL="tb_root yum install -y -q"
@@ -51,7 +51,7 @@ setup_pm() {
 # for several minutes (longer when a kernel/security batch is pending). apt-get
 # then blocks on the lock, and because we run it behind spin_cmd the
 # "Waiting for cache lock…" line is hidden in the log — the installer looks
-# frozen (#210). Surface the wait with a visible spinner and bound it; the
+# frozen. Surface the wait with a visible spinner and bound it; the
 # per-command DPkg::Lock::Timeout (setup_pm) is the backstop if a holder appears
 # mid-run. No-op when apt or fuser is absent, or when the lock is already free.
 apt_wait_for_lock() {
@@ -66,7 +66,7 @@ apt_wait_for_lock() {
     done' || true
 }
 
-# ── Bounded package-manager calls (client-dev#2048) ──────────────────────────
+# ── Bounded package-manager calls ──────────────────────────
 # A package mirror that accepts the connection and then stops sending hangs
 # apt/dnf/zypper with no timeout of their own, and behind spin_cmd that was a
 # spinner with no message until something else killed the install. A healthy index
@@ -122,7 +122,7 @@ install_system_deps() {
   # Helm's release tarball is unpacked with tar + gzip; minimal cloud images
   # (Amazon Linux 2023, minimal RHEL) ship neither. openssl is NOT needed any
   # more — the Helm download is verified with sha256sum since get-helm-3 was
-  # replaced by a direct fetch (#395; see _fetch_helm_release). Package names
+  # replaced by a direct fetch (see _fetch_helm_release). Package names
   # are uniform across apt/dnf/yum/zypper/pacman.
   has tar       || MISSING_PKGS+=(tar)
   has gzip      || MISSING_PKGS+=(gzip)
@@ -132,7 +132,7 @@ install_system_deps() {
     # (|| log) — so a flaky mirror refresh was MORE fatal than a failed install,
     # which is backwards. A stale index usually still installs from cache; if a
     # package genuinely can't be found, the guarded install below surfaces it.
-    # Both bounded (client-dev#2048): see _pm_update_bounded / _pm_install_stalled.
+    # Both bounded: see _pm_update_bounded / _pm_install_stalled.
     _pm_update_bounded
     local _pkg_rc
     for pkg in "${MISSING_PKGS[@]}"; do  # set-u-safe: inside the non-empty check
@@ -155,7 +155,7 @@ install_system_deps() {
 
 # ── kubectl ──────────────────────────────────────────────────────────────────
 # _set_tools_target — decide WHERE kubectl/helm install and whether that needs
-# sudo, by the tier (RFC 0001 #1175). Tier 0 runs with no administrator rights
+# sudo, by the tier. Tier 0 runs with no administrator rights
 # (the macOS node, _mac_ct_install_macos, and a user adopting the k3s prepare-host
 # set up for them, k3s.sh), so its tools MUST NOT sudo: a password prompt hidden
 # under spin_cmd would hang the step. They go into ~/.local/bin (user-owned), put
@@ -177,19 +177,19 @@ _fetch_kubectl() {
   local ver="$1" arch="$2"
   # Download platform slug: defaults to linux, so Linux (and every bats fetch test
   # that leaves OS_DL unset) is byte-identical; the macOS path sets OS_DL=darwin so
-  # the SAME pinned/verified fetch honors the pins there too (#429).
+  # the SAME pinned/verified fetch honors the pins there too.
   local os="${OS_DL:-linux}"
   local tmpdir
   tmpdir="$(mktemp -d)"
   # A stall floor, not a hard --max-time: kubectl is a ~50 MB binary, and a hard
   # cap would fail a slow-but-healthy link. These flags are also how curl_secure
-  # knows not to add its default deadline here (Bugbot, backend#1252).
+  # knows not to add its default deadline here (Bugbot).
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl" -o "${tmpdir}/kubectl"
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl.sha256" -o "${tmpdir}/kubectl.sha256"
   # Catch a truncated/blocked transfer as a TRANSFER failure before the checksum
-  # misreports it as tampering (#607). kubectl is ~50 MB; 20 MB is a safe floor.
+  # misreports it as tampering. kubectl is ~50 MB; 20 MB is a safe floor.
   _assert_download_size "${tmpdir}/kubectl" 20000000 "kubectl" "$tmpdir"
   _verify_sha256 "$(cat "${tmpdir}/kubectl.sha256")" "${tmpdir}/kubectl" \
     || { rm -rf "$tmpdir"; error "System tool checksum verification failed"; }
@@ -245,7 +245,7 @@ install_kubectl() {
 # tar + gzip. The full flow guarantees them via install_system_deps, but the
 # Tier 0 fast path skips that step — and minimal cloud images (Amazon Linux
 # 2023, minimal RHEL) genuinely ship without them, so the Helm install would
-# die mid-flight (Bugbot #383). Product call (#395): the installer takes care
+# die mid-flight. Product call: the installer takes care
 # of its own requirements — install what's missing via the package manager
 # instead of telling the user to go install tools. Root / passwordless sudo
 # installs quietly; otherwise we say exactly why we're asking for a password
@@ -260,7 +260,7 @@ _ensure_unpack_tools() {
   # runs the command directly (fine with no sudo binary at all), so nothing to
   # strip here. The OPTION-led probes below must BYPASS the shadow via
   # _have_sudo_bin/_real_sudo — as root the shadow would execute "-n true" as a
-  # command — mirroring preflight_sudo/_probe_privilege (Bugbot #372).
+  # command — mirroring preflight_sudo/_probe_privilege.
   if [ "${EUID:-1000}" -ne 0 ] && ! _real_sudo -n true 2>/dev/null; then
     _have_sudo_bin || error "Couldn't install ${missing[*]} (needed to unpack Helm): you aren't root and this machine has no sudo. Ask an administrator to install ${missing[*]}, then re-run this installer."  # set-u-safe: the empty-missing check above returns first
     # A password IS needed — prompt on a plain line (a spinner would garble the
@@ -294,7 +294,7 @@ _ensure_unpack_tools() {
   _pm_update_bounded
   # ONE combined install (not per-package): a single sudo consumer right after
   # the priming, minimizing the window in which the ticket could lapse. Bounded
-  # like the refresh (client-dev#2048).
+  # like the refresh.
   local _unpack_rc=0
   # shellcheck disable=SC2086  # PM_INSTALL is a command line that must word-split
   spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 600 "Installing ${missing[*]}…" $PM_INSTALL "${missing[@]}" || _unpack_rc=$?  # set-u-safe: the empty-missing check above returns first
@@ -319,13 +319,12 @@ _ensure_unpack_tools() {
 # move the binary into TRACEBLOC_TOOLS_DIR. Runs under spin_cmd — no output of its own.
 # Direct download replaces helm's get-helm-3: that script floats on the MUTABLE
 # helm/helm@main (unpinned code executed on the host), needs openssl for its
-# checksum step (absent on minimal images — Bugbot #383), and its own fetches
+# checksum step (absent on minimal images), and its own fetches
 # are unbounded. sha256sum (coreutils) is present everywhere we run, get.helm.sh
-# is Helm's official release CDN, and the pin keeps installs deterministic
-# (#382).
+# is Helm's official release CDN, and the pin keeps installs deterministic.
 _fetch_helm_release() {
   local tag="$1" arch="$2" tarball tmpdir
-  local os="${OS_DL:-linux}"   # linux by default; darwin on the macOS path (#429)
+  local os="${OS_DL:-linux}"   # linux by default; darwin on the macOS path
   tarball="helm-${tag}-${os}-${arch}.tar.gz"
   tmpdir="$(mktemp -d)"
   # --connect-timeout + a stall floor (not --max-time: the tarball is ~17 MB and
@@ -336,10 +335,10 @@ _fetch_helm_release() {
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "https://get.helm.sh/${tarball}.sha256sum" -o "${tmpdir}/${tarball}.sha256sum"
   # The published file is "<sha256>  <tarball-name>" — pull the hash and verify the
-  # tarball with the portable checker (sha256sum on Linux, shasum on macOS; #429).
+  # tarball with the portable checker (sha256sum on Linux, shasum on macOS).
   local want
   want="$(awk 'NR==1{print $1}' "${tmpdir}/${tarball}.sha256sum" 2>/dev/null)"
-  # Transfer-vs-checksum distinction (#607): the Helm tarball is ~17 MB; 5 MB floor
+  # Transfer-vs-checksum distinction: the Helm tarball is ~17 MB; 5 MB floor
   # catches a truncated/blocked download before the checksum misreports tampering.
   _assert_download_size "${tmpdir}/${tarball}" 5000000 "Helm" "$tmpdir"
   if [ -z "$want" ] || ! _verify_sha256 "$want" "${tmpdir}/${tarball}"; then
@@ -366,7 +365,7 @@ _ensure_helm_executable() {
     # works and MUST NOT sudo (would prompt on the tty after the zero-privilege
     # promise, like the systemctl guard). Full flow: /usr/local/bin needs sudo.
     # TRACEBLOC_TOOLS_SUDO is set by _set_tools_target (empty on Tier 0), defaulted to
-    # "sudo" at module scope for direct callers (Bugbot #1175 r3).
+    # "sudo" at module scope for direct callers.
     if [[ -n "${TRACEBLOC_TOOLS_SUDO:-}" ]]; then
       sudo chmod 755 "$helm_bin" 2>/dev/null || true
     else
@@ -390,7 +389,7 @@ install_helm() {
       || error "HELM_VERSION must be a Helm release tag like v4.2.3, or 'latest' (got '${HELM_VERSION:-}')"
 
     # Unpack needs tar + gzip — make sure of them BEFORE spending the download,
-    # installing them ourselves when missing (#395; Tier 0 skips system deps).
+    # installing them ourselves when missing (Tier 0 skips system deps).
     _ensure_unpack_tools
 
     if [ -z "$_helm_tag" ]; then
@@ -415,7 +414,7 @@ install_helm() {
   _ensure_helm_executable
   # bare `helm version` (not --short: it may be dropped like kubectl's was). --rm
   # removes our TRACEBLOC_TOOLS_DIR copy only if IT is the binary that failed (-ef guard),
-  # never a pre-existing / pkg-managed helm elsewhere on PATH (#411 review).
+  # never a pre-existing / pkg-managed helm elsewhere on PATH.
   assert_tool_runs --rm "$TRACEBLOC_TOOLS_DIR/helm" helm version
 }
 
@@ -424,7 +423,7 @@ install_helm() {
 # floor skips the GPU (detect_gpu judged it, and printed the remedy) there is no driver
 # install, no toolkit and no wiring: TRACEBLOC_GPU_WIRED stays 0. A driver below the
 # floor only warned, and is set up like any other. A driver install that put no driver
-# in (install_nvidia_drivers returns 1, client-dev#1699) is CPU mode the same way:
+# in (install_nvidia_drivers returns 1) is CPU mode the same way:
 # nothing past it runs. Otherwise the toolkit package and a CDI spec follow (k3s.sh
 # _native_k3s_gpu_prepare, slim client 1.1i), and nothing touches a container
 # runtime: k3s finds the toolkit when it first starts in step c, and step c's gate
@@ -471,7 +470,7 @@ _tools_rc_for_shell() {
 # ~/.local/bin, that dir usually isn't on a fresh shell's PATH, so the summary's
 # suggested `kubectl …` commands fail in a NEW terminal — and because the CLI can
 # live in /usr/local/bin (already on PATH), nothing else triggers a PATH fix
-# either (Bugbot #375). Persist the dir to the shell rc so future terminals
+# either. Persist the dir to the shell rc so future terminals
 # resolve the tools. Idempotent (skips if the rc already references ~/.local/bin)
 # and best-effort — a PATH-persist hiccup must never fail an otherwise-good
 # install. No-op unless we actually used the user-local dir (i.e. Tier 0).
@@ -480,7 +479,7 @@ _persist_tools_on_path() {
   # fish reads ~/.config/fish, not the POSIX rc files, and uses `set`/fish_add_path
   # rather than `export PATH=`. Appending a bash `export` line to ~/.profile would
   # be dead (fish never loads it), so hint the fish-correct command instead — it
-  # persists (a universal var) AND applies to the current shell (Bugbot #375).
+  # persists (a universal var) AND applies to the current shell.
   if [ "$(basename "${SHELL:-sh}")" = "fish" ]; then
     hint "Add ${HOME}/.local/bin to your PATH so kubectl and helm resolve:  fish_add_path \"${HOME}/.local/bin\""
     return 0
@@ -497,7 +496,7 @@ _persist_tools_on_path() {
 }
 
 # ── Main Linux installer ────────────────────────────────────────────────────
-# install_linux -- step b on Linux: native k3s (RFC-0175 D3), which k3s.sh sets up
+# install_linux -- step b on Linux: native k3s, which k3s.sh sets up
 # (_native_k3s_install_linux). The resolver refuses every other substrate before step
 # a; a run that reached step b with one anyway (a caller that set the substrate
 # itself) is refused here by name, whatever the retired map or the WSL probe says.
@@ -515,10 +514,10 @@ install_linux() {
 }
 
 # refuse_sudo_wrapped_install — a full provision must run as the DAILY (non-root)
-# user; the installer elevates each privileged step itself (RFC-0002). A
+# user; the installer elevates each privileged step itself. A
 # `sudo bash install.sh` runs the WHOLE thing as root: ~/.tracebloc, ~/.kube/config
 # and the chmod-600 credential would land root-owned under /root — locking the
-# daily user out, with no chown anywhere to undo it (#427). Refuse it early, before
+# daily user out, with no chown anywhere to undo it. Refuse it early, before
 # any file is created.
 # Exemptions: a genuine root login (no SUDO_USER) is fine — /root IS its home; and
 # prepare-host (the admin path) has already dispatched-and-exited in main() before
@@ -535,7 +534,7 @@ refuse_sudo_wrapped_install() {
 # run for: TB_PREPARE_USER, trimmed. WHAT finishes the warning's "prepare-host ..."
 # for this path. The user must be named EXPLICITLY: never $SUDO_USER, which is the
 # ADMIN who ran prepare-host, not the researcher (granting the admin would report
-# success while the researcher still can't install; Bugbot #377).
+# success while the researcher still can't install).
 #
 # TB_PREPARE_USER is the ONLY name read here, although the other CLI hand-off names
 # also accept a TRACEBLOC_ spelling. Every `tracebloc prepare-host` clears an
@@ -562,7 +561,7 @@ _prepare_host_named_user() {
   TB_PREPARE_TARGET="$target"
 }
 
-# _prepare_host_print — `prepare-host --print` (RFC-0175 D3, client-dev#1541):
+# _prepare_host_print — `prepare-host --print`:
 # run_prepare_host itself, with TRACEBLOC_ROOT_PLAN set, so each privileged command it
 # would run is listed by the root executor (common.sh's tb_root) and none runs.
 # The list cannot drift from a run: it IS the run's own calls. The dry run's
@@ -577,7 +576,7 @@ _prepare_host_print() {
   : > "$plan" || error "prepare-host --print: couldn't write the plan under ${dir}. Nothing ran."
   # The subshell reaps what it makes itself (a subshell starts with no EXIT trap),
   # from an empty list, so the plan's own directory is never among them. Its exit
-  # goes through tb_exit_rc (client-dev#1752): on bash 3.2 an abort in the dry run
+  # goes through tb_exit_rc: on bash 3.2 an abort in the dry run
   # would otherwise exit 0 here and show a partial plan as the whole one.
   ( export TRACEBLOC_ROOT_PLAN="$plan"; _TB_SCRATCH_DIRS=""; _tb_done=0
     trap '_tb_rc=$?; tb_scratch_reap; exit "$(tb_exit_rc "$_tb_rc")"' EXIT
@@ -607,11 +606,11 @@ _prepare_host_print() {
   return 0
 }
 
-# run_prepare_host — the standalone, admin-run step (RFC 0001 #1178). An
+# run_prepare_host — the standalone, admin-run step. An
 # administrator runs this ONCE (`curl … | bash -s -- prepare-host`, or
 # `tracebloc prepare-host`) to set native k3s up FOR the researcher named in
 # TB_PREPARE_USER, who then installs with no administrator rights (k3s.sh,
-# _native_k3s_prepare_host; RFC-0175 D3). It never mints a credential or installs
+# _native_k3s_prepare_host). It never mints a credential or installs
 # the CLI, so an admin can safely run it on a shared host without provisioning
 # anything as themselves.
 run_prepare_host() {

@@ -7,8 +7,8 @@
 #  tracebloc on THIS host?" — so the installer can stop demanding sudo up front.
 #
 #  It is the sensing + reporting layer ONLY. It classifies the host and renders
-#  an audit; it does NOT branch the install (that is the tier-routing step,
-#  backend#1172) and it NEVER mutates. Every probe is read-only and
+#  an audit; it does NOT branch the install (that is the tier-routing step)
+#  and it NEVER mutates. Every probe is read-only and
 #  side-effect-free: `/sys` + `/proc` reads, `id`, `command -v`.
 #
 #  Tiers (see the RFC):
@@ -17,7 +17,7 @@
 #    2  native k3s otherwise (it runs as root), or an OS this installer does not
 #       serve — a one-time admin step is required.
 #  Tier 1, rootless Docker for k3d, left with k3d, and with it the kernel and
-#  subordinate-ID probes it needed (client-dev#1950). Native k3s reads its own
+#  subordinate-ID probes it needed. Native k3s reads its own
 #  cgroup version (k3s.sh, _native_k3s_cgroup_version) and runs on v1 too.
 #
 #  run_host_probes sets, once:
@@ -33,7 +33,7 @@
 
 # ── Low-level readers (each read-only; overridable in bats) ───────────────────
 
-# _probe_wsl — are we running inside a WSL2 distro (Linux inside Windows)? #1179.
+# _probe_wsl — are we running inside a WSL2 distro (Linux inside Windows)?
 # WSL sets WSL_DISTRO_NAME / WSL_INTEROP in the environment and stamps "microsoft"/
 # "WSL" into the kernel release. Read-only. Its consumers include the audit note,
 # the run contract (refuse_wsl_run, lib/common.sh), which refuses a run in any WSL
@@ -58,8 +58,8 @@ _probe_wsl_kernel() {
 }
 
 # TB_WSL_DISTRO — the name of tracebloc's own WSL distro: the one the Windows
-# installer imports and runs this core in, `wsl -d tracebloc -u root -- bash …`
-# (client-dev#1810 part 1). Inside WSL, native k3s serves this distro only
+# installer imports and runs this core in, `wsl -d tracebloc -u root -- bash …`.
+# Inside WSL, native k3s serves this distro only
 # (_native_k3s_refuse_host); a user's own distro stays refused.
 TB_WSL_DISTRO="tracebloc"
 
@@ -67,7 +67,7 @@ TB_WSL_DISTRO="tracebloc"
 # (_probe_wsl_kernel, never the environment alone), and WSL_DISTRO_NAME, which
 # WSL sets in every process `wsl -d NAME` starts, naming TB_WSL_DISTRO. A Linux
 # host that merely exports the name is not WSL, so it is not this distro, and
-# keeps every Linux step (client-dev#1810 part 2). Read-only.
+# keeps every Linux step. Read-only.
 _probe_wsl_ours() {
   _probe_wsl_kernel && [[ "${WSL_DISTRO_NAME:-}" == "$TB_WSL_DISTRO" ]]
 }
@@ -78,7 +78,7 @@ _probe_wsl_ours() {
 # PATH resolves). Read from the mount table for the mount that holds PATH's
 # nearest existing ancestor, symlinks resolved, so a link into /mnt/c is seen.
 # drvfs is mounted as `9p` with `aname=drvfs` on WSL2 and as `drvfs` on WSL1, and
-# its source is the drive (`C:\`); any one of the three marks it. RFC-0175 D5: a
+# its source is the drive (`C:\`); any one of the three marks it. A
 # volume, the database's InnoDB files among them, never lives on drvfs. The mount
 # table is overridable (TRACEBLOC_PROC_MOUNTS_FILE) so it's testable off WSL.
 _probe_windows_drive() {
@@ -124,8 +124,8 @@ _probe_privilege() {
   # Detect the real sudo *binary*, never a `sudo` shell function common.sh
   # installs (the A2 shadow). `has sudo` / a bare `sudo -n true` both resolve
   # to that function, so a host with no sudo at all would look like sudo is
-  # present and we'd misreport the posture as sudo_pw instead of no_sudo
-  # (Bugbot #372). Reuse the same primitives preflight_sudo uses: _have_sudo_bin
+  # present and we'd misreport the posture as sudo_pw instead of no_sudo.
+  # Reuse the same primitives preflight_sudo uses: _have_sudo_bin
   # (type -P, ignores functions) and _real_sudo (command sudo, bypasses it).
   if ! _have_sudo_bin; then echo "no_sudo"; return 0; fi
   if tb_root_n true 2>/dev/null; then echo "sudo_nopw"; return 0; fi
@@ -141,7 +141,7 @@ _classify_from_probes() {
   INSTALL_TIER=2
   INSTALL_TIER_REASON="unknown"
 
-  # Native k3s runs as root (RFC-0175 D3). install_linux routes k3s before reading
+  # Native k3s runs as root. install_linux routes k3s before reading
   # the tier; this keeps the panel from promising "zero root" to a run that will ask
   # for sudo. Its one Tier 0 is a host an administrator prepared for this user (1.1g).
   # On a Mac the install serves it is Tier 0: the node runs in Apple's VM from the user's
@@ -168,7 +168,7 @@ _classify_from_probes() {
 
   # A Mac never gets here: it is always the macOS node (above, slim client 4.1). Any
   # other non-Linux (e.g. Git Bash / MINGW on Windows) isn't served by this bash
-  # installer at all — say so (Bugbot #370).
+  # installer at all — say so.
   if [[ "${OS:-}" != "Linux" ]]; then
     INSTALL_TIER=2; INSTALL_TIER_REASON="unsupported-os"
     return 0
@@ -228,7 +228,7 @@ render_host_audit() {
     _audit_row "Container runtime" "Apple container ${TRACEBLOC_APPLE_CONTAINER_VERSION:-} (set up for you)" note
   fi
 
-  # WSL2 (#1179): inside WSL the environment IS Linux, so the Linux tiers apply.
+  # WSL2: inside WSL the environment IS Linux, so the Linux tiers apply.
   if [[ "${PROBE_WSL:-0}" == "1" ]]; then
     _audit_row "Environment" "WSL2 (Linux-in-Windows)" note
   fi

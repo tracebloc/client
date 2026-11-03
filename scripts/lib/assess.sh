@@ -5,7 +5,7 @@
 #  A re-run of the installer on a machine that is ALREADY set up says what it
 #  found before the normal flow reconciles it. This module inspects native k3s
 #  READ-ONLY and classifies it; main() then runs the normal flow, which on k3s
-#  moves the node forward on every re-run (RFC-0175 D4/D11).
+#  moves the node forward on every re-run.
 #
 #  NON-MUTATING. It must never start the cluster, run helm, mint a credential, or
 #  write anything but the context file _assess_classify_k3s names and removes.
@@ -25,13 +25,13 @@
 #               cli-behind-latest is the ONE degraded reason where the
 #               environment is fully healthy: it fires ONLY under an explicit
 #               `tracebloc upgrade` (TB_UPGRADE_CLI) when the CLI is above the
-#               floor but behind the latest release (backend#2253).
+#               floor but behind the latest release.
 # =============================================================================
 
 # --force / --reinstall (or TRACEBLOC_FORCE_REINSTALL=1) bypasses the gate and
 # runs the full flow. Defaulted here so the gate is safe to consult even if the
 # arg scan never set it; main()'s arg parsing flips it to 1 on the flag.
-# Settings naming (backend#3846): TRACEBLOC_FORCE_REINSTALL is the canonical and
+# Settings naming: TRACEBLOC_FORCE_REINSTALL is the canonical and
 # is read FIRST; TB_FORCE_REINSTALL is the legacy hand-off name (remove_by
 # 2026-12-31), which the bootstrap (install.sh) now exports beside the canonical.
 TB_FORCE_REINSTALL="${TRACEBLOC_FORCE_REINSTALL:-${TB_FORCE_REINSTALL:-0}}"
@@ -44,7 +44,7 @@ TB_FORCE_REINSTALL="${TRACEBLOC_FORCE_REINSTALL:-${TB_FORCE_REINSTALL:-0}}"
 # namespace NS? "Ready" MUST match the installer's OWN definition, so this
 # iterates the SAME deployment set as wait_for_client_ready (summary.sh) via the
 # shared _client_workloads — mysql-client + jobs-manager + egress-gate, READ
-# from the release rather than rebuilt from the namespace (backend#2888), so an
+# from the release rather than rebuilt from the namespace, so an
 # overridden release is judged on its real Deployments. A machine with
 # jobs-manager up but egress-gate (training egress) or mysql-client down is
 # NOT healthy, and must reconcile rather than be told "already set up".
@@ -85,7 +85,7 @@ _assess_cli_present() {
   _assess_cli_bin >/dev/null
 }
 
-# _version_lt lives in common.sh (backend#2422): other libs compare versions too,
+# _version_lt lives in common.sh: other libs compare versions too,
 # and assess.sh is sourced CONDITIONALLY by
 # install-k8s.sh (`[[ -f ]]`, for stale checkouts) while common.sh is not. A
 # second copy here would be the restated-rule defect, so there is exactly one.
@@ -93,9 +93,9 @@ _assess_cli_present() {
 # the bats helper's `load_lib` chains common.sh.
 
 # _assess_cli_outdated — is the installed CLI below the floor the installer will
-# actively repair? (client#707)
+# actively repair?
 #
-# The floor is 0.10.63, the platform's own CLI floor (backend#4959). It was
+# The floor is 0.10.63, the platform's own CLI floor. It was
 # 0.10.0, the release where the CLI gained its own update nudge: at or above it
 # a user can keep themselves current; below it NOTHING on the machine can tell
 # them they are behind — the cluster auto-upgrades hourly around a host binary
@@ -119,7 +119,7 @@ _assess_cli_present() {
 _assess_cli_version() {
   local ver
   # No pipe: `tracebloc version | head -1` would let head close the pipe first,
-  # and pipefail turns that into a 141 the caller never asked for (backend#1778).
+  # and pipefail turns that into a 141 the caller never asked for.
   # Bounded: a wedged CLI must not hang the install; a timeout reads as no version.
   ver="$(_bounded "${TB_CLI_VERSION_TIMEOUT:-15}" "$1" version 2>/dev/null || true)"
   ver="${ver%%$'\n'*}"                     # first line
@@ -140,7 +140,7 @@ _assess_cli_outdated() {
 
 # _assess_cli_behind_latest — for an EXPLICIT `tracebloc upgrade` only, is the
 # installed CLI behind the LATEST release (as opposed to below the mandatory-
-# reinstall floor)? This is the gap backend#2253 closed: the floor above stopped
+# reinstall floor)? This is the gap: the floor above stopped
 # at 0.10.0 then, but the CLI's own update nudge fires against latest, so a CLI at e.g.
 # 0.10.5 with latest 0.10.8 was nagged on every command while `tracebloc upgrade`
 # — which re-runs this installer — found the machine "healthy" and changed
@@ -175,7 +175,7 @@ _assess_cli_behind_latest() {
 }
 
 # _assess_release_pending NS — true when a release in NS is wedged (pending-* or
-# uninstalling: a killed helm op, #554). Names both states so it doesn't depend on
+# uninstalling: a killed helm op). Names both states so it doesn't depend on
 # the pinned helm's default listing. `helm list -q` is jq-free; bounded per the
 # installer's never-hang contract.
 _assess_release_pending() {
@@ -240,7 +240,7 @@ _assess_credential_rejected() {
 }
 
 # _assess_gpu_request_unsupported NS — true when the release in NS requests a GPU this
-# installer no longer sets up (client-dev#1697, #1698): amd.com/gpu (there is no ROCm
+# installer no longer sets up: amd.com/gpu (there is no ROCm
 # training image), or nvidia.com/gpu on a Linux machine that is not x86_64 (the GPU
 # images are linux/amd64 only). Such a release was installed before the fix, so the
 # caller degrades it, and the normal flow's step e writes this run's CPU-only
@@ -265,7 +265,7 @@ _assess_gpu_request_unsupported() {
 _assess_classify_release() {
   # Cluster is running (live API). Is a tracebloc release installed on it? Reuse
   # the shared jq-free probe (sets INSTALLED_CLIENT_NS) so this can never disagree
-  # with the Helm-step / #303 ownership guards on "what runs here". A running
+  # with the Helm-step ownership guards on "what runs here". A running
   # cluster with no release is still a first-time client setup.
   local ns=""
   if declare -F detect_installed_client >/dev/null 2>&1; then
@@ -277,7 +277,7 @@ _assess_classify_release() {
     return 0
   fi
 
-  # A pending-* wedge (killed helm op, #554) usually keeps its prior revision Ready,
+  # A pending-* wedge (killed helm op) usually keeps its prior revision Ready,
   # so it would fast-path to healthy and skip recovery. Degrade so the normal flow
   # runs and _recover_pending_helm_release clears it.
   if _assess_release_pending "$ns"; then
@@ -288,7 +288,7 @@ _assess_classify_release() {
   # Does tracebloc still accept the credential this client runs with? A revoked one
   # looks healthy here (or crash-loops jobs-manager, which reads as
   # workload-not-ready) while the dashboard shows the client offline, and neither
-  # repair path would ever renew it (backend#5365). Checked BEFORE readiness for
+  # repair path would ever renew it. Checked BEFORE readiness for
   # that reason. Only a definite rejection counts: an unreadable Secret or an
   # unreachable backend is not a reason to rotate a credential.
   if _assess_credential_rejected "$ns"; then
@@ -320,7 +320,7 @@ _assess_classify_release() {
     return 0
   fi
 
-  # Present, but too old to keep itself current (client#707). Without this the
+  # Present, but too old to keep itself current. Without this the
   # healthy fast-path pins a user to whatever CLI they first installed, forever
   # and silently — the ONE thing on the machine that no auto-upgrade reaches.
   if [[ "$cli_here" == 1 ]] && _assess_cli_outdated; then
@@ -328,7 +328,7 @@ _assess_classify_release() {
     return 0
   fi
 
-  # A release that requests a GPU no tracebloc image can use (client-dev#1697, #1698):
+  # A release that requests a GPU no tracebloc image can use:
   # the normal flow re-stamps its GPU request to CPU-only. Ahead of cli-behind-latest, so
   # an explicit `tracebloc upgrade` says it switches the request to CPU mode, where
   # cli-behind-latest says nothing.
@@ -338,7 +338,7 @@ _assess_classify_release() {
   fi
 
   # Above the floor, but an explicit `tracebloc upgrade` and behind the latest
-  # release (backend#2253). A DISTINCT reason from cli-outdated: the gate returns on
+  # release. A DISTINCT reason from cli-outdated: the gate returns on
   # it without the degraded lines, and main() runs the full install, whose step b
   # updates the CLI. Ordered AFTER the floor check so a below-floor CLI stays
   # cli-outdated (a mandatory full reinstall), and inert on ordinary runs because
@@ -352,7 +352,7 @@ _assess_classify_release() {
   return 0
 }
 
-# _assess_classify_k3s — the classification on native k3s (client-dev#1926), on
+# _assess_classify_k3s — the classification on native k3s, on
 # Linux and in tracebloc's WSL distro, in the INSTALL_STATE / INSTALL_STATE_REASON
 # vocabulary main() handles (the degraded copy, provision.sh's --reissue on
 # credential-rejected); a healthy k3s goes on to the normal flow
@@ -452,7 +452,7 @@ assess_existing_install() {
   _assess_classify_k3s
   log "assess: INSTALL_STATE=${INSTALL_STATE} reason=${INSTALL_STATE_REASON:-}"
 
-  # backend#2253: an explicit `tracebloc upgrade` on a box that is healthy on
+  # An explicit `tracebloc upgrade` on a box that is healthy on
   # every axis EXCEPT that its CLI is behind latest. Do NOT run the degraded
   # ceremony below: RETURN, and main() runs the full install, whose step b updates
   # the CLI and whose step c moves the node forward. Kept out of the case switch on
@@ -463,7 +463,7 @@ assess_existing_install() {
 
   case "$INSTALL_STATE" in
     healthy)
-      # NATIVE K3S DOES NOT HAND OFF. RFC-0175 D4 and D11: every installer re-run on
+      # NATIVE K3S DOES NOT HAND OFF. Every installer re-run on
       # k3s moves the node forward (the binary upgraded in place, its files rewritten
       # and k3s restarted when they changed), and that is step c's work. So a healthy
       # k3s goes on to the normal flow, as fresh/cluster-no-release does: no copy, one
@@ -490,7 +490,7 @@ assess_existing_install() {
                             info "tracebloc no longer accepts this machine's credential, so it shows offline — issuing it a new one and reconnecting."
           fi ;;
         gpu-unsupported)    info "Your secure environment asks for a GPU tracebloc's training images can't use — switching it to CPU mode." ;;
-        # "COULDN'T READ" IS NOT A STATE OF THE INSTALL (client#984). Without its own arm
+        # "COULDN'T READ" IS NOT A STATE OF THE INSTALL. Without its own arm
         # it would fall into the generic line below, which claims an environment EXISTS
         # and is partly built, about a machine nobody could read. The read that did not
         # answer is systemd's or the k3s API's (_assess_classify_k3s), so the line names

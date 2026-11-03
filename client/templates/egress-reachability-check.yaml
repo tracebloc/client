@@ -1,6 +1,6 @@
 {{- if dig "enabled" true (default dict .Values.egressReachabilityCheck) }}
 {{- /*
-  In-cluster backend-reachability check (client-runtime#116 WS3 / cli#90).
+  In-cluster backend-reachability check.
   A `helm test` hook: run `helm test <release>` to verify a normal (non-training)
   pod in this namespace can reach the tracebloc backend API. This is the egress
   dependency that gates EVERYTHING — the cluster authenticates to the backend to
@@ -25,8 +25,7 @@
 {{- /* RESOLVED: the case statement below keys on dev|stg|prod and its
      catch-all is PROD, so a documented alias like `staging` silently
      probed api.tracebloc.io and passed for the wrong environment --
-     a reachability check that verifies a path the cluster never takes
-     (backend#1723). */ -}}
+     a reachability check that verifies a path the cluster never takes. */ -}}
 {{- $env := include "tracebloc.clientEnv" . -}}
 {{- /* The probe is ONE curl bounded by -m $curlMax; the seal budget adds
        60 s for scheduling and the image pull. Derived, never typed twice. */ -}}
@@ -39,7 +38,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
-    {{- /* seal-check enumeration contract (RFC-0003 §8.2) — see _helpers.tpl */}}
+    {{- /* seal-check enumeration contract — see _helpers.tpl */}}
     {{- include "tracebloc.sealCheckLabels" (dict "name" "backend-reachability") | nindent 4 }}
   annotations:
     "helm.sh/hook": test

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  reinstall.sh — native k3s is never set up on a machine that runs tracebloc on
-#  k3d (RFC-0175 D10). k3d is no longer supported, and this installer never moves
+#  k3d. k3d is no longer supported, and this installer never moves
 #  such a machine: it stops before anything is installed, written or started, says
 #  why in plain words, and names the way off (_reinstall_refuse). Nothing is asked.
 #
@@ -34,6 +34,8 @@ _reinstall_k3d_said() {
   rec="$(tb_record_path)"
   if [[ -e "$rec" ]]; then
     text="$(cat "$rec" 2>/dev/null)" || text=""
+    # A record the clear left behind says the k3d it names is cleared, whatever a root copy says.
+    [[ "$text" != *'"k3d_cleared"'* ]] || return 1
     _reinstall_record_says "the install record ${rec}" "$text" \
       "Check it is the file this installer wrote, or move it aside, then re-run." "$rec"
     return
@@ -189,6 +191,7 @@ _reinstall_k3d_said_for() {
   _reinstall_exists_as "$u" "$rec" || rc=$?
   case "$rc" in
     0) text="$(tb_root_as "$u" cat "$rec" 2>/dev/null)" || text=""
+       [[ "$text" != *'"k3d_cleared"'* ]] || return 1
        _reinstall_record_says "${u}'s install record ${rec}" "$text" \
          "Check it is the file this installer wrote, or move it aside, then re-run prepare-host." "$rec"
        return ;;
@@ -267,7 +270,9 @@ _reinstall_k3d_stamp() { date -u +%Y%m%dT%H%M%SZ; }
 # move the install record aside to <record>.k3d-<timestamp>, then say so in one line,
 # naming the cluster the record or the context named (TB_REINSTALL_CTX).
 # 0 when done; 1 when a file cannot be changed, which leaves the refusal to stand.
-# The cluster side is never touched. A root copy of the record is not ours to move.
+# The cluster side is never touched. A root copy of the record is not ours to move, so
+# when one exists the user's record is rewritten with k3d_cleared, which _reinstall_k3d_said
+# reads before the root copy that would refuse the retry.
 # A failure puts every file back as it was, so the refusal's "Nothing was changed" holds.
 _reinstall_k3d_clear() {
   local rec aside f kc tmp="" bak cluster="${TB_REINSTALL_CTX#k3d-}"
@@ -288,12 +293,27 @@ _reinstall_k3d_clear() {
   if [[ -e "$rec" ]]; then
     aside="${rec}.k3d-$(_reinstall_k3d_stamp)"
     mv "$rec" "$aside" 2>/dev/null || { _reinstall_k3d_undo "$saved"; return 1; }
+    if ! _reinstall_k3d_mark "$aside" "$rec" "$cluster"; then
+      mv "$aside" "$rec" 2>/dev/null; _reinstall_k3d_undo "$saved"; return 1
+    fi
     info "Docker is not available on this machine, so its old k3d secure environment '${cluster}' is left as it is: this installer deleted the k3d-* contexts from your kubeconfig and moved ${rec} to ${aside}. It stays listed on tracebloc as Offline."
   else
     info "Docker is not available on this machine, so its old k3d secure environment '${cluster}' is left as it is: this installer deleted the k3d-* contexts from your kubeconfig. It stays listed on tracebloc as Offline."
   fi
   _reinstall_k3d_drop_backups "$saved"
   return 0
+}
+
+# _reinstall_k3d_mark ASIDE REC CLUSTER -- write the cleared-marker record at REC from the
+# moved-aside ASIDE, when a root copy exists that this process reaches. 0 when none needs
+# it or it is written; 1 when it cannot be.
+_reinstall_k3d_mark() {
+  local dst text now
+  [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] && dst="$(_tb_record_root_copy_path)" \
+    && _tb_record_root_access && _tb_record_root_run test -e "$dst" 2>/dev/null || return 0
+  text="$(cat "$1" 2>/dev/null)" || return 1
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  _tb_record_put "$2" "$(_tb_record_render '"k3d"' "$text" "" "$now" "$(_tb_record_field root_copy "" "$text")" "" "" "" "$(_tb_json "$3")")" >/dev/null 2>&1
 }
 
 # _reinstall_k3d_undo SAVED -- write each backup in SAVED back over its file and

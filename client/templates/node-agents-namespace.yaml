@@ -24,13 +24,13 @@
   lands in the not-yet-relabelled namespace.
 */}}
 {{- /*
-  NO TENANT CONDITION AT ALL, and that is the change backend#2400 made here.
+  NO TENANT CONDITION AT ALL, and that is the change made here.
 
   The history is worth keeping because it explains why the condition kept moving.
   It was `resourceMonitor != false`; the Collector became a second tenant
-  (backend#1906) and with `resourceMonitor: false` + `telemetryCollector.enabled:
+   and with `resourceMonitor: false` + `telemetryCollector.enabled:
   true` its DaemonSet targeted a namespace this chart never created, so the
-  condition widened to `tracebloc.nodeAgentsInUse` (Bugbot on #779). backend#2400
+  condition widened to `tracebloc.nodeAgentsInUse`. That change
   added a THIRD occupant that has no flag to widen to: telemetry-token-rbac.yaml
   renders a Role and RoleBinding here unconditionally, because the Collector's
   token Secret has to exist BEFORE anyone can enable the Collector.
@@ -41,7 +41,7 @@
   cover this: it still gates DaemonSet-managing RBAC and the mirrored pull Secret,
   none of which an occupant with no pods needs, and making it constant would have
   granted auto-upgrade and image-refresh DaemonSet rights in a namespace with no
-  DaemonSets (measured: 4 extra RBAC objects, backend#2400).
+  DaemonSets (measured: 4 extra RBAC objects).
 
   The remaining two conditions are unchanged and both still bite — see above.
 */}}

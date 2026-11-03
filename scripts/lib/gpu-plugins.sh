@@ -2,7 +2,7 @@
 # =============================================================================
 #  gpu-plugins.sh — node-level GPU verification
 # =============================================================================
-# The GPU device plugin is no longer applied imperatively here (client#564).
+# The GPU device plugin is no longer applied imperatively here.
 # It is now a Helm-managed DaemonSet rendered by the chart
 # (client/templates/gpu-device-plugin.yaml), gated on gpu.devicePlugin.enabled,
 # which lib/install-client-helm.sh sets from GPU_VENDOR. Moving it into the
@@ -18,7 +18,7 @@
 verify_gpu() {
   [[ "$GPU_VENDOR" != "nvidia" && "$GPU_VENDOR" != "amd" ]] && return
 
-  # nvidia CPU-fallback (client#835): native k3s's step c can leave GPU_VENDOR=nvidia
+  # nvidia CPU-fallback: native k3s's step c can leave GPU_VENDOR=nvidia
   # with no GPU wired in. There is then nothing for a node poll to find, and running it
   # would stall the finish with a misleading "advertises no GPU" warning. Guarded with
   # `declare -F` so gpu-plugins.sh can still be sourced standalone (its bats suite does)
@@ -37,14 +37,14 @@ verify_gpu() {
   fi
 
   # Only AMD reaches the node poll from install-k8s.sh: a wired NVIDIA run is native k3s
-  # and returned above. TODO(tracebloc/client-dev#1950): drop the poll's NVIDIA arms.
+  # and returned above. TODO: drop the poll's NVIDIA arms.
   log "Verifying GPU on node..."
 
   # The device plugin now rolls out with the Helm release, and `helm upgrade
   # --install` does not --wait, so give the DaemonSet a bounded chance to become
   # Ready before polling node GPU capacity. Without this the node poll can expire
   # while the plugin is still pulling and report "advertises no GPU" on a
-  # healthy install (client#564 / Bugbot). Best-effort: a namespace override or a
+  # healthy install. Best-effort: a namespace override or a
   # genuinely stuck rollout falls through to the node poll below, which is the
   # real check.
   local _gpu_ns="${GPU_DEVICE_PLUGIN_NAMESPACE:-kube-system}"
@@ -54,13 +54,13 @@ verify_gpu() {
   if [[ -n "$_gpu_ds" ]]; then
     # --timeout is the explicit bound for the whole wait; do NOT add
     # --request-timeout — on a watch it caps the underlying request and would
-    # cut this wait to a few seconds, defeating the 120s (client#564 / Bugbot).
+    # cut this wait to a few seconds, defeating the 120s.
     kubectl rollout status "daemonset/$_gpu_ds" -n "$_gpu_ns" \
       --timeout=120s >/dev/null 2>&1 || true
   fi
 
   # The node poll reads the advertised COUNT, never the mere presence of a
-  # `…gpu…` key (client-dev#1555): a device plugin that registered but found no
+  # `…gpu…` key: a device plugin that registered but found no
   # usable device advertises `nvidia.com/gpu: "0"`, and a presence test read that
   # as "GPU verified" while every GPU pod stayed Pending. Only a count above 0 is
   # success; a 0 (or no key) and an unreadable count each say what they are. The
@@ -91,11 +91,11 @@ verify_gpu() {
 }
 
 # _gpu_alloc_count VENDOR — print the allocatable GPU count summed over the
-# nodes, as a whole number (client-dev#1555). A node without the vendor key
+# nodes, as a whole number. A node without the vendor key
 # counts 0. Returns 1 — "cannot tell", never a count — when the read failed, no
 # node came back, or a node's value is not a whole number. jsonpath keeps the
 # output to one short line per node, so nothing is piped through a slicer that
-# could truncate it (the backend#1778 SIGPIPE trap). --request-timeout bounds the
+# could truncate it (the SIGPIPE trap). --request-timeout bounds the
 # call: the 18×5s cap is only re-checked between polls.
 _gpu_alloc_count() {
   local _key _out _line _val _total=0 _nodes=0

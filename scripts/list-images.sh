@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-#  list-images.sh — the COMPLETE set of images an install pulls (backend#2633).
+#  list-images.sh — the COMPLETE set of images an install pulls.
 #
 #  WHY THIS EXISTS. INSTALL.md told a blocked-registry operator to enumerate the
 #  pull set with:
@@ -34,8 +34,8 @@
 #  thing to get wrong. The defect is knowing WHAT TO COPY, not how to re-home it.
 #
 #  EVERYTHING HERE IS DERIVED (CLAUDE.md rule 1). A hand-written list of 32 image
-#  names would drift the first time a task is renamed -- and backend#2605 exists
-#  because exactly that drift already went unnoticed for ~7 months.
+#  names would drift the first time a task is renamed -- and
+#  exactly that drift already went unnoticed for months.
 #
 #    chart images   <- `helm template` on YOUR values, so conditionals resolve
 #                      -- the torch parent included: on a GPU-capable edge whose
@@ -87,7 +87,7 @@ while [ $# -gt 0 ]; do
     # while USAGE sits at 53 and the TRACEBLOC_* seams at 58-66, so --help cut
     # off mid-sentence and named neither -- the operator asking how to run this
     # was shown everything except how to run it. Same defect, same cause as
-    # resolve-training-digests.sh's `2,45p` (client-dev#1177 review): a hard-coded
+    # resolve-training-digests.sh's `2,45p` (a hard-coded
     # range silently drops whatever the header grows past it. This reads to the
     # first non-comment line instead, so the slice cannot drift.
     # Captured, not piped: under `set -o pipefail` an early-closing reader turns
@@ -107,7 +107,7 @@ fi
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 [ -n "$CHART" ] || CHART="$ROOT/client"
 
-# curl_secure() carries the repo's TLS floor and timeout bounds (backend#1252).
+# curl_secure() carries the repo's TLS floor and timeout bounds.
 # A bare `curl` here would be an unbounded, un-floored fetch, and the style guard
 # rejects one by name -- correctly: this call reaches the public internet.
 # shellcheck source=scripts/lib/common.sh
@@ -118,7 +118,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # own CURL_CA_BUNDLE / SSL_CERT_FILE, and the installer's wire_ca_trust() lives
 # in lib/cluster.sh, which this script does not source. So an operator who had
 # already set the documented variable still got an x509 failure and was pointed
-# at a knob that was on and inert (Bugbot, medium; @aptracebloc on #881).
+# at a knob that was on and inert .
 #
 # ONLY IF UNSET. These vars REPLACE the trust store rather than adding to it, so
 # an explicit CURL_CA_BUNDLE is the operator's deliberate choice and must win.
@@ -141,10 +141,10 @@ command -v helm >/dev/null 2>&1 || { echo "list-images: helm is required" >&2; e
 RENDER=$(mktemp); ERRLOG=$(mktemp); CURLERR=$(mktemp)
 # CURLERR is created here, with the other scratch files, so the ONE trap covers
 # it. It was previously mktemp'd inside the paging loop and removed by explicit
-# `rm -f`, which a SIGINT mid-fetch skipped (@aptracebloc on #881, nit).
+# `rm -f`, which a SIGINT mid-fetch skipped.
 trap 'rm -f "$RENDER" "$ERRLOG" "$CURLERR"' INT TERM HUP
 # _tb_done: macOS /bin/bash 3.2 exits 0 when `set -u` aborts under an EXIT trap, so the
-# trap turns a 0 nobody sentinelled into 1; every intended exit sets it first (client-dev#1753).
+# trap turns a 0 nobody sentinelled into 1; every intended exit sets it first.
 _tb_done=0 _tb_rc=0
 trap '_tb_rc=$?; rm -f "$RENDER" "$ERRLOG" "$CURLERR"; if [ "$_tb_rc" -eq 0 ] && [ "${_tb_done:-}" != 1 ]; then _tb_rc=1; fi; exit "$_tb_rc"' EXIT
 
@@ -155,7 +155,7 @@ if ! helm template "$CHART" \
       "${HELM_ARGS[@]+"${HELM_ARGS[@]}"}" >"$RENDER" 2>"$ERRLOG"; then
   echo "list-images: helm template failed, so the pull set is UNKNOWN." >&2
   echo "  Refusing to print a partial list -- an incomplete mirror is the failure" >&2
-  echo "  this tool exists to prevent (backend#2633)." >&2
+  echo "  this tool exists to prevent." >&2
   sed 's/^/  helm: /' "$ERRLOG" >&2
   exit 1
 fi
@@ -166,14 +166,14 @@ fi
 # failing. client/templates/mysql-deployment.yaml renders the mysql pod's main
 # container exactly that way, so `tracebloc/mysql-client` -- a control-plane
 # image -- was missing from every mirror set this script produced, and the mysql
-# pod ImagePullBackOffs on a blocked-registry install: precisely the backend#2633
-# failure (Bugbot High, independently confirmed by @aptracebloc on #881).
+# pod ImagePullBackOffs on a blocked-registry install: precisely the failure
+# the mirror check exists to prevent.
 # scripts/tests/mirror-enumeration-complete.sh now compares this extraction
 # against a PyYAML walk of the same render, so a third YAML form cannot slip
 # past the way this one did.
 # `|| true`: a no-match `grep` exits 1, which `pipefail` propagates and `set -e`
 # turns into a script abort HERE — before the empty check below, making its
-# fail-loud diagnostic dead code (backend#2746). Survive the empty case so the
+# fail-loud diagnostic dead code. Survive the empty case so the
 # check runs and prints the actionable message, exactly as line 338 does.
 chart_images=$(grep -hoE '^[[:space:]]*(-[[:space:]]+)?image:[[:space:]]*"?[^"[:space:]]+' "$RENDER" \
                | sed -E 's/^[[:space:]]*(-[[:space:]]+)?image:[[:space:]]*"?//' | sort -u) || true
@@ -190,7 +190,7 @@ fi
 # `awk ... exit` rather than piping into an early-closing reader: such a reader
 # sends SIGPIPE upstream, and under `set -o pipefail` that becomes exit 141 and
 # kills the whole script. This repo has a dedicated
-# `quality / pipefail early-close` check for that class (backend#2264) -- and
+# `quality / pipefail early-close` check for that class -- and
 # the first version of this script tripped it in four places.
 # Scans forward to the first `value:` after the `name:`, rather than taking the
 # next line. Helm PRESERVES TEMPLATE COMMENTS in rendered output, and
@@ -316,8 +316,8 @@ else
     # sites, and behind a break-and-inspect proxy the real failure is the CA
     # trust path, not a missing task list. Discarding the diagnostic and
     # suggesting TRACEBLOC_TASK_REPOS showed the operator the ONE remedy that
-    # cannot help -- the same "clean symptom, wrong cause" shape backend#2633 is
-    # about. The parse branch below already printed the response body; this one
+    # cannot help -- the same "clean symptom, wrong cause" shape the mirror
+    # check is about. The parse branch below already printed the response body; this one
     # printed nothing.
     # The three `# style-guard: allow` markers below are on lines where `curl`
     # appears inside a MESSAGE, not as a command. check-style.sh's rule 3 greps
@@ -328,7 +328,7 @@ else
     : >"$CURLERR"   # reused across pages; truncate rather than re-mktemp
     if ! body=$(curl_secure -fsS "$page" 2>"$CURLERR"); then
       echo "list-images: could not read the registry repository list, so the training-image set is UNKNOWN." >&2
-      echo "  Refusing to print a list that omits them (backend#2633)." >&2
+      echo "  Refusing to print a list that omits them." >&2
       if [ -s "$CURLERR" ]; then
         sed 's/^/  curl: /' "$CURLERR" >&2   # style-guard: allow
       else
@@ -340,7 +340,7 @@ else
       # "set TRACEBLOC_TASK_REPOS" would never reach it.
       case "$(tr -d '\n' <"$CURLERR")" in
         *certificate*|*x509*|*"SSL"*|*"TLS"*)
-          # FOUR states, not two (client-dev#1190 review, then Bugbot on 4d26b954).
+          # FOUR states, not two .
           # Telling an operator who already exported a bundle to "point curl at your
           # CA bundle" is telling them to do the thing they did. What the message has
           # to name is the file curl ACTUALLY opened, and TRACEBLOC_CA_BUNDLE alone
@@ -392,7 +392,7 @@ for r in d.get("results", []):
 ' 2>/dev/null) || {
       echo "list-images: could not parse the registry response for page ${page_n}, so the" >&2
       echo "  training-image set is INCOMPLETE and therefore UNKNOWN. Refusing to print a" >&2
-      echo "  partial list -- that is exactly the failure backend#2633 is about." >&2
+      echo "  partial list -- that is exactly the failure this tool exists to prevent." >&2
       echo "  Set TRACEBLOC_TASK_REPOS to bypass the registry entirely." >&2
       # The interpreter's own traceback is suppressed in favour of this: the
       # first bytes of what actually came back are the useful diagnostic (an
@@ -418,7 +418,7 @@ fi
 if [ -z "$task_repos" ]; then
   echo "list-images: enumerated ZERO training-image repositories." >&2
   echo "  That is not a plausible answer for this product, and an empty section" >&2
-  echo "  here is precisely the failure backend#2633 is about. Refusing." >&2
+  echo "  here is precisely the failure this tool exists to prevent. Refusing." >&2
   exit 1
 fi
 
@@ -450,6 +450,6 @@ printf '%s\n' "$task_repos" | while IFS= read -r r; do
   [ -n "$r" ] && echo "${job_host}${REGISTRY_NAMESPACE}/${r}:${ENV_TAG}"
 done
 
-# _tb_done: the normal end -- keep its status (client-dev#1753).
+# _tb_done: the normal end -- keep its status.
 # shellcheck disable=SC2320 # the last command's status is the one to keep
 _tb_rc=$?; _tb_done=1; exit "$_tb_rc"

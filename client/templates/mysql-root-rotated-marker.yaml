@@ -1,5 +1,5 @@
 {{/*
-  "This edge was born rotated" marker (backend#947 / backend#1528 Phase 0).
+  "This edge was born rotated" marker.
 
   WHY THIS EXISTS. tracebloc.bakedRootRotationOn has to tell three edge states
   apart on a live render: a FRESH install (born rotate), an edge THIS chart already
@@ -11,21 +11,18 @@
   freshness test therefore flips rotate/reparent OFF on a born-rotated edge's next
   auto-upgrade -- secrets.yaml stops emitting MYSQL_ROOT_PASSWORD, the generated
   root password is lost, and jobs-manager reverts to minting as the root-equivalent
-  edgeuser this epic retires. That is a one-way door on a live fleet (@LukasWodka,
-  backend#947).
+  edgeuser this epic retires. That is a one-way door on a live fleet.
 
   The Secret's baked MYSQL_ROOT_PASSWORD is the OTHER "already rotated" signal, but
   its name follows fullnameOverride, so a rename moves it and a bare lookup silently
   reads the wrong (missing) Secret. So the born-rotated fact is recorded here too, in
   a resource under a CONSTANT name -- exactly the rename-safe shape mysql-pvc already
   has -- which bakedRootRotationOn looks up FIRST. The Secret probe is a fallback for
-  the pre-marker rotated edges this marker cannot see (rotated before it shipped,
-  backend#3189); bakedRootRotationOn reads it under a refusal that turns a rename miss
-  into a loud fail rather than a silent un-rotation (fullname-override-completeness.sh,
-  backend#2626). A render that resolves on via that Secret probe lays this marker
+  the pre-marker rotated edges this marker cannot see (rotated before it shipped); bakedRootRotationOn reads it under a refusal that turns a rename miss
+  into a loud fail rather than a silent un-rotation (fullname-override-completeness.sh). A render that resolves on via that Secret probe lays this marker
   down, so the edge converges onto the rename-safe signal from then on.
 
-  SINCE client-dev#1702 the baked root key lives in `mysql-credentials`, which is
+  Since the baked-key move the baked root key lives in `mysql-credentials`, which is
   constant-named and kept across `helm uninstall` exactly like this marker, so the
   two now persist or perish together with the datadir. bakedRootRotationOn reads
   that Secret first and the release Secret only when it does not exist yet (the
@@ -55,5 +52,5 @@ data:
   # Presence is the whole signal; the body is documentation for an operator who
   # finds it with `kubectl get cm`. Do NOT gate anything on these values.
   rotated: "true"
-  issue: "backend#947"
+  description: "MySQL root password rotated by the chart"
 {{- end }}

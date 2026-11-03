@@ -1,7 +1,7 @@
 {{- /*
   The egress gate's ServiceAccount, and its one right: `create` on
   tokenreviews, to have the Kubernetes API review the service-account token a
-  control-plane sender presents (RFC-0324 D2). TokenReview is cluster-scoped,
+  control-plane sender presents. TokenReview is cluster-scoped,
   so a namespace Role cannot grant it: with clusterScope: false the gate cannot
   name such a sender and refuses it, as jobs-manager's ingestion endpoint does.
 */ -}}

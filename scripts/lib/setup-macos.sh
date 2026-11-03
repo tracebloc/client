@@ -3,8 +3,8 @@
 #  setup-macos.sh — macOS step b: the macOS node (mac-container.sh)
 # -----------------------------------------------------------------------------
 #  A Mac has one substrate: k3s in Apple's container runtime, unpacked into the
-#  user's own folder (RFC-0175 D1, D6). This installer sets up no other runtime
-#  on a Mac (slim client 4.1, client-dev#1948), so step b here is the macOS
+#  user's own folder. This installer sets up no other runtime
+#  on a Mac (slim client 4.1), so step b here is the macOS
 #  node's, and this file keeps only what the node's path reads: the launchd plist
 #  skeleton, and the Mac's answer to "can the amd64-only MySQL 5.7 engine run
 #  here?".
@@ -16,7 +16,7 @@
 # (mac-container.sh, _mac_ct_agent_plist). LOGPATH must be per-user (not a fixed
 # /tmp path): with the installer's umask 077 a shared /tmp log is created 0600 by the
 # first account and a second account's job then can't open it (EX_CONFIG → the job
-# never starts), and /tmp is symlink-plantable on a shared Mac (#430 Bugbot).
+# never starts), and /tmp is symlink-plantable on a shared Mac.
 _emit_launch_plist() {
   local label="$1" extra="$2" logpath="$3"; shift 3
   printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
@@ -58,7 +58,7 @@ _macos_amd64_emulation_ok() {
 }
 
 install_macos() {
-  # The macOS node (RFC-0175 D6) is step b on every Mac: the node runs in Apple's VM
+  # The macOS node is step b on every Mac: the node runs in Apple's VM
   # from the user's own folder, so it installs no other runtime and needs no
   # administrator (mac-container.sh). tb_substrate_resolve gives a Mac no
   # other substrate (_tb_substrate_fresh_here), and main() refuses a TRACEBLOC_SUBSTRATE

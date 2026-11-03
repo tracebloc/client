@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  # client-runtime#21: defines which ServiceAccount(s) may call
+  # defines which ServiceAccount(s) may call
   # POST /internal/submit-ingestion-run on jobs-manager, scoped to which
   # tables. Mounted into jobs-manager at /etc/tracebloc/ingestion-authz.yaml
   # and read at startup (see submit_ingestion_run.load_authz_policy).
@@ -28,7 +28,7 @@ data:
         is correct: there's no policy until the operator sets one).
 
         Per-entry `service_account` is nil-guarded to fall back to
-        `ingestionAuthz.serviceAccountName` (#129) so the default
+        `ingestionAuthz.serviceAccountName` so the default
         values.yaml entry doesn't need to repeat the SA name — change
         the name in one place and both the SA template + this policy
         pick it up.

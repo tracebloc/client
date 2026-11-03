@@ -19,11 +19,10 @@ _nvidia_driver_pkg_pick() {
 
 # _nvidia_driver_not_installed REASON [COMMAND] -- the driver step put no driver in: say
 # so, name the manual route. install_nvidia_drivers then returns 1, so dispatch_gpu_setup
-# skips the toolkit and there is no reboot flow: the install goes on CPU-only
-# (client-dev#1699). A "drivers installed, reboot" over nothing installed only led to
+# skips the toolkit and there is no reboot flow: the install goes on CPU-only.
+# A "drivers installed, reboot" over nothing installed only led to
 # a reboot, still no driver, and the same again on the next run. COMMAND, when the
-# installer knows it, is the exact install to run by hand, said with sudo before it
-# (client-dev#2880).
+# installer knows it, is the exact install to run by hand, said with sudo before it.
 _nvidia_driver_not_installed() {
   local _rerun="this installer"
   [[ -n "${TB_PREPARE_HOST_RUN:-}" ]] && _rerun="prepare-host"
@@ -37,7 +36,7 @@ _nvidia_driver_not_installed() {
 
 # _nvidia_driver_offered_pick FLOOR_MAJOR DEVICES [desktop|headless] -- from
 # `ubuntu-drivers devices` output, the driver to install for THIS machine's GPU, in
-# ubuntu-drivers' own spelling (`595-open`, `580-server`), or nothing (client-dev#2880).
+# ubuntu-drivers' own spelling (`595-open`, `580-server`), or nothing.
 # The archive can carry a series ubuntu-drivers does not offer for the card, or offers
 # only in another flavour: on Ubuntu 26.04 with an RTX 4050 the archive's newest was
 # 615, offered only as 615-open and 615-server-open, so asking for nvidia:615-server and
@@ -45,7 +44,7 @@ _nvidia_driver_not_installed() {
 #   desktop (the default): 1. the driver ubuntu-drivers marks `recommended`; 2. else
 #     the newest -server or -server-open; 3. else the newest of any flavour.
 #   headless: 1. the newest -server or -server-open (the compute driver with the long
-#     support branch and no X stack, as before #2880); 2. else `recommended`; 3. else
+#     support branch and no X stack, as before); 2. else `recommended`; 3. else
 #     the newest of any flavour.
 # -server comes before -server-open within a series. Below the floor only when
 # nothing reaches it: the newest offered. Pure.
@@ -73,7 +72,7 @@ _nvidia_driver_offered_pick() {
 # cloud GPU VM: multi-user.target), and 1 when systemd cannot say. It decides between
 # ubuntu-drivers' recommended desktop driver and the -server compute driver
 # (_nvidia_driver_offered_pick); an unknown machine keeps the server driver, the choice
-# before client-dev#2880. Bounded: systemctl on a wedged bus must not hang the install.
+# before that. Bounded: systemctl on a wedged bus must not hang the install.
 _nvidia_host_is_desktop() {
   local target
   has systemctl || return 1
@@ -86,7 +85,7 @@ _nvidia_host_is_desktop() {
 # dpkg holds exactly its package, nvidia-driver-NAME, or the
 # nvidia-headless(-no-dkms)-NAME that `ubuntu-drivers install --gpgpu` puts in; or the
 # kernel's nvidia module is of NAME's series. `ubuntu-drivers install` exits 0 on "No
-# drivers found for installation" (client-dev#2880), so its exit code never says a
+# drivers found for installation", so its exit code never says a
 # driver went in; and an older driver already on the machine (a 535 not loaded) is not
 # the one just asked for, so any other series is no answer either.
 _nvidia_driver_went_in() {
@@ -143,8 +142,8 @@ install_nvidia_drivers() {
   # install. A driver installed here below the hard floor is judged on the next
   # run, which leaves the GPU off (_nvidia_gpu_floor_gate). Only an empty listing
   # falls back to the floor's series by name. Where ubuntu-drivers lists drivers
-  # for this GPU, its list decides instead (_nvidia_driver_offered_pick,
-  # client-dev#2880); the archive is read only when it lists none. Whatever was
+  # for this GPU, its list decides instead (_nvidia_driver_offered_pick);
+  # the archive is read only when it lists none. Whatever was
   # asked, a driver must be on the machine afterwards (_nvidia_driver_went_in).
   # if/else, never `a && b || c`: a FAILED install of the package found must
   # fail here, not quietly fall through to another driver.
@@ -165,7 +164,7 @@ install_nvidia_drivers() {
   fi
   if has apt-get; then
     $PM_INSTALL ubuntu-drivers-common 2>/dev/null || true
-    # What ubuntu-drivers offers for THIS GPU decides (client-dev#2880). Its warnings go
+    # What ubuntu-drivers offers for THIS GPU decides. Its warnings go
     # to the install log, never the screen; its answer is read, never trusted blind.
     if has ubuntu-drivers; then
       devices="$(_bounded "${TRACEBLOC_UBUNTU_DRIVERS_TIMEOUT:-120}" ubuntu-drivers devices 2>>"${LOG_FILE:-/dev/null}")" || {
@@ -195,7 +194,7 @@ install_nvidia_drivers() {
         fi
       fi
       series="${pkg#nvidia-driver-}"; series="${series%%-*}"; series="${series:-$floor_series}"
-      # The first ask's errors stay on the screen and in the log (client-dev#2880): a
+      # The first ask's errors stay on the screen and in the log: a
       # series it does not offer is said, not swallowed. `tried` names each ask, `cmd`
       # the last one (the hint's command), `want` the drivers they put in.
       if has ubuntu-drivers; then
@@ -285,7 +284,7 @@ install_nvidia_drivers() {
 # k3s.sh's GPU gate (_native_k3s_gpu_wire) compares it with the last wired run's.
 _gpu_stack_signature() {
   local ctk drv ctk_out drv_out
-  # BOUNDED (#431 Bugbot): a half-ready driver or a stuck device node can make these
+  # BOUNDED: a half-ready driver or a stuck device node can make these
   # hang; this runs at the GPU gate on every re-run. On timeout the value is empty,
   # which already means "don't cache".
   #
@@ -302,7 +301,7 @@ _gpu_stack_signature() {
   drv="${drv_out%%$'\n'*}"
   [[ -n "${ctk}${drv}" ]] && printf '%s|%s' "$ctk" "$drv"
   # Always succeed: the installer runs under `set -e`, and the caller assigns this via
-  # `$(...)` — an empty signature means "don't cache", not "abort the install" (#431 Bugbot).
+  # `$(...)` — an empty signature means "don't cache", not "abort the install".
   return 0
 }
 
@@ -312,8 +311,8 @@ TB_NVIDIA_TOOLKIT_APT_LIST="/etc/apt/sources.list.d/nvidia-container-toolkit.lis
 TB_NVIDIA_TOOLKIT_YUM_REPO="/etc/yum.repos.d/nvidia-container-toolkit.repo"
 
 # _nvidia_toolkit_repo_files_readable [FILE...] -- every FILE that exists and is not
-# readable by all is set to 0644; with no FILE, the toolkit's three repository files
-# (client-dev#2879). The core runs under `umask 077` (common.sh), which `sudo gpg -o` and
+# readable by all is set to 0644; with no FILE, the toolkit's three repository files.
+# The core runs under `umask 077` (common.sh), which `sudo gpg -o` and
 # `sudo tee` inherit, so these files came out 0600. apt reads a source list and checks
 # its keyring as the unprivileged _apt user: with a 0600 keyring it refused the
 # repository as "not signed" (NO_PUBKEY) and the install stopped, and the 0600 files it
@@ -379,7 +378,7 @@ _nvidia_container_toolkit_package() {
       _nvidia_toolkit_repo_fetch https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
         | sed "s#deb https://#deb [signed-by=${TB_NVIDIA_TOOLKIT_KEYRING}] https://#g" \
         | tb_root tee "$TB_NVIDIA_TOOLKIT_APT_LIST" >/dev/null
-      # 0644 before apt reads them: _apt must read both (client-dev#2879).
+      # 0644 before apt reads them: _apt must read both.
       _nvidia_toolkit_repo_files_readable "$TB_NVIDIA_TOOLKIT_KEYRING" "$TB_NVIDIA_TOOLKIT_APT_LIST"
       tb_root apt-get update -qq
       $PM_INSTALL nvidia-container-toolkit

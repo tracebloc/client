@@ -38,7 +38,6 @@ rules:
   # (initial sync) and `watch` (incremental updates). Missing either
   # one drops the call into a 403 retry loop until --timeout fires
   # (kubectl#580), marking every successful refresh as a failed Job.
-  # Both caught in PR #155 review.
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "patch", "watch"]
@@ -67,9 +66,9 @@ roleRef:
 {{- if (include "tracebloc.nodeAgentsInUse" .) }}
 ---
 {{/*
-  #569: the resource-monitor DaemonSet lives in the node-agents namespace, not
+  The resource-monitor DaemonSet lives in the node-agents namespace, not
   the release namespace, so reconciling its image needs a SECOND, separate Role
-  over there. This is the one genuinely new piece of trust surface in #569 —
+  over there. This is the one genuinely new piece of trust surface here —
   everything else reuses the deployments rule above — so keep it as narrow as
   the RBAC model allows:
 
@@ -79,7 +78,7 @@ roleRef:
       the `privileged` PSA profile (see nodeAgents in values.yaml).
     * `list` + `watch` CANNOT be resourceNames-scoped — the RBAC authorizer
       ignores resourceNames for collection verbs — and `kubectl rollout status`
-      needs both for its ListWatch reflector (same #155 reasoning as above).
+      needs both for its ListWatch reflector (same reasoning as above).
       So those two stay namespace-wide and read-only. That is the residual
       widening: this SA can enumerate DaemonSets in tracebloc-node-agents.
 

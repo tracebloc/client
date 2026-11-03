@@ -1,5 +1,5 @@
 {{/*
-  WHAT THE COLLECTOR DECIDED, AND WHY — backend#1906.
+  WHAT THE COLLECTOR DECIDED, AND WHY.
 
   A component that quietly does nothing is the exact failure this epic exists to
   remove. `tracebloc.telemetryCollectorState` can decline to render the

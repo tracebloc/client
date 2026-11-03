@@ -1,4 +1,4 @@
-# Installer supply-chain integrity (RFC-0001 R8)
+# Installer supply-chain integrity
 
 **Audience:** release engineers and security reviewers.
 **Scope:** how the two bootstraps — `curl | bash` (`scripts/install.sh`) and the
@@ -6,7 +6,6 @@ Windows `irm | iex` peer (`scripts/install.ps1`, §7) — verify the sub-scripts
 they run, and exactly what the release pipeline + key management must provide
 for that verification to be real.
 
-Tracking issue: **backend#889** (private security ticket). RFC: §9, §14 R8, §13.
 
 ---
 
@@ -70,7 +69,7 @@ the pinned tag:
 Sub-script **content** is served as **release assets** too, one flat asset per
 sub-script addressed by basename (`$BASE/install-k8s.sh`, `$BASE/common.sh`, …).
 It used to be pulled from the tag *tree* (`raw.githubusercontent.com/.../<tag>/scripts/...`),
-which is **unreliable by construction on the public mirror** (backend#3998), for
+which is **unreliable by construction on the public mirror**, for
 two reasons: the mirror carries no `scripts/` tree at all today (its default
 branch is `.github` + `README.md` only, verified 2026-09-18), so raw-by-tag 404s;
 and even where a tree *is* present on the mirror it tracks only the **newest stable
@@ -83,7 +82,7 @@ public fork whose branch you pushed — `tracebloc/client-dev` is private, so it
 URLs need a token). On the customer path every fetched byte is verified against
 the signed manifest, so the transport is not a trust boundary. The dev path is
 unverified by name: the tree carries no manifest (it is generated where it is
-used, backend#2868), so a per-commit bundle (`installer-per-sha.yml`) serves an
+used), so a per-commit bundle (`installer-per-sha.yml`) serves an
 unsigned one generated from its commit, and a bare branch tree serves none and the
 bootstrap says it skipped the digest check. (The manifest + signature were
 always release assets because signing happens in CI *after* the tag is cut — same
@@ -192,7 +191,7 @@ job (runs on `release: published`, same trigger as the chart publish) that:
    release.
 
 **The signed release asset is the integrity root, and nothing else is.** The
-manifest is generated where it is used and never committed (backend#2868): step 3
+manifest is generated where it is used and never committed: step 3
 is the only source of what step 4 signs. A committed copy was never what a
 release signed, and it changed on about a third of `develop` merges, so a
 branch that touched `scripts/` kept conflicting on it.
@@ -208,7 +207,7 @@ there.
 > Until 2026-08-19 this paragraph named `installer-tests.yaml`, and the claim it
 > made was false. That workflow's `Static analysis` job is a required check on no
 > branch, so the R8 step could only annotate a PR, never block it — and on five
-> runs of client#752 it did not even annotate: it shared a `timeout-minutes: 10`
+> runs of that job it did not even annotate: it shared a `timeout-minutes: 10`
 > budget with an `apt-get`, which consumed the lot, and R8 reported `skipped`
 > while every required check went green.
 >
@@ -225,7 +224,7 @@ there.
 > `{"message":"Not Found","status":"404"}`, which is **indistinguishable from
 > "this branch is not protected"**, so a non-admin following the old instruction
 > concluded the opposite of the truth and the note defeated its own purpose
-> (Arturo, #755 review). The same 404 hides ruleset-only protection from that
+> (Arturo review). The same 404 hides ruleset-only protection from that
 > endpoint even for admins. `branches/develop` → `.protection` is readable at
 > plain-member level and returns the same list.
 
@@ -261,7 +260,7 @@ this PR, and some depend on repo settings or one-time decisions:
    cosign via the OS package manager before running the installer, or (b) mirror
    a pinned cosign internally. *(Owner: security; doc'd in §6 below.)*
 
-4. **Certificate-identity hardening — done (backend#3985).** The bootstraps
+4. **Certificate-identity hardening — done.** The bootstraps
    pin the signer to the exact release workflow on a tag ref,
    `https://github.com/tracebloc/(client|client-dev)/.github/workflows/release-helm-chart.yaml@refs/tags/v*`,
    anchored at the start. Two repo names on purpose: the source repo was
@@ -280,7 +279,7 @@ this PR, and some depend on repo settings or one-time decisions:
    *(Owner: repo admin.)*
 
    **The CODEOWNERS half of this item was deliberately dropped — do not re-add
-   it (backend#4271).** It used to read *"protect `release-helm-chart.yaml` and
+   it.** It used to read *"protect `release-helm-chart.yaml` and
    the `gen-manifest.sh` FILES list under CODEOWNERS"*, i.e. path rules naming a
    human owner. Those rules are gone: `.github/CODEOWNERS` is now the single
    `* @tracebloc-review` rule, human code-owner auto-request was removed
@@ -320,7 +319,7 @@ cosign verify-blob \
 
 # Then confirm a sub-script matches the manifest. The sub-scripts ship as flat
 # RELEASE ASSETS addressed by basename (the public mirror carries no source tree
-# after the client → client-dev rename — backend#3998), so fetch from $BASE, not
+# after the client → client-dev rename), so fetch from $BASE, not
 # raw.githubusercontent:
 curl -fsSL "$BASE/provision.sh" \
   | sha256sum  # compare to the "scripts/lib/provision.sh" line in manifest.sha256
@@ -377,7 +376,7 @@ cosign you already trust rather than downloading one.
 
 Everything above applies to Windows as well — `scripts/install.ps1` is the
 PowerShell peer of `install.sh` and implements the same guarantee (added with
-the R8 Windows leg, PR #299):
+the R8 Windows leg):
 
 1. **Immutable ref.** The release pipeline stamps `$DefaultRef` to the release
    tag in the same "Stamp the published installer" job that stamps `install.sh`

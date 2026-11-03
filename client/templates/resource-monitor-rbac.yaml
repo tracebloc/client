@@ -57,7 +57,7 @@ metadata:
   removed because cluster-wide it lets this ServiceAccount read the LOG CONTENTS
   of every pod in the cluster -- including other tenants' training pods, which
   run customer code and print customer data. That is a real exfiltration path
-  for a node-telemetry agent that never reads a log. backend#950.
+  for a node-telemetry agent that never reads a log.
 
   `watch` is removed for the same reason, on both rules: every call above is a
   point read or a one-shot list. The image never opens a watch -- no `Watch()`,
@@ -65,9 +65,9 @@ metadata:
   `python /app/resource_monitor.py`; there is no kubectl in the image). A
   cluster-wide `watch` on pods is a live streaming feed of every pod object in
   the cluster, so an agent that only samples its own node's metrics should not
-  hold one. backend#950 follow-up.
+  hold one.
 
-  VERBS ARE PINNED BY TEST, not just resources. `watch` survived the #950 trim
+  VERBS ARE PINNED BY TEST, not just resources. `watch` survived the trim
   because resource_monitor_test.yaml asserted only `resources` -- the rule was
   narrowed on one axis while the other kept an unused grant. Both axes are
   asserted now.
@@ -80,7 +80,7 @@ rules:
     resources: ["pods", "nodes"]
     verbs: ["get", "list"]
   {{/*
-    The free space for ingest (backend#5118). The monitor reads the data
+    The free space for ingest. The monitor reads the data
     claim's bound PV to find which node directory holds the datasets, and
     reports the free space of THAT filesystem as `storage_free_gb` -- the
     room an ingest can actually use, where the Storage pair above measures

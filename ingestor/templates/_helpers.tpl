@@ -48,7 +48,7 @@ worked for installs but accidentally created a NEW key on
 `helm upgrade --reuse-values` (Helm preserves the stored value `""`,
 not the previously-rendered key, so the template re-evaluates `now`).
 The result: customers running `helm upgrade` thinking it was a no-op
-got duplicate ingestion runs. Bugbot caught it on PR #137. See #139.
+got duplicate ingestion runs.
 
 Helm template (no cluster connection) returns empty for lookup, so
 local previews always re-stamp with a fresh key — matches the

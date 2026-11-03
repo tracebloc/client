@@ -1,5 +1,5 @@
 {{- $rd := default dict .Values.restrictedDns }}
-{{- if $rd.enabled }}
+{{- if include "tracebloc.restrictedDnsOn" . }}
 {{- /*
   Corefile of the restricted resolver (SECURITY §8.2, DNS exfiltration).
 

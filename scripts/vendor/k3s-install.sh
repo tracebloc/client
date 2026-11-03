@@ -2,7 +2,7 @@
 # PROVENANCE source: https://raw.githubusercontent.com/k3s-io/k3s/v1.36.5+k3s1/install.sh
 # PROVENANCE tag: v1.36.5+k3s1
 # PROVENANCE sha256: 46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad
-# Shipped with the installer and run by it (client-dev#1994): native k3s's step 3
+# Shipped with the installer and run by it: native k3s's step 3
 # runs line 1 and everything below END PROVENANCE, after checking their sha256
 # against TB_K3S_INSTALL_SH_SHA256, so no run downloads it. Those lines are the
 # upstream file byte for byte, and the sha256 above is of them alone. k3s-firewall.bats

@@ -1,6 +1,6 @@
 {{- if and (default dict .Values.networkPolicy.training).enabled (not (dig "allowExternalHttps" true .Values.networkPolicy.training)) (dig "enforcementProbeHost" "1.1.1.1" .Values.networkPolicy.training) }}
 {{- /*
-  Egress-lockdown enforcement check (SECURITY §8.2 / client-runtime#104).
+  Egress-lockdown enforcement check (SECURITY §8.2).
   Renders ONLY when the lockdown is enabled (allowExternalHttps=false) and a probe
   host is set. This is a `helm test` hook — run `helm test <release>` after flipping
   the lockdown to verify it. A `tracebloc.io/workload: training`-labelled pod (so the
@@ -26,7 +26,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
-    {{- /* seal-check enumeration contract (RFC-0003 §8.2) — see _helpers.tpl */}}
+    {{- /* seal-check enumeration contract — see _helpers.tpl */}}
     {{- include "tracebloc.sealCheckLabels" (dict "name" "egress-enforcement") | nindent 4 }}
   annotations:
     "helm.sh/hook": test

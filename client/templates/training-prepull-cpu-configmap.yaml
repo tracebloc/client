@@ -1,0 +1,101 @@
+{{- /*
+  The CPU training image prepull: a Job manifest the INSTALLER applies, carried
+  in a ConfigMap, beside the GPU parent's (training-prepull-configmap.yaml, whose
+  header says why a ConfigMap and not a Job).
+
+  A CPU training pod pulls its whole image, about 0.7 GB compressed, as part of
+  its own start, so the first training on a fresh host sits in
+  ContainerCreating for minutes. Which families an environment will train is not
+  known at install time, so this pulls the one a first run is likeliest to
+  train: the tabular classification image, which the first-run example trains
+  on. A GPU host runs it too, for every framework that takes no GPU (sklearn,
+  the boosting libraries).
+
+  THE REFERENCE IS THE JOBS-MANAGER'S. The runtime spawns
+  JOB_IMAGE_HOST + tracebloc/client-<task>-<arch>, by digest with IfNotPresent
+  where the chart renders it the map (tracebloc.trainingImagePin), else by the
+  floating :<CLIENT_ENV> tag with Always. The Job pulls that same reference
+  under the same policy, so the training pod finds it present, and on a floating
+  edge a re-run of the installer pulls whatever the tag points at now.
+
+  It renders on every edge: pinned, floating, and under a mirror, which serves
+  the floating tag the jobs-manager asks it for. No platforms key: every CPU
+  family is published for linux/amd64 and linux/arm64, the arches the installer
+  supports, and the runtime spawns it on either.
+
+  THE NAME OF THE JOB is one for every pin and tag, so a pin promotion renames
+  nothing. The installer deletes the previous run's Job before it applies this
+  one: a new pin never meets an immutable pod template, and a moved tag is pulled.
+
+  THE POD is the GPU prepull's: the restricted Pod Security profile, `true` as
+  the image's own UID 1001, Guaranteed QoS (requests equal limits), no GPU,
+  backoffLimit 0, a deadline that bounds a slow pull and a TTL. It pulls no CLI
+  stage image first: beside one 0.7 GB pull, as against the GPU host's two
+  multi-GB ones, that pod's 3.6 MB pull stays well inside its 60 s.
+*/ -}}
+{{- $task := "tabular_classification" }}
+{{- $repository := printf "tracebloc/client-%s-cpu" $task }}
+{{- $pin := include "tracebloc.trainingImagePin" (dict "task" $task "arch" "cpu" "root" .) }}
+{{- $tag := include "tracebloc.clientEnv" . }}
+{{- /* Hard-coded on purpose, as the GPU prepull's: bounds of this one Job. */}}
+{{- $deadline := 3600 }}
+{{- $ttl := 3600 }}
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tracebloc.fullname" . }}-training-prepull-cpu
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: training-prepull-cpu
+data:
+  job.yaml: |
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: tracebloc-prepull-cpu
+      namespace: {{ .Release.Namespace }}
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/instance: {{ include "tracebloc.fullname" . }}
+        app.kubernetes.io/component: training-prepull-cpu
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ $deadline }}
+      ttlSecondsAfterFinished: {{ $ttl }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: {{ .Chart.Name }}
+            app.kubernetes.io/instance: {{ include "tracebloc.fullname" . }}
+            app.kubernetes.io/component: training-prepull-cpu
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: prepull
+              image: {{ include "tracebloc.image" (dict "repository" $repository "tag" $tag "registry" (include "tracebloc.tbRegistry" .) "digest" (include "tracebloc.trainingImagePin" (dict "task" $task "arch" "cpu" "root" .))) | quote }}
+              imagePullPolicy: {{ if $pin }}IfNotPresent{{ else }}Always{{ end }}
+              command: ["true"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "32Mi"
+                limits:
+                  cpu: "100m"
+                  memory: "32Mi"
+          {{- if include "tracebloc.useImagePullSecrets" . }}
+          imagePullSecrets:
+            - name: {{ include "tracebloc.registrySecretName" . }}
+          {{- end }}

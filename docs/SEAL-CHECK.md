@@ -1,7 +1,5 @@
 # Seal check — the chart's conformance suite
 
-> RFC-0003 §8.2–8.4 (D12) · backend#1184 · CLI companion: tracebloc/cli#393
-
 The **seal check** is the tracebloc chart's conformance suite: a set of
 `helm test` hook Jobs that verify, from inside the cluster, that the
 guarantees the secure environment claims are actually enforced on *this*
@@ -72,7 +70,7 @@ While a `helm test` run is live:
 kubectl get jobs,pods -n <namespace> -l tracebloc.io/seal-check=true
 ```
 
-**Contract rules** (tooling such as `tracebloc` CLI, cli#393, depends on
+**Contract rules** (tooling such as `tracebloc` CLI, depends on
 these):
 
 - The two label keys and the existing check names are public API — never
@@ -94,7 +92,7 @@ these):
   ignores it.
 - Log lines are human-oriented and not part of the contract; the machine
   contract today is *labels + Job exit status*. (A structured verdict is the
-  CLI's job — cli#393.)
+  CLI's job.)
 
 ## The suite today
 
@@ -119,7 +117,7 @@ Three sub-checks, reported line-by-line in the Job log:
    storage the chart does not manage.
 3. **pv-hostpath** — *dynamic-PVC mode only* (`hostPath.enabled=false`): no
    release PVC is backed by a hostPath PersistentVolume on an unmanaged host
-   tree. This catches the RFC-0003 D3/D4 stranding scenario: a leftover
+   tree. This catches the stranding scenario: a leftover
    chart hostPath PV from an older bare-metal install still carries a
    `claimRef` for our fixed PVC names and **captures the claim even in
    dynamic mode**. In hostPath mode this sub-check reports `SKIP` — hostPath
@@ -129,17 +127,17 @@ Three sub-checks, reported line-by-line in the Job log:
 A PVC read that fails is reported, never guessed. A claim the API answers
 `NotFound` is `MISSING`. Any other failed read, such as `Forbidden`, an
 unreachable API or a timeout, is `UNREADABLE`, and the `FAIL` line carries
-kubectl's own error (cut to 160 characters). Before client-dev#2284 every
-failed read printed as `MISSING` / class `'<none>'`, so a claim that existed
+kubectl's own error (cut to 160 characters). Earlier versions of the check printed every
+failed read as `MISSING` / class `'<none>'`, so a claim that existed
 and was mounted looked absent. Either way the check fails: a claim that
 cannot be read is unverified, and unverified is reported unsealed.
 
-Two deliberate nuances, both grounded in RFC-0003:
+Two deliberate nuances, both deliberate:
 
 - **Node-local provisioner paths are tolerated, with a note.** On k3s
   the bundled local-path provisioner creates PVs that are hostPath-*typed*
   but live inside the cluster node's filesystem and die with the cluster —
-  exactly the RFC-0003 **Option C** ("node-local") model. Paths under
+  exactly the **Option C** ("node-local") model. Paths under
   `sealCheck.storageAssertions.nodeLocalPathPrefixes` (default:
   `/var/lib/rancher/`, `/opt/local-path-provisioner/`; entries match whole
   path segments — a prefix admits itself and paths under it, never sibling
@@ -164,14 +162,14 @@ training lockdown denies.
 
 ## Guarantee coverage per substrate (chart-side view)
 
-This table is the chart-side input to the RFC-0003 §8.3 guarantee matrix
+This table is the chart-side input to the guarantee matrix
 (the RFC holds the authoritative, customer-quotable matrix; precise filling
-is tracked in backend#1184). "Verified" below means *this suite verifies it
+is still to be done). "Verified" below means *this suite verifies it
 on the live cluster when the corresponding check runs.*
 
 | Guarantee | EKS | AKS | OpenShift | bare metal |
 |---|---|---|---|---|
-| Training egress blocked (NetworkPolicy) | **Verified** — the dev/staging/prod tracebloc template fleets are sealed and `egress-enforcement`-probe-verified (2026-09-08, client-runtime#199; see [EKS fleet enforcement](#eks-fleet-enforcement--dev--staging--prod-client-runtime199) below). The VPC CNI netpol agent enforces egress on both `tb-client-dev-templates` (v1.2.7) and `tracebloc-clients-prod` (v1.1.6, hosting the staging + prod fleets), `--enable-network-policy=true`, mode `standard`. Deny-by-default is the chart default as of 1.9.96. Other EKS CNIs (Calico / Cilium) — **verified** by `egress-enforcement` (renders by default as of 1.9.96; opt-out with `allowExternalHttps=true`) | Conditional on CNI (Azure NPM / Calico) — **verified** by `egress-enforcement` (renders by default as of 1.9.96; opt-out with `allowExternalHttps=true`) | OVN-Kubernetes enforces by default — still **verified** by `egress-enforcement` | Conditional on CNI (Flannel alone does not enforce) — **verified** by `egress-enforcement` |
+| Training egress blocked (NetworkPolicy) | **Verified** — the dev/staging/prod tracebloc template fleets are sealed and `egress-enforcement`-probe-verified (2026-09-08; see [EKS fleet enforcement](#eks-fleet-enforcement--dev--staging--prod-client-runtime199) below). The VPC CNI netpol agent enforces egress on both `tb-client-dev-templates` (v1.2.7) and `tracebloc-clients-prod` (v1.1.6, hosting the staging + prod fleets), `--enable-network-policy=true`, mode `standard`. Deny-by-default is the chart default as of 1.9.96. Other EKS CNIs (Calico / Cilium) — **verified** by `egress-enforcement` (renders by default as of 1.9.96; opt-out with `allowExternalHttps=true`) | Conditional on CNI (Azure NPM / Calico) — **verified** by `egress-enforcement` (renders by default as of 1.9.96; opt-out with `allowExternalHttps=true`) | OVN-Kubernetes enforces by default — still **verified** by `egress-enforcement` | Conditional on CNI (Flannel alone does not enforce) — **verified** by `egress-enforcement` |
 | Backend reachability (required egress) | **Verified** | **Verified** | **Verified** | **Verified** |
 | Storage on the declared class, bound | **Verified** | **Verified** | **Verified** (PV scan degraded if `clusterScope=false`) | **Verified** |
 | No unmanaged hostPath backing (dynamic mode) | **Verified** | **Verified** | **Verified** with `clusterScope=true`; partial (name check + explicit WARNING) otherwise | n/a — hostPath *is* the declared model (SKIP) |
@@ -181,7 +179,7 @@ on the live cluster when the corresponding check runs.*
 Two lockdown caveats the suite states rather than hides:
 
 - `egress-enforcement` renders **by default** as of chart 1.9.96
-  (`allowExternalHttps=false` is the shipped default — RFC-0003 D6), so a fresh
+  (`allowExternalHttps=false` is the shipped default), so a fresh
   install seals training-pod outbound :443 and `helm test` runs this check. An
   operator who opts a fleet back out (`allowExternalHttps=true`) re-opens direct
   :443; the hook then does not render and there is no enforcement to verify —
@@ -195,7 +193,7 @@ Two lockdown caveats the suite states rather than hides:
 
 ## Runbook: verify NetworkPolicy egress enforcement on a local k3s install
 
-RFC-0003 §8.4: **do not assume** k3s enforces NetworkPolicy — k3s ships an
+**do not assume** k3s enforces NetworkPolicy — k3s ships an
 embedded (kube-router-based) NetworkPolicy controller that is *expected* to
 enforce egress rules, but expected is not verified.
 
@@ -252,14 +250,14 @@ helm upgrade "$RELEASE" tracebloc/client -n "$NS" --reuse-values \
 
 The *full-chart* probe run (steps 1–4 above, against a deployed release) is
 still to be recorded here (pass/fail, k3s version, date) and folded into
-the RFC-0003 §8.3 matrix. The **substrate** enforcement it builds on was
+the guarantee matrix. The **substrate** enforcement it builds on was
 verified on k3d only — see the history note at the top of this section.
 
-## EKS fleet enforcement — dev / staging / prod (client-runtime#199)
+## EKS fleet enforcement — dev / staging / prod
 
 > **Status (2026-09-08): SEALED and `egress-enforcement`-verified on all three
 > tracebloc template fleets.** The 2026-08-24 hold on the dev fleet is resolved —
-> the HF runtime-fetch gate (client-runtime#416 / backend#1501) shipped, so the
+> the HF runtime-fetch gate shipped, so the
 > jobs-manager injects `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE`/`HF_DATASETS_OFFLINE`
 > and an NLP template that would have runtime-fetched HuggingFace now fails
 > **closed at the library layer** (the clean "closed door") instead of by an
@@ -282,8 +280,8 @@ thereafter, HuggingFace additionally `403`-denied through the squid allowlist.
 Each run's spawned pod carried the three HF-offline flags,
 `HTTPS_PROXY=egress-proxy-service:3128`, and the restricted securityContext
 (`readOnlyRootFilesystem`/`runAsNonRoot`/`automountServiceAccountToken=false`).
-Full evidence — netpol dumps, probe time-series, experiment ids — is on
-client-runtime#199.
+Full evidence — netpol dumps, probe time-series, experiment ids — is kept with the
+substrate verification record.
 
 **Substrate (read-only inspection; the enforcement rests on this):**
 
@@ -296,8 +294,8 @@ client-runtime#199.
   `--enable-network-policy=true`, standard mode — the probe confirms the older
   agent enforces egress just the same.
 
-**Image durability note (client-runtime#199):** the jobs-manager on a fleet must
-run a build carrying client-runtime#416 (the HF-offline injection) *before* the
+**Image durability note:** the jobs-manager on a fleet must
+run a client-runtime build carrying the HF-offline injection *before* the
 seal, or NLP templates fail by network block instead of the clean closed door.
 On a dev or staging edge the chart renders control-plane images as
 `repository:tag` + `IfNotPresent`, and the `image-refresh` CronJob pins the live
@@ -315,7 +313,7 @@ fleet runs before sealing (`helm show values tracebloc/client --version <v>`;
 `client/MIGRATION.md`, 1.9.189). A chart packaged from the git tree has the map
 empty and floats.
 
-Since chart **1.9.136 (client-runtime#199)** a `helm upgrade` **preserves** that
+Since chart **1.9.136** a `helm upgrade` **preserves** that
 image-refresh pin on its own: `tracebloc.controlPlaneImage` seeds the digest from
 the **live workload spec** via `lookup`, so `--reset-then-reuse-values`
 re-renders `repository@digest` instead of reverting to the bare `:tag` (the
@@ -426,12 +424,12 @@ never treated as a pass.
 
 - **`egress-enforcement`, live on every PR** — seal-check-k3s.yaml's
   `seal-check-e2e-k3s` job, `Seal-check egress-enforcement (k3s)`
-  (`scripts/tests/e2e-seal-check.sh`, client#541 + #566), plus develop pushes
+  (`scripts/tests/e2e-seal-check.sh`), plus develop pushes
   that touch what it reads. It has its own workflow so it can be a required
   check: no `pull_request` paths filter, so it runs in full on every PR. Real
   native k3s, the cluster the installer sets up on a new Linux machine;
   lockdown engaged, positive control (its curl image imported into k3s's own
-  containerd first, backend#3561), then the probe via `helm test --filter`.
+  containerd first), then the probe via `helm test --filter`.
   Zero secrets, so it runs everywhere.
 - **`storage-assertions`, live on every PR** — storage-assertions-k3s.yaml's
   `storage-assertions-e2e-k3s` job, `Storage-assertions (k3s)`
@@ -440,7 +438,7 @@ never treated as a pass.
   this hook via `helm test --filter` and fails when the hook fails. There is no
   skip path.
 - **The FULL suite vs the dev backend** — helm-ci's `full-seal-e2e` job
-  (`scripts/tests/e2e-full-seal.sh`, the backend#1184 deferred fast-follow):
+  (`scripts/tests/e2e-full-seal.sh`, a deferred fast-follow):
   installs the working-tree chart on native k3s **as the dedicated dev
   `e2e-test-agent` client with real credentials** (`CLIENT_ENV=dev`), waits
   for every release PVC to Bind and for jobs-manager to hold a real backend
@@ -459,20 +457,20 @@ never treated as a pass.
   `TRACEBLOC_CLIENT_ID`, so a real client credential in the caller's shell
   cannot end up in the throwaway cluster.
   Never use a real customer's or a person's shared dev identity (login
-  churn invalidates tokens — the backend#1180 failure class). Record the
+  churn invalidates tokens — a known failure class). Record the
   first green run here, with date + run link.
 
 ## What the suite does not cover (by design or elsewhere)
 
 - **A single aggregated sealed/unsealed verdict with per-guarantee detail**
   — shipped in the tracebloc CLI on this label contract
-  (tracebloc/cli#393, v0.10.0); `helm test` remains the raw substrate.
+  (tracebloc CLI v0.10.0); `helm test` remains the raw substrate.
 - **`~/.tracebloc` host-tree check** (post-Option-C: nothing of the
   environment left under the operator's home) — host-side by construction,
   not observable from in-cluster; belongs to the CLI/installer offboard
-  verification lineage (cli#389), not to a helm-test Job.
-- **The RFC-0003 §8.3 matrix** is filled in the RFC (tracebloc/cli#449) —
+  verification lineage, not to a helm-test Job.
+- **The guarantee matrix** is filled in the RFC —
   the table above remains the chart-side input it is derived from.
-- **The Option C storage flip on local installs** (client#368) — the
+- **The Option C storage flip on local installs** — the
   storage-assertions check is forward-compatible either way: it gates on
   `hostPath.enabled` and verifies whichever model the install declares.

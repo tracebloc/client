@@ -13,13 +13,13 @@
 
 # -- The ingest.yaml body. REQUIRED. Set via --set-file ingestConfig=path/to/ingest.yaml
 # or by overriding in a values file. Validated by jobs-manager against the
-# v1 schema from tracebloc/data-ingestors#44; install fails with a
+# v1 ingest schema; install fails with a
 # line-numbered error if invalid.
 ingestConfig: ""
 
 # -- Image of the official tracebloc/ingestor that will run the dataset.
 #
-# Default behaviour (client-runtime#40 / client#125): leave `digest`
+# Default behaviour: leave `digest`
 # empty. jobs-manager then spawns the ingestor Job by its floating tag
 # with imagePullPolicy=Always, so every run resolves the current
 # published ingestor release at spawn time — no version to pin, and a
@@ -34,7 +34,7 @@ image:
   # Air-gapped mirror override lives in the PARENT client chart's
   # images.ingestor.repository — that is what jobs-manager actually spawns
   # from. This subchart previously carried its own `repository` key, but no
-  # template ever rendered it; it was removed (tracebloc/backend#963) so it
+  # template ever rendered it; it was removed so it
   # can't be mistaken for a second, non-authoritative override.
   #
   # Optional per-request pin. Empty (default) = jobs-manager spawns the
@@ -60,7 +60,7 @@ jobsManager:
 # namespace are matched against the ingestionAuthz policy in the
 # tracebloc client release.
 #
-# As of 0.2.0 (tracebloc/client#129) the SA is owned by the parent
+# As of 0.2.0 the SA is owned by the parent
 # `tracebloc/client` chart (templated as `ingestor` by default, or
 # whatever `ingestionAuthz.serviceAccountName` resolves to). The SA is
 # shared by every ingestor subchart release in the namespace, so per-
@@ -74,7 +74,7 @@ jobsManager:
 # Override `create: true` ONLY when running against a parent client
 # chart older than 1.3.4 that didn't yet own the SA — in that case make
 # sure no other ingestor release in the same namespace also has
-# `create: true`, or you'll reproduce client#129.
+# `create: true`, or you'll reproduce.
 serviceAccount:
   create: false
   name: ingestor

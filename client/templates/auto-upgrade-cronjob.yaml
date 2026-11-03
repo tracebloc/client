@@ -13,7 +13,7 @@ data:
     #!/bin/sh
     # Self-upgrade loop. See client/values.yaml `autoUpgrade` for the
     # design + trust boundary discussion. JSON is parsed with awk (plus a `tr`
-    # newline-strip, backend#2896) on purpose: the upstream alpine/helm image
+    # newline-strip) on purpose: the upstream alpine/helm image
     # ships without jq and we don't want to apk-add at runtime under a
     # runAsNonRoot pod — both `awk` and `tr` are busybox built-ins.
     set -eu
@@ -77,13 +77,13 @@ data:
         log "WARNING: helm version unreadable ('$HELM_VERSION_SHORT'); upgrading without --wait=legacy" ;;
     esac
 
-    # --- failed --atomic upgrade classification: begin (backend#2961) ----------
+    # --- failed --atomic upgrade classification: begin ----------
     # EXIT CODES of this script, the whole interface a Job's status carries:
     #   0  nothing to do, upgraded, or a skip the log names (pending-* in flight,
     #      mid-uninstall, ahead of the index, an upgrade DEFERRED while the
     #      edge trains), or
     #      an abandoned wedge rolled back, with the upgrade deferred to the next
-    #      tick (backend#5273: recovery and upgrade never share a tick)
+    #      tick (recovery and upgrade never share a tick)
     #   1  any other failure: the repo fetch, version resolution, a `helm upgrade`
     #      that failed and was rolled back (timeout or not), a wedge recovery that
     #      was refused (no deployed revision) or whose rollback failed, and set -e
@@ -218,14 +218,14 @@ data:
     }
     # --- failed --atomic upgrade classification: end -----------------------------
 
-    # #2877: minimum age (seconds) a release must have sat in a pending-* state
+    # minimum age (seconds) a release must have sat in a pending-* state
     # before we treat it as an ABANDONED wedge (safe to roll back) rather than an
     # upgrade that is currently IN FLIGHT (must be left alone). Injected from
     # autoUpgrade.pendingWedgeMinAge; the `:-` fallback keeps a standalone run
     # (e.g. the discrimination test) working when the env var is absent.
     WEDGE_MIN_AGE_SECONDS="${WEDGE_MIN_AGE_SECONDS:-2700}"
 
-    # #2877: seconds the release has been in its current (pending) revision, i.e.
+    # seconds the release has been in its current (pending) revision, i.e.
     # now - info.last_deployed. Echoes the age, or nothing if it can't be read.
     # Takes the `helm status -o json` body as $1 so the caller reads status once.
     # awk-based, per this script's header (the image has no jq): it lifts the
@@ -234,7 +234,7 @@ data:
     # math is Howard Hinnant's civil→days algorithm; the zone offset is applied by
     # hand. now comes from `date -u +%s`, which every date agrees on.
     #
-    # `tr -d '\n'` FIRST (backend#2896): make the parse independent of helm's JSON
+    # `tr -d '\n'` FIRST: make the parse independent of helm's JSON
     # FORMATTING. The awk body below runs once per input line and `exit`s on the
     # first line that lacks `last_deployed`, so it only works on a body where the
     # key sits on the same line the scan starts — fine for the single-line output
@@ -243,12 +243,12 @@ data:
     # 3.16.4 and in 4.2.3 alike; the wedge driver runs a captured 4.2.x body), but it
     # would return EMPTY on any multi-line body: a bare `{` first line, a future
     # helm that indents, or a differently-built image. Collapsing to one line
-    # first removes that dependence entirely. NOTE: the backend#2896 Bugbot claim
+    # first removes that dependence entirely. NOTE: a review claim
     # that this image pretty-prints did NOT reproduce — the gate was never inert
     # on real fleets; this is defensive hardening, not a live fix. Fail-closed is
     # unchanged: an unreadable/empty body still yields no age (→ skip).
     #
-    # backend#2908: the shape regex below proves only that the fields are DIGITS
+    # the shape regex below proves only that the fields are DIGITS
     # in the right slots — NOT that they form a real instant. So the field ranges
     # are validated too, before the civil math is trusted; see the range gate
     # inside the awk body.
@@ -262,7 +262,7 @@ data:
         if (match(ts, /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) == 0) exit
         y = substr(ts, 1, 4) + 0; mo = substr(ts, 6, 2) + 0; d = substr(ts, 9, 2) + 0
         hh = substr(ts, 12, 2) + 0; mi = substr(ts, 15, 2) + 0; ss = substr(ts, 18, 2) + 0
-        # backend#2908: the regex above matched the SHAPE, not the field RANGES —
+        # the regex above matched the SHAPE, not the field RANGES —
         # `2026-00-01`, `2026-08-00`, or `...T40:99:99` all pass it, then feed the
         # civil→days math a nonsensical date. A month/day that rolls the instant
         # into the deep past yields a LARGE POSITIVE age; the downstream sanitiser
@@ -273,7 +273,7 @@ data:
         # ranges (ss<=60 admits a leap second); day is the coarse 1–31 the issue
         # specifies — enough to kill the deep-past garbage, no per-month calendar.
         if (mo < 1 || mo > 12 || d < 1 || d > 31 || hh > 23 || mi > 59 || ss > 60) exit
-        # backend#2908, domain floor (fail-safe): the year is only shape-checked
+        # Domain floor (fail-safe): the year is only shape-checked
         # (4 digits), so a valid-RANGE-but-impossible year — `0000`, `1970`,
         # `1999` — still computes a huge POSITIVE age and would force a rollback,
         # the same failure via the one field the RFC3339 ranges above cannot
@@ -286,7 +286,7 @@ data:
         off = 0; rest = substr(ts, 20)
         if (rest !~ /[Zz]$/ && match(rest, /[+-][0-9][0-9]:[0-9][0-9]$/)) {
           o = substr(rest, RSTART, RLENGTH)
-          # backend#2908 (same class as the date fields): the offset regex is
+          # Same class as the date fields: the offset regex is
           # SHAPE-only too, so `+40:00` / `+99:99` pass and shift the epoch by up
           # to ~4 days — enough to age a genuinely RECENT (in-flight) upgrade past
           # WEDGE_MIN_AGE_SECONDS and roll it back. Bound it to a real RFC3339
@@ -369,9 +369,9 @@ data:
     helm repo add "$REPO_NAME" "$REPO_URL" >/dev/null
     helm repo update "$REPO_NAME" >/dev/null
 
-    # #554: auto-recover from an interrupted upgrade BEFORE attempting another
+    # auto-recover from an interrupted upgrade BEFORE attempting another
     # one. If a previous tick's `helm upgrade` was killed mid-operation — a
-    # node-level OOM kill under memory pressure (backend#2935; this pod is now
+    # node-level OOM kill under memory pressure (this pod is now
     # Guaranteed QoS, oom_score_adj -997, so the kernel OOM-killer picks it last,
     # but Guaranteed is not unkillable under extreme pressure), node reboot, or a
     # cluster restart inside the upgrade window — the release is left in a
@@ -380,7 +380,7 @@ data:
     # forever: auto-upgrade (the security-fix delivery path) is silently dead
     # until a human runs `helm rollback`. Detect that wedge and roll back to the
     # last deployed revision; the tick then ENDS, and the next one upgrades from a
-    # `deployed` release (backend#5273, see the deadline below). Parsed from the STATUS:
+    # `deployed` release (see the deadline below). Parsed from the STATUS:
     # line jq-free — the alpine/helm image ships without jq. (pending-install
     # can't occur here: this CronJob is part of the release it upgrades, so the
     # release must have deployed at least once for this script to run.)
@@ -388,14 +388,14 @@ data:
     # did with --show-resources); a resource it cannot read is logged, not an
     # error, and STATUS: still prints before the RESOURCES table. The line is
     # plain text here: helm colours it only on a terminal, and this is a pipe.
-    # backend#5273: the highest revision `helm history -o json` reports as
+    # the highest revision `helm history -o json` reports as
     # `deployed`, or nothing. jq-free like the rest of this script: collapse the
     # body to one line, then split it into records on `{"revision":`, the key
     # helm writes first in every history entry. A description that quotes that
     # text, or `"status":"deployed"`, carries it backslash-escaped, so it can
     # neither start a record nor match the status test. An unreadable body, or
     # one with no deployed entry, prints nothing: the caller refuses. A FAILED
-    # read never reaches here (client-dev#1674): the caller checks helm's exit
+    # read never reaches here: the caller checks helm's exit
     # status first, so "could not read the history" and "the history names no
     # deployed revision" are two different log lines.
     last_deployed_revision() {
@@ -416,9 +416,9 @@ data:
       | awk '/^STATUS:/ {print $2; exit}')"
     case "$STATUS" in
       pending-upgrade|pending-rollback)
-        # #2877: `pending-upgrade` is NOT proof of a wedge. It is ALSO the state
+        # `pending-upgrade` is NOT proof of a wedge. It is ALSO the state
         # of an upgrade that is CURRENTLY RUNNING — an operator's manual `helm
-        # upgrade` (e.g. flipping the backend#1528 retirement gates), or a slow
+        # upgrade` (e.g. flipping a feature gate), or a slow
         # one of ours. Rolling that back silently reverts the in-flight upgrade
         # and discards the operator's new values, while the operator — seeing
         # `deployed` — proceeds as if it stuck. The two are indistinguishable by
@@ -437,7 +437,7 @@ data:
           # awk-only; `[0-9][0-9]*` (>=1 digit, no quote) so this matches only the
           # bare-number top-level release "version":N, never a quoted
           # chart-metadata "version":"1.2.3" that may also appear in the JSON.
-          # `[ ]*` after the colon (backend#2896) tolerates an optional space so
+          # `[ ]*` after the colon tolerates an optional space so
           # the match is independent of formatting: helm's real output is compact
           # (`"version":N`, no space) and `[ ]*` matches zero spaces, so this is a
           # strict superset of the previous regex — no behaviour change on the
@@ -445,7 +445,7 @@ data:
           # future indented body. Same defensive hardening as the `tr` above.
           PENDING_REV="$(printf '%s' "$INFO_JSON" | awk 'match($0, /"version":[ ]*[0-9][0-9]*/) {
             v = substr($0, RSTART, RLENGTH); sub(/"version":[ ]*/, "", v); print v; exit }')"
-          # backend#5273: the target is the last revision whose status is
+          # the target is the last revision whose status is
           # `deployed`, read from `helm history` -- never helm's revision-less
           # default, which is "current - 1". In a pending-rollback wedge (a Job
           # killed while `--atomic` was undoing a failed upgrade) history reads
@@ -453,7 +453,7 @@ data:
           # FAILED upgrade: the recovery re-applied the new chart, unwaited, and
           # called it a rollback. No deployed revision means there is nothing
           # known-good to return to, so refuse rather than guess.
-          # client-dev#1674: a failed read (RBAC, an API timeout) must not look
+          # a failed read (RBAC, an API timeout) must not look
           # like an empty history, or the refusal below names the wrong fact and
           # sends the operator to the history instead of the CronJob's access.
           # stderr goes to a file so a warning helm prints there on success can
@@ -468,7 +468,7 @@ data:
             log "ERROR: release '$RELEASE_NAME' is stuck in '$STATUS', but its history could not"
             log "be read (helm history exited $_hist_rc: $_hist_msg)."
             log "This is a failed read, not an empty history. Refusing the rollback: without the"
-            log "history there is no known-good revision to return to (backend#5273). Check that"
+            log "history there is no known-good revision to return to. Check that"
             log "this CronJob can read the release, then recover by hand:"
             log "  helm history $RELEASE_NAME -n $RELEASE_NAMESPACE"
             log "  helm rollback $RELEASE_NAME <revision> -n $RELEASE_NAMESPACE --wait"
@@ -479,15 +479,15 @@ data:
             log "ERROR: release '$RELEASE_NAME' is stuck in '$STATUS' and its history names no"
             log "'deployed' revision to return to. Refusing the rollback: a revision-less one"
             log "would land on whatever revision precedes the wedge, which may be the failed"
-            log "upgrade itself (backend#5273). Recover by hand: read the history, then roll"
+            log "upgrade itself. Recover by hand: read the history, then roll"
             log "back to the last revision that worked:"
             log "  helm history $RELEASE_NAME -n $RELEASE_NAMESPACE"
             log "  helm rollback $RELEASE_NAME <revision> -n $RELEASE_NAMESPACE --wait"
             exit 1
           fi
-          # Surface it (#2877): the rollback discards the pending revision's
+          # Surface it: the rollback discards the pending revision's
           # values. Log it loud and actionable — `restartPolicy: Never`
-          # (backend#2620) keeps this Pod's log readable so an operator can see
+          # keeps this Pod's log readable so an operator can see
           # what was undone and recover the values.
           log "=========================== auto-upgrade WARNING ==========================="
           log "release '$RELEASE_NAME' has been stuck in '$STATUS' for ${AGE}s (>= threshold"
@@ -499,7 +499,7 @@ data:
           log "  helm history $RELEASE_NAME -n $RELEASE_NAMESPACE"
           log "  helm get values $RELEASE_NAME -n $RELEASE_NAMESPACE${PENDING_REV:+ --revision $PENDING_REV}"
           log "============================================================================"
-          # Wait on it (backend#5273): the rollback is this tick's only readiness
+          # Wait on it: the rollback is this tick's only readiness
           # check on the revision it restores. The wait mode is the upgrade's
           # (--wait=legacy on Helm 4, for the GPU edge's name-only RBAC) and
           # Helm 3's boolean --wait on any other readable major; an unreadable
@@ -514,7 +514,7 @@ data:
             log "ERROR: rollback of '$RELEASE_NAME' to revision $TARGET_REV failed; not upgrading this tick"
             exit 1
           fi
-          # The tick ENDS here (backend#5273). The rollback just waited up to
+          # The tick ENDS here. The rollback just waited up to
           # $UPGRADE_TIMEOUT, and an `--atomic` upgrade can wait that twice more,
           # which is past the Job's activeDeadlineSeconds (sized for ONE
           # `--atomic`, below): killed mid-op, the release would be wedged again.
@@ -533,7 +533,7 @@ data:
         fi
         ;;
       failed)
-        # backend#2961: a release left `failed` by an earlier upgrade, e.g. a tick whose
+        # a release left `failed` by an earlier upgrade, e.g. a tick whose
         # rollback failed (exit 3). Not a wedge -- helm upgrades over `failed`
         # -- so the tick proceeds, but it says so, so the state is never
         # readable only from `helm status`.
@@ -591,7 +591,7 @@ data:
     # alone re-uses the LAST RELEASE'S COMPUTED VALUES, so any new keys added
     # to values.yaml in the upgraded chart (e.g. a future autoUpgrade.foo
     # default) would silently fail to render with nil-pointer template errors
-    # — verified on a dev-cluster 1.1.0 -> 1.3.0 dry-run when shipping #69.
+    # — verified on a dev-cluster 1.1.0 -> 1.3.0 dry-run.
     # --reset-then-reuse-values resets to the new chart's defaults first, then
     # layers the customer's user-supplied values on top, so operator overrides
     # (clientId, dockerRegistry creds, autoUpgrade.enabled=false, etc.) are
@@ -618,7 +618,7 @@ data:
     # No --server-side: Helm 4's `auto` applies with the method the release's
     # last revision recorded. A revision the Helm 3 image wrote records none, so
     # those edges stay client-side (3-way merge); see docs/MIGRATIONS.md.
-    # Through atomic_upgrade (backend#2961): same argv, its failure classified.
+    # Through atomic_upgrade: same argv, its failure classified.
     atomic_upgrade "$CURRENT" "$LATEST" helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
       --namespace "$RELEASE_NAMESPACE" \
       --version "$LATEST" \
@@ -649,16 +649,16 @@ spec:
   startingDeadlineSeconds: {{ .Values.autoUpgrade.startingDeadlineSeconds }}
   jobTemplate:
     spec:
-      # ONE attempt per tick (client-dev#1519). activeDeadlineSeconds below caps
+      # ONE attempt per tick. activeDeadlineSeconds below caps
       # the whole Job ACROSS retries, not each Pod, so a retry after a timed-out
       # `--atomic` attempt (which has already spent ~2 x timeout) would start a
       # fresh `helm upgrade` with only the headroom left and be killed mid-op --
       # the exact pending-* wedge the deadline is sized to prevent, and one
-      # #2877's age threshold then leaves alone for a tick. Sizing the deadline
+      # that the age threshold then leaves alone for a tick. Sizing the deadline
       # for three attempts instead (3 x 1500s at the defaults) crosses the ~1h
       # Forbid gap. A transient fetch failure therefore waits for the next tick.
       backoffLimit: 0
-      # #555: hard wall-clock cap on the Job. `timeout` bounds only
+      # hard wall-clock cap on the Job. `timeout` bounds only
       # `helm upgrade --wait`; the earlier `helm repo add`/`helm repo update`
       # fetches can hang on a TCP black-hole with no timeout, and with
       # concurrencyPolicy: Forbid a single hung Job skips every future tick.
@@ -667,16 +667,16 @@ spec:
       # The deadline must never undercut the helm op it wraps: killing the Pod
       # mid-`--atomic` leaves the release pending-upgrade/pending-rollback.
       # `--atomic` can spend `timeout` TWICE -- once waiting on the upgrade, then
-      # again on the rollback, which uses the same wait (client-dev#1519,
-      # measured: a 10m timeout under the old 900s cap was killed mid-rollback).
+      # again on the rollback, which uses the same wait (measured:
+      # a 10m timeout under the old 900s cap was killed mid-rollback).
       # So take the MAX of the configured floor (default 900s) and 2 x the parsed
       # timeout plus 300s headroom for the repo fetch, the training gate's API
       # calls (15s each, at most four) and the `helm status` reads that classify
-      # a failed upgrade (backend#2961).
+      # a failed upgrade.
       # Only one `--atomic` runs per tick, so 2 x timeout covers it. The
       # wedge recovery's rollback also waits up to `timeout`, but a tick that
       # recovers a wedge ends after that rollback and leaves the upgrade to the
-      # next tick (backend#5273), so it never shares a tick with an `--atomic`:
+      # next tick, so it never shares a tick with an `--atomic`:
       # that tick costs at most 1 x timeout + 300s. At the
       # 10m default that is 1500s, inside the hourly schedule; a timeout of 28m
       # or more crosses it, and Forbid skips the tick that falls inside the run.
@@ -696,7 +696,7 @@ spec:
           # StorageClasses and RBAC — it runs `helm upgrade`, which rewrites the
           # release. Without the token the CronJob cannot upgrade anything.
           automountServiceAccountToken: true
-          # `Never`, NOT `OnFailure` (backend#2620). Kubernetes DELETES the Pod
+          # `Never`, NOT `OnFailure`. Kubernetes DELETES the Pod
           # of an `OnFailure` Job once `backoffLimit` is exhausted, so a
           # repeatedly-failing CronJob leaves its Jobs behind and **no logs** —
           # `failedJobsHistoryLimit` retains the Job object and cannot retain a
@@ -730,7 +730,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: helm
-              # THROUGH THE ONE HELPER (backend#4160). This used to render
+              # THROUGH THE ONE HELPER. This used to render
               # `mirrorPrefix + repository:tag`, which emits NOTHING when no
               # mirror is set -- a BARE reference, and a bare reference is a
               # Docker Hub reference. That is invisible: there is no `docker.io`
@@ -758,7 +758,7 @@ spec:
                   value: {{ .Values.autoUpgrade.chartName | quote }}
                 - name: TRACEBLOC_UPGRADE_TIMEOUT
                   value: {{ .Values.autoUpgrade.timeout | quote }}
-                # #2877: the wedge-vs-in-flight age threshold, in whole seconds.
+                # the wedge-vs-in-flight age threshold, in whole seconds.
                 # The script's awk does the age math but not duration parsing, so
                 # convert the human duration here. `| default "45m"` preserves the
                 # reset-then-reuse-values nil-guard when an older values.yaml

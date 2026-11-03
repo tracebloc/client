@@ -1,6 +1,6 @@
 # tracebloc/ingestor Helm chart
 
-A thin chart that submits one data-ingestion run to your tracebloc client cluster. Wraps the `POST /internal/submit-ingestion-run` endpoint on jobs-manager (client-runtime#21) so the customer-facing UX is:
+A thin chart that submits one data-ingestion run to your tracebloc client cluster. Wraps the `POST /internal/submit-ingestion-run` endpoint on jobs-manager so the customer-facing UX is:
 
 ```bash
 helm install my-dataset tracebloc/ingestor \

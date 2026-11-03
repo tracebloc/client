@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  exit-trap.sh — an EXIT trap that cannot turn an abort into exit 0
-#  (client-dev#1754, found in install.sh by client-dev#1751).
+#  (an abort under the trap must keep its own non-zero status).
 # -----------------------------------------------------------------------------
 #  macOS ships /bin/bash 3.2. Under `set -u` there, an unbound variable aborts
 #  the script, the EXIT trap runs, and the process exits 0 — bash 5 exits 1. The

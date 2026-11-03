@@ -36,7 +36,7 @@
 #    TRACEBLOC_HELM_VERSION=v4.2.3  default: v4.2.3  (Helm release tag; "latest" resolves at install time)
 #    TRACEBLOC_HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
 #    HOST_DATA_DIR=~/.tracebloc  legacy alias for TRACEBLOC_HOST_DATA_DIR, remove_by 2026-12-31
-#    TRACEBLOC_STORAGE_MODE=hostpath  default: node-local  (RFC-0003 Option C; D15 flip, client#456)
+#    TRACEBLOC_STORAGE_MODE=hostpath  default: node-local
 #                                node-local (default) stores datasets on k3s local-path
 #                                INSIDE the node — no ~/.tracebloc host dirs, wiped on
 #                                cluster delete.
@@ -45,13 +45,13 @@
 #                                required for a TRACEBLOC_HOST_DATASET_DIR network mount).
 #    TRACEBLOC_HOST_DATASET_DIR=/data01/tracebloc  optional separate dataset dir (hostpath)
 #                                Linux/k3s path only.
-#    TRACEBLOC_ENV=dev           optional, canonical name (RFC-0076); if neither this nor the
+#    TRACEBLOC_ENV=dev           optional, canonical name; if neither this nor the
 #                                legacy CLIENT_ENV is set, no stage var is added to values
 #    CLIENT_ENV=dev              legacy alias for TRACEBLOC_ENV, remove_by 2026-12-31
 #    TRACEBLOC_FORCE_REINSTALL=1  skip the "already set up" stop-and-check gate
 #                                and re-run every step (same as --force/--reinstall)
 #    TRACEBLOC_LEFTOVER_ACTION=reuse|wipe  non-interactive answer to the leftover-data
-#                                guard (#376) — same as --reuse-data / --wipe-data.
+#                                guard — same as --reuse-data / --wipe-data.
 #                                A new install onto a machine that still holds old
 #                                data STOPS and asks by default rather than
 #                                silently adopting it; a fresh HOST_DATA_DIR (or
@@ -86,7 +86,7 @@ LIB_DIR="${SCRIPT_DIR}/lib"
 
 # ── Source modules ───────────────────────────────────────────────────────────
 source "${LIB_DIR}/common.sh"
-# telemetry.sh (backend#1907) is sourced right after common.sh so the install
+# telemetry.sh is sourced right after common.sh so the install
 # clock starts before any work does, and so common.sh's step_header /
 # install_cleanup hooks find their functions. Guarded like the other late
 # additions: an older bootstrap (e.g. a not-yet-updated tracebloc.io/i.sh, whose
@@ -120,7 +120,7 @@ source "${LIB_DIR}/install-client-helm.sh"
 if [[ -f "${LIB_DIR}/install-cli.sh" ]]; then
   source "${LIB_DIR}/install-cli.sh"
 fi
-# provision.sh (the #838 sign-in + client-create-before-Helm step) likewise may be
+# provision.sh (the sign-in + client-create-before-Helm step) likewise may be
 # absent under a stale bootstrap — guard so the installer degrades to the dual-mode
 # credential path rather than aborting under `set -e`.
 if [[ -f "${LIB_DIR}/provision.sh" ]]; then
@@ -139,7 +139,7 @@ fi
 if [[ -f "${LIB_DIR}/reinstall.sh" ]]; then
   source "${LIB_DIR}/reinstall.sh"
 fi
-# probe.sh (RFC 0001 host capability/privilege audit) may likewise be absent
+# probe.sh (host capability/privilege audit) may likewise be absent
 # under a stale bootstrap that didn't fetch it — guard the source so `--diagnose`
 # simply omits the install-tier section instead of aborting under `set -e`.
 if [[ -f "${LIB_DIR}/probe.sh" ]]; then
@@ -148,13 +148,13 @@ fi
 source "${LIB_DIR}/summary.sh"
 source "${LIB_DIR}/diagnose.sh"
 
-# The run is not finished until it says so (client-dev#1752): bash 3.2 hands the
+# The run is not finished until it says so: bash 3.2 hands the
 # EXIT trap a 0 for a `set -u` abort, so a 0 counts only with _tb_done=1, which
 # main's normal end and each intended `exit 0` set (tb_exit_rc, common.sh). Set
 # here, not inherited: an exported _tb_done=1 must not vouch for this run.
 _tb_done=0
 trap 'install_cleanup; exit "${_TB_EXIT_RC:-1}"' EXIT
-# Record the site of the first failing command (client#681). `set -E` (errtrace)
+# Record the site of the first failing command. `set -E` (errtrace)
 # is what makes this useful: without it an ERR trap fires only at top level, so
 # every failure inside install_macos / install_linux — i.e. nearly all of them —
 # stayed invisible, and the user got a generic closer over an empty log.
@@ -164,7 +164,7 @@ trap 'install_cleanup; exit "${_TB_EXIT_RC:-1}"' EXIT
 set -E
 trap '_record_err "${BASH_SOURCE[0]:-?}:${LINENO}" "$BASH_COMMAND"' ERR
 # Route SIGINT/SIGTERM through a normal exit so the EXIT trap (install_cleanup)
-# always runs — it shreds the transient machine credential (#838). Without these,
+# always runs — it shreds the transient machine credential. Without these,
 # a Ctrl-C in the brief mint→source window could leave the 0600 secret on disk.
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -203,18 +203,18 @@ main() {
   # gets k3s on Apple container, and Linux, outside WSL and inside it, native k3s,
   # k3d being retired on every OS. A resolution that cannot tell, or a request for
   # a retired substrate, is refused by name after the line. So is a new install on a
-  # Mac below the floor (RFC-0175 D6: Apple silicon, macOS 26 or later), before
+  # Mac below the floor (Apple silicon, macOS 26 or later), before
   # setup_log_file writes anything; prepare-host below is refused there too.
   tb_substrate_resolve
   print_substrate_token
   refuse_unsupported_substrate
   refuse_unresolved_substrate
   # tracebloc's WSL distro runs only as the Windows installer runs it: native k3s,
-  # and one of its two runs (common.sh, client-dev#1810 section 5). Any other WSL
-  # distro is refused, whatever the substrate (client-dev#1949).
+  # and one of its two runs (common.sh). Any other WSL
+  # distro is refused, whatever the substrate.
   refuse_wsl_run
   # A Mac below the floor is stopped here, first on every path and as its own
-  # refusal (client-dev#1623): every Mac resolves k3s since 4.1 (client-dev#1948), so
+  # refusal: every Mac resolves k3s since 4.1, so
   # the D10 check below, which asks the macOS node's refusals, would reach it next.
   refuse_unsupported_mac
   # Native k3s is never set up on a machine that runs tracebloc on k3d (D10): what
@@ -225,7 +225,7 @@ main() {
     || error "This installer build can't check whether this machine runs tracebloc on k3d (stale bootstrap), and k3s is never set up beside it. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
   refuse_k3d_machine
 
-  # prepare-host: the standalone, admin-run Tier-2 step (RFC 0001 #1178) —
+  # prepare-host: the standalone, admin-run Tier-2 step —
   # installs the privileged prerequisites so a researcher can then install
   # unprivileged at Tier 0, and grants them k3s through its group. Terminal like
   # --diagnose (never provisions as the admin); clear the EXIT trap so no
@@ -234,7 +234,7 @@ main() {
   # install.sh's bailout exemption scans all args, so a run like
   # `--force prepare-host` must dispatch here too, never fall through into a
   # (forced) full provision as the admin (Bugbot r4).
-  # --print (RFC-0175 D3, client-dev#1541): list every command prepare-host would
+  # --print: list every command prepare-host would
   # run as root, and run none. Read from the arguments only, never the environment.
   local _a_ph _a_pr
   TRACEBLOC_PREPARE_PRINT=""
@@ -244,10 +244,10 @@ main() {
     # Replace the full install_cleanup (its credential-shred + "did not complete"
     # messaging don't apply to a host-prep run) with a lightweight reaper that
     # still tears down the sudo keepalive preflight_sudo starts — otherwise it
-    # orphans a background loop polling `sudo` every 50s (Bugbot #377).
-    # It reaps the private download directories too (backend#4279): prepare-host
+    # orphans a background loop polling `sudo` every 50s.
+    # It reaps the private download directories too: prepare-host
     # installs the same prerequisites, so it can be mid-download when it dies.
-    # Its status takes tb_exit_rc's rule (client-dev#1752), inlined: like the
+    # Its status takes tb_exit_rc's rule, inlined: like the
     # declare -F guard above it, this trap cannot assume the libs loaded.
     trap '_tb_rc=$?; if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi; if declare -F tb_scratch_reap >/dev/null 2>&1; then tb_scratch_reap; fi; [ "$_tb_rc" -ne 0 ] || [ "${_tb_done:-0}" = 1 ] || _tb_rc=1; exit "$_tb_rc"' EXIT
     setup_log_file
@@ -275,11 +275,11 @@ main() {
     || error "--print lists what prepare-host would run as root, and runs none of it. Ask for it with prepare-host: curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host --print"
 
   # Past this line the run is committed to installing, so it is the one that
-  # produces an outcome event (backend#1907). Everything above is terminal and
+  # produces an outcome event. Everything above is terminal and
   # touches nothing: --help exits 0, --diagnose clears the EXIT trap, and
   # prepare-host swaps it for a lightweight reaper. Without this latch, a
   # `--help` emitted install.run.succeeded and inflated the denominator of the
-  # failure rate the ticket exists to produce (Bugbot, client#747).
+  # failure rate the ticket exists to produce (Bugbot).
   #
   # NOT covered, deliberately: prepare-host. It is a different command with its
   # own registry component (§10.1 gives `installer` the components install /
@@ -297,7 +297,7 @@ main() {
   for _arg in "$@"; do
     case "$_arg" in
       --force|--reinstall) TB_FORCE_REINSTALL=1 ;;
-      # Leftover-data guard (#376): non-interactive answers to the reuse/wipe/
+      # Leftover-data guard: non-interactive answers to the reuse/wipe/
       # new-dir prompt. --data-dir=PATH just points HOST_DATA_DIR elsewhere
       # (validate_config resolves it below), so a fresh dir sidesteps the prompt.
       --reuse-data) TB_LEFTOVER_ACTION=reuse ;;
@@ -306,7 +306,7 @@ main() {
     esac
   done
 
-  # Refuse a sudo-wrapped full run BEFORE any file is created (#427): running the
+  # Refuse a sudo-wrapped full run BEFORE any file is created: running the
   # whole install as root sets the cluster up for root and root-owns the user's ~/.tracebloc
   # + ~/.kube. prepare-host (the admin path) already dispatched-and-exited above;
   # a genuine root login (no SUDO_USER) is allowed. Guarded so a stale bootstrap
@@ -316,15 +316,15 @@ main() {
   fi
 
   validate_config
-  # A native k3s re-run keeps the storage its release was installed with
-  # (client-dev#1782): read it here, before the first pre-install reader of
+  # A native k3s re-run keeps the storage its release was installed with:
+  # read it here, before the first pre-install reader of
   # TB_STORAGE_MODE (the guard below, preflight, guard_leftover_data), so each judges
   # where the release keeps its data. It decides only when it can see the release;
   # otherwise install_client_helm reads it once k3s is up. Guarded like its neighbours.
   if declare -F _native_k3s_release_storage >/dev/null 2>&1; then
     _native_k3s_release_storage early
   fi
-  # Pre-log network-FS guard (#432): setup_log_file mkdirs HOST_DATA_DIR and
+  # Pre-log network-FS guard: setup_log_file mkdirs HOST_DATA_DIR and
   # redirects the whole session's output onto it — refuse a network-FS target
   # BEFORE that unguarded mkdir can fail (or land root-squashed) on an NFS
   # home. Guarded so a stale bootstrap without the new helper proceeds as
@@ -341,7 +341,7 @@ main() {
   # assess_existing_install inspects the machine READ-ONLY and always returns 0: a
   # fresh or degraded box gets one line, a healthy native k3s one log line, and
   # every one goes on to the normal flow below (step c moves a healthy node
-  # forward, RFC-0175 D4 and D11). Guarded so a stale bootstrap that didn't fetch
+  # forward). Guarded so a stale bootstrap that didn't fetch
   # assess.sh — or --force/--reinstall — simply runs the full flow.
   if [[ "${TB_FORCE_REINSTALL:-0}" != 1 ]] \
      && declare -F assess_existing_install >/dev/null 2>&1; then
@@ -350,7 +350,7 @@ main() {
 
   # Trust an explicit corporate CA across every host tool (cosign/helm/git/curl)
   # BEFORE preflight's HTTPS probes and any tool download, so a TLS-inspecting proxy
-  # is handled end-to-end (#583). Guarded so a stale bootstrap without the helper
+  # is handled end-to-end. Guarded so a stale bootstrap without the helper
   # proceeds as before (same pattern as the assess/early_data_dir gates).
   if declare -F wire_ca_trust >/dev/null 2>&1; then
     wire_ca_trust
@@ -360,7 +360,7 @@ main() {
   step_header a "Checking your machine"
   run_preflight
   detect_gpu
-  # RFC 0001 host audit: capability/privilege probe + the chosen install tier.
+  # Host audit: capability/privilege probe + the chosen install tier.
   # Sets INSTALL_TIER, which install_linux's _route_install_tier honours. Guarded
   # so a stale bootstrap without probe.sh simply skips it (routing then proceeds
   # exactly as before).
@@ -390,9 +390,9 @@ main() {
   # Guarded: a stale bootstrap may not have fetched install-cli.sh — then step d's
   # guard (or install_client_helm's dual-mode path) surfaces it. Not in tracebloc's
   # WSL distro: the CLI is the Windows host's, which signs in and creates the client
-  # there (RFC-0175 D2), so step d here takes the credential it handed over.
+  # there, so step d here takes the credential it handed over.
   # The CLI step itself never fails; require_tracebloc_cli_floor then stops a run
-  # left with a CLI below the platform's floor (backend#4959).
+  # left with a CLI below the platform's floor.
   if [[ -z "$(tb_wsl_phase 2>/dev/null)" ]] && declare -F install_tracebloc_cli >/dev/null 2>&1; then
     install_tracebloc_cli
     require_tracebloc_cli_floor
@@ -422,7 +422,7 @@ main() {
   if declare -F print_environment_created >/dev/null 2>&1; then
     print_environment_created
   fi
-  # The GPU device plugin is no longer applied imperatively here (client#564):
+  # The GPU device plugin is no longer applied imperatively here:
   # the chart now renders it as a Helm-managed DaemonSet, gated on
   # gpu.devicePlugin.enabled, which install_client_helm sets in step (e) from
   # GPU_VENDOR. So it comes up WITH the release (tracked, and removed on
@@ -431,7 +431,7 @@ main() {
 
   # ── d) Register your machine ─────────────────────────────────────────────
   #     Sign in + `client create` BEFORE Helm, so the minted credential + derived
-  #     namespace feed the chart (#838). Dual-mode (TRACEBLOC_VALUES_FILE / pre-
+  #     namespace feed the chart. Dual-mode (TRACEBLOC_VALUES_FILE / pre-
   #     supplied credentials) skips sign-in. Guarded so a stale bootstrap that
   #     didn't fetch provision.sh degrades to the dual-mode credential path inside
   #     install_client_helm rather than aborting.
@@ -447,11 +447,11 @@ main() {
   echo ""
   install_client_helm
   tb_record_write   # the namespace is decided now
-  # The Apple-GPU runner's login item (cli-dev#1305), after the chart, which holds its
+  # The Apple-GPU runner's login item, after the chart, which holds its
   # ServiceAccount. The macOS node only, and only with a CLI that carries the runner.
   if declare -F _mac_ct_ensure_runner >/dev/null 2>&1; then _mac_ct_ensure_runner; fi
   # Node-level GPU verification (informational): the chart-managed device plugin
-  # (client#564) rolls out as part of the Helm release above, so confirm the node
+  # rolls out as part of the Helm release above, so confirm the node
   # now advertises the GPU here rather than before Helm. verify_gpu no-ops for a
   # CPU-only host (GPU_VENDOR neither nvidia nor amd).
   verify_gpu
@@ -461,13 +461,17 @@ main() {
   #     Wait for the client's workloads to actually come up, then the rich summary.
   step_header f "Connecting to tracebloc"
   wait_for_client_ready
+  # The CPU training image, after readiness so its pull never shares the link with the
+  # control plane's, and before the example use case, whose first training runs on it.
+  # It does not wait for the pull.
+  _prepull_training_cpu
   # The account's example use case, by the CLI this run signed in (install-cli.sh).
   # Guarded so a stale bootstrap without it proceeds as before.
   if declare -F setup_example_use_case >/dev/null 2>&1; then
     setup_example_use_case
   fi
-  # The GPU training base image, after readiness so its pull never shares the link
-  # with the control plane's (slim client B.13). It does not wait for the pull.
+  # The GPU training base image, after the example so its multi-GB pull never shares
+  # the link with the example's. It does not wait for the pull.
   _prepull_training_parent
   # A connected, interactive install opens the dashboard with a one-time link
   # that marks the browser as on this machine (install-client-helm.sh), before the
@@ -483,12 +487,9 @@ main() {
   fi
 
   tb_wsl_client_state_write
-  # Exit code reflects reality: connected/starting are OK; failures are non-zero
-  # so re-runs and automation can tell the difference.
-  case "${TRACEBLOC_CLIENT_STATE:-}" in
-    connected|starting) ;;
-    *) exit 1 ;;
-  esac
+  # Exit code reflects reality (client_outcome_ok): failures are non-zero so
+  # re-runs and automation can tell the difference.
+  client_outcome_ok || exit 1
 }
 
 main "$@"

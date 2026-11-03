@@ -50,7 +50,7 @@ spec:
   # Deny all ingress — no one should connect TO a training pod.
   ingress: []
   egress:
-    {{- if (default dict .Values.restrictedDns).enabled }}
+    {{- if include "tracebloc.restrictedDnsOn" . }}
     # 1. DNS to the RESTRICTED resolver only (restrictedDns.enabled). The cluster
     #    DNS forwards any name it does not own to the internet, so a query NAME
     #    is an exfiltration channel; the restricted resolver answers the cluster
@@ -85,11 +85,11 @@ spec:
           protocol: TCP
     {{- end }}
     {{- /* Rule 2 (external HTTPS) is the egress hole SECURITY §8.2 closes. The
-           shipped default is now `false` (values.yaml — RFC-0003 D6 deny-by-default),
+           shipped default is now `false` (values.yaml deny-by-default),
            so a fresh render drops this rule. The `dig` default of TRUE here is the
            legacy fallback ONLY: an absent key (helm upgrade --reuse-values from a
            release predating the key) keeps the rule — old permissive behaviour — and
-           an operator can still opt a fleet back out with an explicit `true` (#102). */}}
+           an operator can still opt a fleet back out with an explicit `true`. */}}
     {{- if dig "allowExternalHttps" true .Values.networkPolicy.training }}
     # 2. External HTTPS — everything NOT in the cluster's pod/service CIDRs.
     #    Training pods reach the backend / Azure Service Bus / App Insights directly.
@@ -121,8 +121,8 @@ spec:
     #    they never hold Service Bus credentials). Rule 2 blocks this ClusterIP
     #    egress, so re-permit it explicitly, exactly like MySQL above. Without
     #    this rule every experiment CrashLoopBackOffs at the first epoch
-    #    finalize with "requests-proxy-service:8888 ... Connection refused"
-    #    (client#196). The send port only, never the record port.
+    #    finalize with "requests-proxy-service:8888 ... Connection refused".
+    #    The send port only, never the record port.
     #    Service selector + port: templates/egress-gate-service.yaml
     #    (app=egress-gate, 8888).
     - to:

@@ -1,7 +1,7 @@
 {{- $cfg := default dict (default dict .Values.sealCheck).storageAssertions }}
 {{- if dig "enabled" true $cfg }}
 {{- /*
-  In-cluster storage assertions (seal check — RFC-0003 §8.2 / backend#1184).
+  In-cluster storage assertions (seal check).
   A `helm test` hook Job that asserts, from inside the cluster, that the
   release's storage is what the declared storage model says it is:
 
@@ -16,27 +16,27 @@
                       chart does not manage.
     pv-hostpath       DYNAMIC-PVC MODE ONLY (hostPath.enabled=false): no
                       release PVC is backed by a hostPath PersistentVolume on
-                      an unmanaged host tree. This catches the RFC-0003 D3/D4
+                      an unmanaged host tree. This catches the
                       stranding scenario — a leftover chart hostPath PV from an
                       older bare-metal install still carries a claimRef for our
                       PVC names and captures the claim even in dynamic mode.
                       Dynamically provisioned NODE-LOCAL hostPath PVs (the k3s
                       local-path pattern under /var/lib/rancher/…) are
                       tolerated and reported: those live inside the cluster
-                      node's filesystem and die with the cluster (RFC-0003
-                      Option C); whether that path is additionally host-visible
+                      node's filesystem and die with the cluster
+                      (the node-local model); whether that path is additionally host-visible
                       is a cluster-creation fact (a bind mount) that cannot be
                       seen from in-cluster and is verified at install level.
                       In hostPath mode the sub-check reports SKIP — hostPath
                       PVs are the declared storage model there, and the model
                       itself is chosen in values, visible to review.
-                      On the macOS node (jobData.path, client-dev#2320) the
+                      On the macOS node (jobData.path) the
                       dataset and logs claims are on the job-data folder: each
                       must be bound to its own chart PV, with no class, on
                       <jobData.path>/<release>/<claim>, and nothing else;
                       MySQL's claim is checked as any dynamic claim is.
 
-  Verdict philosophy (RFC-0003 §8.2): a guarantee that cannot be verified is
+  Verdict philosophy: a guarantee that cannot be verified is
   reported UNSEALED (the Job fails loudly) — it is never silently claimed
   sealed. The one deliberate softening: with clusterScope=false the chart
   cannot grant PV read (cluster-scoped RBAC), so pv-hostpath degrades to the
@@ -80,7 +80,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
-    {{- /* seal-check enumeration contract (RFC-0003 §8.2) — see _helpers.tpl */}}
+    {{- /* seal-check enumeration contract — see _helpers.tpl */}}
     {{- include "tracebloc.sealCheckLabels" (dict "name" "storage-assertions") | nindent 4 }}
   annotations:
     "helm.sh/hook": test
@@ -119,7 +119,7 @@ spec:
         - name: assert
           # Same kubectl-capable image the image-refresh CronJob uses; the tag
           # pins kubectl so behaviour cannot drift if upstream re-tags.
-          # THROUGH THE ONE HELPER (backend#4160) -- see the note in
+          # THROUGH THE ONE HELPER -- see the note in
           # auto-upgrade-cronjob.yaml.
           image: {{ include "tracebloc.thirdPartyImage" (dict "site" "sealCheck.storageAssertions.image" "root" $) | quote }}
           imagePullPolicy: {{ $img.pullPolicy | default "IfNotPresent" }}
@@ -139,7 +139,7 @@ spec:
             {{- /* The Helm RELEASE NAME. Its canonical is TRACEBLOC_RELEASE_NAME, the
                  spelling the rest of this chart uses for the same value -- NOT
                  TRACEBLOC_RELEASE, which is the PLATFORM release version the
-                 backend serves on /version/ (backend#3850). The script's legacy
+                 backend serves on /version/. The script's legacy
                  name stays RELEASE (remove_by 2026-12-31). */}}
             - name: TRACEBLOC_RELEASE_NAME
               value: {{ .Release.Name | quote }}
@@ -188,7 +188,7 @@ spec:
               kubectl config set-context in-cluster --cluster=in-cluster --user=in-cluster --namespace="${NAMESPACE}" >/dev/null
               kubectl config use-context in-cluster >/dev/null
               KC="kubectl --request-timeout=10s -n ${NAMESPACE}"
-              # A failed read KEEPS kubectl's stderr (client-dev#2284). It was sent to
+              # A failed read KEEPS kubectl's stderr. It was sent to
               # /dev/null, so a Forbidden or an unreachable API printed as "MISSING" /
               # '<none>' and the log could not say why. _err prints it on one line, cut
               # short enough to survive a consumer's line cut, and empties the file so
@@ -302,8 +302,8 @@ spec:
                     continue
                   fi
                   # Leftover chart hostPath PVs carry a claimRef for our PVC
-                  # names and capture the claim even in dynamic mode (RFC-0003
-                  # D3/D4). Detectable by name with no PV read RBAC.
+                  # names and capture the claim even in dynamic mode.
+                  # Detectable by name with no PV read RBAC.
                   legacy_hit=""
                   for legacy in $CHART_HOSTPATH_PVS; do
                     if [ "$vol" = "$legacy" ]; then
@@ -326,7 +326,7 @@ spec:
                       # paths under it, never siblings — /opt/local-path-provisioner
                       # must not admit /opt/local-path-provisioner-evil. Trailing
                       # slashes on entries are normalized away, so both entry
-                      # styles behave identically. (bugbot, PR #378)
+                      # styles behave identically.
                       for prefix in $NODE_LOCAL_PREFIXES; do
                         p=${prefix%/}
                         case "$hp" in "$p"|"$p"/*) allowed=1 ;; esac
@@ -342,7 +342,7 @@ spec:
                     # Only when the legacy-name check passed: after a FAIL just
                     # above, "verified not bound to a legacy PV" would be a
                     # claim the check did not make — the FAIL alone is the
-                    # honest verdict for that claim. (bugbot, PR #378)
+                    # honest verdict for that claim.
                     echo "WARNING  pv-hostpath: PARTIAL verification for $pvc (clusterScope=false grants no PV read). Verified only that the claim is not bound to a chart legacy hostPath PV by name; the PV spec itself was NOT inspected. Set clusterScope=true for full verification."
                   fi
                 done

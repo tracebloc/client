@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  provision.sh — RFC-0001 #838: provision the client BEFORE Helm.
+#  provision.sh — provision the client BEFORE Helm.
 #
 #  In the browser-auth path this installs the tracebloc CLI (FATAL — it mints the
 #  credential), signs in (`tracebloc login`, the device flow), and `tracebloc
@@ -34,8 +34,7 @@ _provisioning_preset() {
 # It always exits 0; callers test the output (`[[ -n "$plan" ]]`). A "no plan" exit 1
 # was recorded as a failure by the installer's ERR trap: `set -E` carries the trap
 # into the `$(...)` of `if plan="$(...)"`, so every install against a CLI without
-# --plan logged an error on the normal fallback (the class of backend#5025 O-103,
-# see _summary_kubeconfig_hint). Both probes read /dev/null: under `curl | bash`
+# --plan logged an error on the normal fallback (see _summary_kubeconfig_hint). Both probes read /dev/null: under `curl | bash`
 # the installer's stdin is the script itself, and a CLI that reads stdin would eat it.
 _create_plan() {
   # Captured, not piped: under `set -o pipefail` grep -q exits on its first match,
@@ -80,7 +79,7 @@ _host_machine_name() {
 }
 
 # _name_slug NAME -- NAME as `client create` makes a namespace of it (the CLI's
-# slug.Slugify, RFC-0001 Appendix B), for ASCII: lowercase, every run of other
+# slug.Slugify), for ASCII: lowercase, every run of other
 # characters one "-", none at either end, 63 at most. A name with letters outside
 # ASCII loses them here; the CLI transliterates them.
 _name_slug() {
@@ -130,7 +129,7 @@ _machine_labels() {
 
 # _cli_supports_provisioning: does the installed CLI ship the browser-auth mint
 # commands (`tracebloc login` + `tracebloc client create`)? install_tracebloc_cli
-# pulls the latest RELEASE, which can lag this installer until the cli#104 release
+# pulls the latest RELEASE, which can lag this installer until the CLI release
 # ships — so probe before committing to the path. `--help` is side-effect-free and
 # cobra exits non-zero on an unknown command, so this cleanly tells old from new.
 _cli_supports_provisioning() {
@@ -169,7 +168,7 @@ _login_tty_ok() { { : </dev/tty; } 2>/dev/null; }
 # TRACEBLOC_INSTALLER tells the CLI it is not being run by hand, so it suppresses
 # its own "run `tracebloc login`" recovery line: correct for someone who typed
 # the command, wrong here, where a bare login would leave the client mint and the
-# Helm install undone. _device_sign_in below owns the recovery advice (cli#517).
+# Helm install undone. _device_sign_in below owns the recovery advice.
 # It is a command prefix, not an export — no later CLI call should inherit it.
 _run_device_login() {
   if _login_tty_ok; then
@@ -189,7 +188,7 @@ _run_device_login() {
 #
 # The device code has a hard ten-minute deadline and the human approving it is
 # reading a phone — a lapsed code is an ordinary outcome, not an exceptional one.
-# Before cli#517 it cost a full installer re-run: everything already done (the
+# It used to cost a full installer re-run: everything already done (the
 # prerequisites, the cluster) was thrown away over a missed prompt. This mirrors
 # the name prompt's retry loop further down, for the same reason — an interactive
 # step that can fail for a benign reason must not abort a long install.
@@ -320,8 +319,8 @@ _account_owns_namespace() {
 # output the user must see. Its output goes to the log (the credential path and
 # trace lines are noise on screen), but some of it is a decision about THEIR
 # client: a warning that this machine's previous client is being left behind,
-# or that the existing client is being reconnected with a new credential
-# (backend#5365). Before this, those lines reached only the log. Prints each
+# or that the existing client is being reconnected with a new credential.
+# Before this, those lines reached only the log. Prints each
 # block that starts with a `⚠` line or a `✔ Reconnecting` line, plus the plain
 # hint lines under it; nothing else. The credential never appears in this output
 # (it goes to the 0600 file), so the passthrough cannot leak it.
@@ -336,7 +335,7 @@ _show_create_notices() {
   '
 }
 
-# ── a client ID with no password, on a terminal (backend#5025 O-13, client-dev#1504) ──
+# ── a client ID with no password, on a terminal ──
 #
 # The clients page's + creates a client and shows its ID and password once; its
 # install command carries the ID (`curl … | TRACEBLOC_CLIENT_ID=<id> bash`) and
@@ -412,7 +411,7 @@ provision_client() {
     _provision_take_credential "$TRACEBLOC_STDIN_CRED_FILE"
     return 0
   fi
-  # A client ID with no password, on a terminal: ask for it (backend#5025 O-13).
+  # A client ID with no password, on a terminal: ask for it.
   # _prompt_tty only checks the node's mode; _login_tty_ok really opens it, so a
   # headless run (node present, no controlling terminal) keeps the browser sign-in.
   if _provision_wants_preset_password && _prompt_tty && _login_tty_ok; then
@@ -430,10 +429,10 @@ provision_client() {
   has tracebloc || error "The tracebloc CLI is required to provision this machine but isn't available. Install it (curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh), open a new shell, and re-run."
 
   # The browser-auth mint path needs a CLI new enough to ship `login` + `client
-  # create` (cli#104). The installed CLI comes from the latest RELEASE, which may
+  # create`. The installed CLI comes from the latest RELEASE, which may
   # predate this installer — so if it's too old, fall back to the proven manual-
   # credential path (install_client_helm prompts for an existing client's
-  # credentials, exactly as before #838) instead of hard-failing on an unknown
+  # credentials, exactly as before) instead of hard-failing on an unknown
   # `tracebloc login`. Once the CLI release lands, the probe passes and the
   # one-step browser flow takes over automatically.
   if ! _cli_supports_provisioning; then
@@ -457,7 +456,7 @@ provision_client() {
   # new one.
   local _reuse_ns=""
 
-  # ── One-client-per-machine pre-flight (#303) ─────────────────────────────
+  # ── One-client-per-machine pre-flight ─────────────────────────────
   # `client create` below mints a fresh client whenever the backend can't match
   # THIS cluster to a client in the signed-in account — e.g. a pre-anchor client
   # whose cluster_id is still null, or one owned by a DIFFERENT account. If a
@@ -517,7 +516,7 @@ provision_client() {
       elif [[ "$_own_rc" -eq 0 ]]; then
         # The signed-in account owns the client installed here, so `client create`
         # below adopts it and keeps its name: asking for a new one would only
-        # suggest a second client is about to be made (backend#5365).
+        # suggest a second client is about to be made.
         _reuse_ns="$INSTALLED_CLIENT_NS"
       fi
     fi
@@ -537,7 +536,7 @@ provision_client() {
   # Precedence: TRACEBLOC_CLIENT_NAME (unattended) > interactive prompt on /dev/tty
   # (works under `curl | bash`, whose stdin isn't the terminal) > fail closed.
   #
-  # Location is NEVER prompted (RFC-0001 §6.4 target spec; cli#137). The CLI's
+  # Location is NEVER prompted. The CLI's
   # `client create` now treats --location as optional, so we auto-derive the carbon
   # zone from the system timezone below (silent, no network) and, when detection
   # yields nothing, provision with NO location rather than asking. A pinned
@@ -631,7 +630,7 @@ provision_client() {
   # No location from TRACEBLOC_CLIENT_LOCATION: derive the carbon zone from the
   # system timezone silently — never prompted, matching the target spec. The
   # detected code is already whitespace-free. If detection also comes up empty we
-  # leave client_location unset and provision with NO --location (cli#137 makes it
+  # leave client_location unset and provision with NO --location (the CLI makes it
   # optional); a rejected zone still surfaces via _report_create_failure below
   # rather than failing blind here.
   if [[ -z "$client_location" ]]; then
@@ -655,7 +654,7 @@ provision_client() {
   # --name is required; pass --location only when we have one (the CLI defaults it
   # otherwise). Build as an array so values with spaces survive intact.
   local -a _create_args=(client create --yes --name "$client_name" --credential-file "$cred_file")
-  # The credential-rejected repair (backend#5365): the client runs here, so a plain
+  # The credential-rejected repair: the client runs here, so a plain
   # create adopts it and keeps the credential tracebloc refuses. Ask for a new one.
   if [[ "${INSTALL_STATE_REASON:-}" == credential-rejected ]]; then
     # Capture, then match: piping into a grep that quits early sends the CLI a
@@ -666,7 +665,7 @@ provision_client() {
       # shellcheck disable=SC2034  # consumed cross-file by install-client-helm.sh
       TRACEBLOC_CREDENTIAL_REISSUED=1
     else
-      # Stop before the create (client-dev#1846): without --reissue it adopts the
+      # Stop before the create: without --reissue it adopts the
       # running client and hands back the credential tracebloc refuses, and the run
       # would end "installed" with the machine still offline.
       error "This tracebloc CLI can't issue a new credential to a running client yet — update it and re-run the installer."
@@ -674,7 +673,7 @@ provision_client() {
   fi
   [[ -n "$client_location" ]] && _create_args+=(--location "$client_location")
   # umask 077 so the credential file lands 0600 even if a future CLI build
-  # regresses on its explicit chmod — defense in depth (cli#104 already sets 0600).
+  # regresses on its explicit chmod — defense in depth (the CLI already sets 0600).
   # Capture the create's output so we can surface the ACTUAL failure reason on the
   # terminal (not just "see the log"). On success it's appended to the log and the
   # credential stays in its 0600 file, never on stdout; on failure nothing was
@@ -711,7 +710,7 @@ provision_client() {
 # provision_read_stdin_credential -- the Windows installer's client run hands this
 # core the credential its host CLI's `client create --credential-file` wrote, on
 # stdin (TRACEBLOC_CREDENTIAL_STDIN=1): never on the command line, which Windows
-# lists, and never across drvfs (client-dev#1810 section 5). main() calls this first
+# lists, and never across drvfs. main() calls this first
 # thing, so the bootstrap's write is always read. Kept only in the distro's client
 # run (refuse_wsl_run's rule): read to EOF into a 0600 file in a fresh 0700
 # directory (tb_scratch_dir, reaped on every exit) on the distro's own disk, named
@@ -843,7 +842,7 @@ _provision_take_credential() {
     # existing one stands, write-only on the backend). Hand the adopted client id
     # (its UUID username) + namespace + the ADOPTED marker to install_client_helm,
     # which reconciles the existing release in place and heals a stale clientId to
-    # this UUID — cli#125-era installs stored the numeric dashboard id, which can't
+    # this UUID — older installs stored the numeric dashboard id, which can't
     # authenticate. Drop only the (absent) password: with no password, the partial
     # creds never reach the non-interactive install path, so the ADOPTED branch owns
     # this case. A rebuilt host with no local release still reconciles by discovery.

@@ -9,7 +9,7 @@
   container `record` serves the record read-only on its own port. One replica
   and `Recreate`, so two gates never write the record at once.
 
-  Only `gate` holds a credential (RFC-0324 D2): the client Secret, to log in
+  Only `gate` holds a credential: the client Secret, to log in
   and send under its own login, and its service-account token, to have the
   Kubernetes API review the tokens the control plane's senders present.
 */}}
@@ -198,7 +198,7 @@ spec:
               value: "experiments"
             - name: TRACEBLOC_SB_FLOPS_QUEUE_NAME
               value: "flops"
-            # client-runtime#79: shared HMAC secret used to VERIFY the per-pod
+            # shared HMAC secret used to VERIFY the per-pod
             # bearer token statelessly (signature + expiry), the same key the
             # jobs-manager uses to mint it. When present, the gate skips the
             # pod_tokens table entirely.
@@ -212,7 +212,7 @@ spec:
                   name: {{ include "tracebloc.secretName" . }}
                   key: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
             {{- if (include "tracebloc.serviceDbAccounts" .) }}
-            # backend#1528 S2 (RFC-0003 D10 close-out): authenticate the gate's
+            # Authenticate the gate's
             # metadata-DB access as the dedicated tb_meta identity instead of
             # the root-equivalent edgeuser. Only the metadata identity is wired
             # here -- the gate never touches the dataset DB. jobs-manager mints

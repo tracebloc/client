@@ -13,8 +13,7 @@
                           one node, minAvailable:1 leaves zero allowed voluntary
                           disruptions, so `kubectl drain`/cordon (node
                           maintenance, manual k3s upgrade) blocks forever and
-                          the pod has nowhere to reschedule anyway
-                          (tracebloc/client#560).
+                          the pod has nowhere to reschedule anyway.
     true  -> force render regardless of topology.
     false -> never render.
 */}}
@@ -25,7 +24,7 @@
      deliberately SEPARATE from env.SINGLE_NODE, which only gates the
      jobs-manager GPU->CPU fallback and may legitimately be true on a FIXED
      MULTI-NODE cluster — using that here would drop eviction protection where
-     pods can reschedule (client#560 / Bugbot). The installer sets
+     pods can reschedule. The installer sets
      singleNode=true for its node-local install (one k3s node,
      hostPath.enabled=false, local-path); bare-metal single-node keeps the
      hostPath.enabled default. */ -}}

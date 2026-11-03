@@ -125,7 +125,7 @@ run_diagnose() {
     else
       echo "nproc=$(nproc 2>/dev/null)"; grep -i MemTotal /proc/meminfo 2>/dev/null
     fi
-    # A pipe on purpose (backend#1778). run_diagnose sets `set +e` at its top so
+    # A pipe on purpose. run_diagnose sets `set +e` at its top so
     # no step can abort the bundle, so the 141 the conversion guards against
     # cannot fire here — and `head -20` STREAMS, where capturing df in full would
     # block the whole bundle on an unresponsive NFS/overlay mount. No marker
@@ -154,7 +154,7 @@ run_diagnose() {
       done
     } > "$d/03-describe.txt" 2>&1
     # workload logs (current + previous). The Deployments are READ from the
-    # release (backend#2888): rebuilt as `<namespace>-jobs-manager` they named a
+    # release: rebuilt as `<namespace>-jobs-manager` they named a
     # Deployment that does not exist on an overridden release, and the bundle
     # shipped empty jobs-manager logs. When the read cannot resolve them, the
     # bundle says so in a file of its own instead of leaving the logs silently empty.
@@ -174,7 +174,7 @@ run_diagnose() {
         kubectl get deployment -n "$ns" -l "app.kubernetes.io/instance=$ns" $kt 2>&1
       } > "$d/logs/workloads-unresolved.txt" 2>&1
     fi
-    # The resource-monitor DaemonSet is READ as well (client-dev#1306). The old
+    # The resource-monitor DaemonSet is READ as well. The old
     # literal looked in the CLIENT namespace for a fixed name, but the chart puts
     # it in the node-agents namespace under `<fullname>-resource-monitor`, so the
     # log was always a NotFound error. Unresolved (resourceMonitor disabled, or

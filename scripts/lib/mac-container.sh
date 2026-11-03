@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  mac-container.sh -- Apple's `container` runtime for the macOS node
-#  (RFC-0175 D6, slim client 2.1 part 1).
+# (slim client 2.1 part 1).
 # -----------------------------------------------------------------------------
 #  On macOS, k3s runs as one container in a Linux micro-VM from Apple's open-source
 #  `container` runtime. Apple's installer writes /usr/local and needs an
@@ -47,7 +47,7 @@ _mac_ct_version_ok() { [[ "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 # /). Apple's container CLI hands launchd its roots in this spelling, so every root this
 # installer derives, and every root it reads back from launchd, is compared in it: a HOME
 # ending in / (macOS's TMPDIR does) would otherwise read this installer's own system as
-# another's (client-dev#1941).
+# another's.
 _mac_ct_norm_path() {
   local p="${1:-}" one=/ two=//
   # Through variables, not \/ in the replacement: bash 3.2 keeps that backslash inside "".
@@ -116,7 +116,7 @@ _mac_ct_fetch_pkg() {
 _mac_ct_notary_pause() { sleep 5; }
 
 # _mac_ct_check_pkg PKG -- pkgutil's verdict on PKG (check 2). The lines are the ones
-# pkgutil prints on macOS 26 for Apple's package (spike S-M, RFC-0175 section 12.6):
+# pkgutil prints on macOS 26 for Apple's package (measured on the spike Mac):
 #   Status: signed by a developer certificate issued by Apple for distribution
 #   Notarization: trusted by the Apple notary service
 #   1. Developer ID Installer: Apple Inc. - Containerization (UPBK2H6LZM)
@@ -304,7 +304,7 @@ _mac_ct_ensure_runtime() {
 #  (scripts/apple-container-pin.sh cmd_canary), which boots exactly these pins on the
 #  e2e Mac.
 #
-#  The layout is the spike kit's (RFC-0175 section 12.6): <home>/<version> is the
+#  The layout is the spike kit's: <home>/<version> is the
 #  install root, <home>/app the app root (images, kernels, volumes: kept across a
 #  runtime bump), <home>/logs the log root, <home>/kernel the kept kernel files.
 #
@@ -559,15 +559,15 @@ _mac_ct_start_system() {
 # =============================================================================
 #  Part 3: the node.
 # -----------------------------------------------------------------------------
-#  k3s runs as one container on the system part 2 started, in the shape spike S-M
-#  measured (RFC-0175 section 12.6, the fresh-Mac kit's node_run):
+#  k3s runs as one container on the system part 2 started, in the shape the spike
+#  measured (the fresh-Mac kit's node_run):
 #    - the image is rancher/k3s's linux/arm64 manifest, pulled by its digest
 #      (K3S_IMAGE_ARM64_DIGEST, at the pinned K8S_VERSION);
 #    - all its state is one volume, named like the container, at /var/lib/rancher/k3s;
 #    - --cap-add ALL --read-only-path NONE --masked-path NONE, without which k3s stops
 #      at "open /proc/sys/kernel/panic: read-only file system";
 #    - the API published on 127.0.0.1:6443 only, the local API (the dashboard's
-#      "is this machine" handshake, client-dev#2379) on 127.0.0.1 only, and a
+#      "is this machine" handshake) on 127.0.0.1 only, and a
 #      packet filter inside the node (TB_MAC_CT_NODE_WALL) that drops what other VMs on
 #      this Mac send it;
 #    - --rosetta when Rosetta is installed, while the chart's MySQL pin is amd64;
@@ -584,7 +584,7 @@ _mac_ct_start_system() {
 #  the data is kept). A container or a volume of the node's name that run-args does
 #  not vouch for is refused, never adopted (D5): nothing shows this installer made it.
 #
-#  The join token is pinned on the host, outside the volume (client-dev#1976): k3s
+#  The join token is pinned on the host, outside the volume: k3s
 #  encrypts its datastore's bootstrap data with it, and without one it reads the
 #  server/token it rewrites, unsynced, on every start. A VM killed seconds after a
 #  start can tear that file, and k3s then refuses its own data on every start after
@@ -594,7 +594,7 @@ _mac_ct_start_system() {
 #  config names that file (`token-file`). A node made before the pin keeps the token
 #  it already has (_mac_ct_node_token), never a fresh one.
 #
-#  The volume is made with an ext4 journal (client-dev#1983). Apple container makes a
+#  The volume is made with an ext4 journal. Apple container makes a
 #  volume without one unless `--opt journal=` asks for it, and a VM killed while the
 #  node writes is a power loss to that filesystem: without a journal it came back
 #  corrupt ("structure needs cleaning", directories containerd's metadata still names
@@ -603,7 +603,7 @@ _mac_ct_start_system() {
 #  so, and how to get one, and goes on.
 #
 #  A corporate CA (TRACEBLOC_CA_BUNDLE, else CURL_CA_BUNDLE) reaches the node by path,
-#  as the host's roots reach the WSL distro (client-dev#2116). Its certificates are
+#  as the host's roots reach the WSL distro. Its certificates are
 #  copied to _mac_ct_node_dir/ca, a folder the node mounts read-only: Apple container
 #  mounts folders, not files. On every start, before k3s, the entrypoint rebuilds the
 #  trust bundle containerd's image pulls read from the image's own copy and those
@@ -628,12 +628,12 @@ _mac_ct_start_system() {
 #  hostPath storage and a dataset folder (TRACEBLOC_STORAGE_MODE=hostpath,
 #  TRACEBLOC_HOST_DATASET_DIR) are folders on this Mac, each mounted into the node at its
 #  own path (_mac_ct_node_mounts). The chart's hostPath PVs then name the same folder on
-#  both sides, as on native k3s, where the node is the host (client-dev#1782): the
+#  both sides, as on native k3s, where the node is the host: the
 #  values (_hostpath_paths_block), the folders the installer prepares
 #  (_ensure_release_dirs) and the summary read them unchanged. The folders are frozen
 #  with the node, as its name and ranges are: an installed release's PVs name them, and
 #  hostPath volumes cannot move.
-#  The job-data folder (client-dev#2320, RFC-0185) is the node-local install's one folder
+#  The job-data folder is the node-local install's one folder
 #  on this Mac: the dataset, logs and resume claims live in it (the chart's jobData.path),
 #  so a job the Apple-GPU runner starts on the Mac reads them at the paths a pod does;
 #  k3s and MySQL stay in the node. It is the user's own, at mode 0700, and mounted at its
@@ -645,14 +645,14 @@ _mac_ct_start_system() {
 #  Step c reaches it through _mac_ct_create_cluster (part 6).
 # =============================================================================
 
-# The node's address: TEST-NET-1 (RFC 5737), never routed, so it is free on any network.
+# The node's address: TEST-NET-1, never routed, so it is free on any network.
 TB_MAC_CT_NODE_IP="192.0.2.10"
 # The interface flannel uses inside the node (the container's only one).
 TB_MAC_CT_NODE_IFACE="eth0"
 # The port the node's API listens on, published on this Mac's 127.0.0.1 only
 # (_mac_ct_node_argv), and a port the node's packet filter lets this Mac reach.
 TB_MAC_CT_NODE_API_PORT="6443"
-# The node's packet filter (client-dev#2297, RFC-0185 D10 item 4): a chain in the mangle
+# The node's packet filter: a chain in the mangle
 # table of both IP families, which PREROUTING sends everything arriving on
 # TB_MAC_CT_NODE_IFACE through, before kube-proxy's NodePort DNAT can see it. Every VM on
 # this Mac shares the node's network, and the node listens on every address (the
@@ -661,15 +661,14 @@ TB_MAC_CT_NODE_API_PORT="6443"
 # the network's gateway, to the API port and, when the node publishes it
 # (TRACEBLOC_MAC_CT_LOCAL_API), the local API's NodePort, over IPv4 (the runtime's 127.0.0.1
 # forwards arrive from it); it drops the rest. The local API's NodePort is the one
-# NodePort this Mac reaches (Lukas's decision of 2026-10-19 on client-dev#2379,
-# amending RFC-0185 D10 item 4); no other VM reaches it. The entrypoint sets the chain
+# NodePort this Mac reaches (a decision of 2026-10-19); no other VM reaches it. The entrypoint sets the chain
 # before k3s starts, on every start (the VM's kernel keeps no rule across one), and
 # _mac_ct_node_walled reads it back.
 TB_MAC_CT_NODE_WALL="TRACEBLOC-WALL"
 # The volume's size: a sparse ext4 image, so it takes only what is written.
 TB_MAC_CT_NODE_VOLUME_SIZE="64g"
 # The volume's ext4 journal mode (`--opt journal=`): metadata journalled, data written
-# before the metadata that names it, as Linux mounts ext4 by default (client-dev#1983).
+# before the metadata that names it, as Linux mounts ext4 by default.
 TB_MAC_CT_NODE_VOLUME_JOURNAL="ordered"
 # What a node that cannot be repaired in place needs, said by every refusal that ends there.
 TB_MAC_CT_NODE_REINSTALL='run "tracebloc delete" (it removes the node and its data), then install again'
@@ -761,9 +760,9 @@ exec /bin/k3s server'
 # 5b) calls it too.
 #   - The macOS floor (refuse_unsupported_mac, common.sh, on its one declaration
 #     tb_mac_floor_verdict): Apple silicon, since Apple's container runtime is
-#     arm64-only, with macOS TB_MACOS_FLOOR_MAJOR or later, which the runtime needs
-#     (RFC-0175 D6). main() refuses those Macs on every path first (2.4,
-#     client-dev#1623), with no way back to k3d; this is the same refusal.
+#     arm64-only, with macOS TB_MACOS_FLOOR_MAJOR or later, which the runtime needs.
+# main() refuses those Macs on every path first (2.4),
+#     with no way back to k3d; this is the same refusal.
 #   - A corporate CA the node cannot take (_mac_ct_ca_bundle): set but unreadable, or
 #     holding no PEM certificate. One it can take is handed in by _mac_ct_ensure_node.
 #   - hostPath storage and a dataset folder the node cannot mount
@@ -782,7 +781,7 @@ _mac_ct_refuse_host() {
   _native_k3s_check_version
 }
 
-# _mac_ct_job_data_dir -- the macOS node's job-data folder (client-dev#2320), or nothing
+# _mac_ct_job_data_dir -- the macOS node's job-data folder, or nothing
 # when this run keeps no job data on this Mac. Under node-local only (hostpath keeps its
 # own tree). An installed release decides, once _native_k3s_release_storage has read it:
 # one that names a folder (jobData.path) keeps that folder, and one that names none (a
@@ -861,7 +860,7 @@ _mac_ct_job_data_none_said() {
 
 # _mac_ct_job_data_private DIR -- DIR is a folder of this user's at mode 0700, or prints
 # why and fails. A missing one is made (its parents as mkdir -p makes them) at 0700, and
-# one at another mode is set to it: never world-writable (RFC-0003's reason for leaving
+# one at another mode is set to it: never world-writable (the reason for leaving
 # hostpath), and nothing in the node needs more (see Part 3). A symbolic link, or a
 # folder that is not this user's, is refused, never chmodded: it is not a folder this
 # installer made. The checks are find's -user and -perm, which BSD and GNU read alike.
@@ -896,7 +895,7 @@ _mac_ct_job_data_private() {
 _mac_ct_hostpath_dirs() {
   local root ds d nl=$'\n'
   if [[ "${TB_STORAGE_MODE:-node-local}" != "hostpath" ]]; then
-    # node-local: the job-data folder, when this run keeps one (client-dev#2320).
+    # node-local: the job-data folder, when this run keeps one.
     root="$(_mac_ct_job_data_dir)"; ds=""
     [[ -n "$root" ]] || return 0
   else
@@ -981,11 +980,11 @@ _mac_ct_hostpath_mounted() {
   done <<<"$want"
 }
 
-# _mac_ct_job_data_record -- records the job-data folder (install-record kind job-data,
-# client-dev#2320), id = the node that mounts it, once the release's storage is decided
+# _mac_ct_job_data_record -- records the job-data folder (install-record kind job-data),
+# id = the node that mounts it, once the release's storage is decided
 # and the node is known to mount the folder (_mac_ct_hostpath_mounted). Only a release
 # that keeps its job data there records one, so the entry is also the Apple-GPU runner's
-# marker that it does (tracebloc/cli-dev#1305). Nothing without one.
+# marker that it does. Nothing without one.
 _mac_ct_job_data_record() {
   local jd name
   jd="$(_mac_ct_job_data_dir)"
@@ -1037,7 +1036,7 @@ _mac_ct_node_cidrs() {
 
 # _mac_ct_node_config NAME CIDRS -- the node's config.yaml: _native_k3s_render_config's
 # (node-local storage on the volume, cgroup v2, the kubeconfig root's only), then the
-# Mac's own keys, the join token's file among them (client-dev#1976).
+# Mac's own keys, the join token's file among them.
 _mac_ct_node_config() {
   _native_k3s_render_config node-local "$1" "$2" "" v2 "" || return 1
   printf 'node-ip: "%s"\n' "$TB_MAC_CT_NODE_IP"
@@ -1050,8 +1049,8 @@ _mac_ct_node_config() {
 # _mac_ct_node_size -- "<cpus> <memory>" for the node.
 #   Memory: the installer's one macOS VM rule, preflight.sh's _macos_vm_mem_gb, on the
 #           Mac's RAM as preflight reads it (_pf_host_mem_gb). Asked, never restated:
-#           preflight grades the Mac against the same size. Lukas decided this on 2026-10-11
-#           (tracebloc/backend#4827), departing from RFC-0175's proposal, a quarter of
+#           preflight grades the Mac against the same size. Lukas decided this on 2026-10-11,
+# departing from the earlier proposal, a quarter of
 #           the RAM between 4 and 16 GB.
 #   CPUs:   the Mac's cores less the VM's own (TB_MAC_CT_VM_OWN_CPUS), at least 1, so
 #           the node advertises the Mac's cores.
@@ -1059,7 +1058,7 @@ _mac_ct_node_config() {
 # node runs.
 #
 # TB_MAC_CT_VM_OWN_CPUS: the vCPUs Apple's VM adds to the --cpus it is given, as the node
-# advertises them. RFC-0175 measured one on the spike Mac, and the e2e EC2 Mac again on
+# advertises them. One was measured on the spike Mac, and the e2e EC2 Mac again on
 # 2026-10-14 (--cpus 2 advertised 3, --cpus 9 advertised 10). The one declaration: the
 # node's size keeps that many of the Mac's cores back, and preflight's CPU reader
 # (_pf_runtime_ncpu) adds them again, so the fit gate budgets what the node advertises.
@@ -1148,8 +1147,7 @@ _mac_ct_node_argv() {
     sh "$cfg" "$kubelet" "$TB_MAC_CT_NODE_IP" "$casum" "$lport" "$token")
 }
 
-# _mac_ct_local_api HAVE -- whether this run's node publishes the local API (backend#5208,
-# client-dev#2379): into TRACEBLOC_MAC_CT_LOCAL_API, "HOST NODE" (TRACEBLOC_LOCAL_API_HOST_PORT
+# _mac_ct_local_api HAVE -- whether this run's node publishes the local API into TRACEBLOC_MAC_CT_LOCAL_API, "HOST NODE" (TRACEBLOC_LOCAL_API_HOST_PORT
 # and TRACEBLOC_LOCAL_API_NODE_PORT, cluster.sh's one declaration of them), or "" when it
 # does not. Fail-soft, as cluster.sh's helpers are: TRACEBLOC_LOCAL_API=off opts out
 # (_local_api_wanted), ports the chart would refuse turn it off with their warning
@@ -1215,7 +1213,7 @@ _mac_ct_volume_journaled() {
 # True with a heartbeat at or after SINCE (UTC, %Y-%m-%dT%H:%M:%SZ), asked inside the
 # node. Both times are that format, so their digits compare as numbers. The heartbeat
 # it read is left in TB_MAC_CT_NODE_HB, for the log, and the condition, as
-# STATUS|REASON|MESSAGE, in TB_MAC_CT_NODE_READY, for the refusal (client-dev#1935).
+# STATUS|REASON|MESSAGE, in TB_MAC_CT_NODE_READY, for the refusal.
 # The message comes last, because it may hold spaces.
 TB_MAC_CT_NODE_HB=""
 TB_MAC_CT_NODE_READY=""
@@ -1235,7 +1233,7 @@ _mac_ct_node_ready_since() {
 # asked inside the node (`container exec NAME kubectl`, as _mac_ct_node_ready_since
 # asks): the Mac has no k3s of its own. Fails when the node does not answer (stopped,
 # or no runtime). k3s.sh's _native_k3s_running_node_name asks it when the Mac's
-# config.yaml no longer names the node (backend#5881).
+# config.yaml no longer names the node.
 _mac_ct_running_node_name() {
   local root name
   root="$(_mac_ct_install_root 2>/dev/null)" && name="$(_mac_ct_node_name 2>/dev/null)" || return 1
@@ -1282,7 +1280,7 @@ TB_MAC_CT_NODE_TOKEN_RE='^[0-9a-f]{32}$'
 
 # _mac_ct_node_token CT NAME DIR STATE -- the node's join token, into
 # TB_MAC_CT_NODE_TOKEN, pinned in DIR/token (0600) before the argv that carries it is
-# kept (client-dev#1976). STATE is what _mac_ct_ensure_node found of NAME: fresh (no
+# kept. STATE is what _mac_ct_ensure_node found of NAME: fresh (no
 # container and no volume), container, or volume (a volume without its container).
 #   - DIR/token there: it is the token, whatever STATE says. A re-run never makes
 #     another: one that cannot be read, or is not a token, is refused by name and left
@@ -1449,7 +1447,7 @@ _mac_ct_node_walled() {
 # _mac_ct_node_drop_local_api CT NAME VERB RC -- the node's VERB (run or start) exited RC
 # with the local API published: say so, remove the node it left and clear
 # TRACEBLOC_MAC_CT_LOCAL_API, so the caller makes the node again without it on its volume.
-# The local API is optional (client-dev#1665): the free-port probe is a
+# The local API is optional: the free-port probe is a
 # snapshot, and the runtime's own bind can still lose the port.
 _mac_ct_node_drop_local_api() {
   local ct="$1" name="$2" verb="$3" rc="$4" gone
@@ -1663,12 +1661,12 @@ _mac_ct_merge_kubeconfig() {
 
 # ── Part 4: the login item io.tracebloc.node ────────────────────────────────
 #  Apple's runtime has no restart policy: after a login, a reboot, a stopped node or a
-#  killed VM, nothing brings the node back (RFC-0175 §12.6). A per-user LaunchAgent does,
+#  killed VM, nothing brings the node back A per-user LaunchAgent does,
 #  as in spike S-M. launchd runs our signed CLI's `tracebloc node ensure` at load and every
-#  60 s (cli-dev#1124): it starts the container system when none runs, then the node, and
+#  60 s: it starts the container system when none runs, then the node, and
 #  waits for it to be Ready. It reads the runtime and the node from the install record, so
 #  the plist names neither.
-#    - ProgramArguments is [the CLI's absolute path, node, ensure] (backend#5245 box 3):
+#    - ProgramArguments is [the CLI's absolute path, node, ensure]:
 #      launchd has no PATH, and the login item then reads "tracebloc". The caller passes
 #      the path the CLI's installer reported. A binary without the verb is refused by
 #      name; the binary itself is asked, so no version is restated here.
@@ -1681,7 +1679,7 @@ _mac_ct_merge_kubeconfig() {
 #      the agent reads the record the installer wrote; TRACEBLOC_SKIP_TELEMETRY=1, or each
 #      tick would record a CLI outcome, about 1,440 a day.
 #    - LimitLoadToSessionType Aqua: it loads in a login session only, so a headless Mac
-#      never runs it (#1615 open decision 4). ProcessType Background.
+#      never runs it ProcessType Background.
 #  The plist is rewritten and the agent reloaded only when its bytes change: that is how
 #  a CLI that moved (an upgrade between /usr/local/bin and ~/.local/bin) is followed.
 #  It is a Mac's one login item, loaded by step c (_mac_ct_create_cluster).
@@ -1758,7 +1756,7 @@ _mac_ct_agent_log() { local logs; logs="$(_mac_ct_log_root)" || return 1; printf
 
 # TB_MAC_CT_AGENT_OLD_LOG -- where the login item logged before it logged into the
 # runtime's folder, under its home. Nothing removed it, so a rewrite of the plist removes
-# that one file (client-dev#1615).
+# that one file.
 TB_MAC_CT_AGENT_OLD_LOG="Library/Logs/tracebloc-node.log"
 
 # _mac_ct_agent_plist BIN HOME LOG -- the login item's plist, by setup-macos.sh's writer.
@@ -1890,7 +1888,7 @@ _mac_ct_stop_run_node() {
 }
 
 # ── Part 4b: the runner's login item io.tracebloc.runner ────────────────────
-#  The Apple-GPU runner (cli-dev#1305, RFC-0185 D2) is the CLI's hidden `tracebloc
+#  The Apple-GPU runner is the CLI's hidden `tracebloc
 #  runner`: a node of this Mac's own cluster that runs GPU jobs as sandboxed processes
 #  on the Mac. A second login item keeps it running, beside io.tracebloc.node. It needs
 #  the chart's ServiceAccount (apple-gpu-runner-rbac.yaml), so step e sets it up right
@@ -1973,7 +1971,7 @@ _mac_ct_runner_off_why() {
 _mac_ct_runner_dir() { local d; d="$(_mac_ct_node_dir)" || return 1; printf '%s/runner' "$d"; }
 _mac_ct_runner_log() { local logs; logs="$(_mac_ct_log_root)" || return 1; printf '%s/tracebloc-runner.log' "$logs"; }
 
-# The runner's engine bundle store (RFC-0185 D6, §8 Q16): the folder it keeps the verified
+# The runner's engine bundle store (§8 Q16): the folder it keeps the verified
 # macOS engine bundles in, HOME/Library/Application Support/tracebloc/engine-bundles, the
 # daily user's own at mode 0700. It is the install record's engine-bundles entry, id the
 # runner's label. The runner reads the record once, when it starts, and keeps no bundle
@@ -2188,14 +2186,14 @@ _mac_ct_kubectl_version() {
   printf '%s' "$v"
 }
 
-# _mac_ct_install_macos -- step b on the macOS node (RFC-0175 D6). Nothing here needs an
+# _mac_ct_install_macos -- step b on the macOS node. Nothing here needs an
 # administrator: the runtime unpacks into the user's own folder and kubectl and helm go
 # to ~/.local/bin, so the run is Tier 0. kubectl is the node's release (_mac_ct_kubectl_version),
 # helm HELM_VERSION as on Linux. Then the runtime is unpacked and checked, and its system
 # started, so step c has only the node to run. It refuses nothing itself: a Mac the node
 # does not serve never gets here, because main()'s refuse_k3d_machine
 # (reinstall.sh) runs _native_k3s_refuse_host before step a on every run on a Mac.
-# reinstall.bats' #1913 case holds that order (client-dev#1913).
+# reinstall.bats holds that order.
 _mac_ct_install_macos() {
   local kver saved_umask
   # shellcheck disable=SC2034  # consumed cross-file (setup-linux.sh's tools target, diagnose.sh)
@@ -2247,14 +2245,14 @@ _mac_ct_create_cluster() {
   _mac_ct_merge_kubeconfig
   # No line of its own: its result is step c's "✔ Secure environment created".
   tb_live_stop
-  # NO_PROXY before the gate (client-dev#1892), for the kubectl calls after it: the gate's
-  # own probe of 127.0.0.1:6443 bypasses every proxy itself (client-dev#1914).
+  # NO_PROXY before the gate, for the kubectl calls after it: the gate's
+  # own probe of 127.0.0.1:6443 bypasses every proxy itself.
   _export_host_no_proxy
   _mac_ct_local_network_gate
   _mac_ct_ensure_agent "$TRACEBLOC_CLI_BIN"
 }
 
-# ── The Local Network prompt (backend#5407, option a) ──────────────────────────
+# ── The Local Network prompt (option a) ──────────────────────────
 #  The node's API reaches this Mac through Apple's container-runtime-linux helper, which
 #  forwards 127.0.0.1:6443 into the VM. It is a launchd agent, so macOS's Local Network
 #  privacy gates it (TN3179). Until the user allows "container-runtime-linux" in
@@ -2267,8 +2265,8 @@ _mac_ct_create_cluster() {
 #  and what the helper is for, makes the call, and waits for the answer. A reset that
 #  outlasts the wait is the missing permission, refused by name with where to allow it.
 #  The node is Ready by then: the installer never reports it as a broken cluster.
-#  The same helper forwards the local API's 127.0.0.1 port (TRACEBLOC_MAC_CT_LOCAL_API,
-#  client-dev#2379), under the same grant: it is kept per bundle id, not per port. So
+#  The same helper forwards the local API's 127.0.0.1 port (TRACEBLOC_MAC_CT_LOCAL_API),
+#  under the same grant: it is kept per bundle id, not per port. So
 #  the wait reads the API's port alone; nothing answers on the local API's until the
 #  chart has installed jobs-manager.
 
@@ -2284,7 +2282,7 @@ TB_MAC_CT_LAN_WAIT_S=120
 # lacks one of them, or holds one that does not decode.
 # --noproxy '*': the port is this Mac's own loopback, so no proxy is ever asked, ALL_PROXY
 # included, which NO_PROXY's export does not cover. A proxy's own refusal is a curl 56, the
-# gate's reading of the Local Network refusal (client-dev#1914).
+# gate's reading of the Local Network refusal.
 # Capture-then-slice, never `sed | head -n 1`: head closes the pipe early (the
 # early-close rule, .cursor/BUGBOT.md). base64's own status is read, so a value that
 # does not decode is refused by name rather than handed to curl as a partial file.

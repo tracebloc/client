@@ -14,20 +14,20 @@ _log_cluster_status() {
   log "--- End Cluster Status ---"
 }
 
-# ── Readiness gate (#716) ─────────────────────────────────────────────────
+# ── Readiness gate ─────────────────────────────────────────────────
 # helm install only *applies* manifests; it does not wait for pods. After it
 # returns we wait for the client's workloads to actually become Ready and set
 # TRACEBLOC_CLIENT_STATE so the summary reports the truth instead of an unconditional
 # "installed successfully":
 #   connected | starting | bad_creds | image_pull | image_pull_ca | crash
-# (image_pull_ca is the TLS-inspecting-network case, #424. It was added to
-# _diagnose_not_ready and not to this list; backend#1907's vocabulary-agreement
+# (image_pull_ca is the TLS-inspecting-network case. It was added to
+# _diagnose_not_ready and not to this list; the vocabulary-agreement
 # guard derives the set from the function and caught the omission.)
 # Empty until wait_for_client_ready runs — so install_cleanup can distinguish an
 # early failure (before the readiness gate, TRACEBLOC_CLIENT_STATE still empty) from a
 # reported outcome, and still print the "check the log / safe to re-run" hint.
 TRACEBLOC_CLIENT_STATE=""
-# #562: default raised 300 -> 600 so a slow/proxied laptop pulling several GB of
+# Default raised 300 -> 600 so a slow/proxied laptop pulling several GB of
 # images isn't reported "not connected" while still healthily starting. Kept in
 # sync with scripts/spec/facts.env (check-facts.sh); override via
 # TRACEBLOC_READY_TIMEOUT (the legacy READY_TIMEOUT still works, remove_by
@@ -38,7 +38,7 @@ READY_TIMEOUT="${READY_TIMEOUT:-600}"
 wait_for_client_ready() {
   local ns="${TB_NAMESPACE:-default}"
   # The workloads that must be Ready are READ from the release, not rebuilt from
-  # the namespace (backend#2888): _client_workloads (common.sh) is the one helper
+  # the namespace: _client_workloads (common.sh) is the one helper
   # the stop-and-check gate (assess.sh) and --diagnose use too, and the
   # PowerShell installer's Get-ClientWorkloads is its guarded twin. A read that
   # cannot resolve all three is a client that is not all there, so it takes the
@@ -101,7 +101,7 @@ _rollout_ready() {
 # for EVERY answer of 400 or more, but client-runtime's auth.login retries 429 and
 # 5xx and logs in on a later try (auth.py, `login`): a backend roll or the per-IP
 # login limit is not a rejection, and reading it as one told a healthy install its
-# credentials were wrong and skipped the example use case (client-dev#2821). So
+# credentials were wrong and skipped the example use case. So
 # only a 4xx other than 429 counts, or the backend's wrong-password body
 # ("Unable to log in with provided credentials", which older runtimes logged with no
 # code).
@@ -119,7 +119,7 @@ _jobs_manager_rejected() {
 # pipe: `grep -q` closes the pipe at its first hit, and under pipefail a
 # SIGPIPE'd producer returns 141, which every `if` here would read as "no
 # match" -- silently downgrading a real bad_creds/image_pull/crash diagnosis
-# to "starting" and handing the user the wrong remedy (backend#1778).
+# to "starting" and handing the user the wrong remedy.
 _diagnose_not_ready() {
   local ns="$1" jm="${2:-}" pods
   if _jobs_manager_rejected "$ns" "$jm"; then
@@ -128,7 +128,7 @@ _diagnose_not_ready() {
   pods="$(kubectl get pods -n "$ns" --request-timeout=5s 2>/dev/null || true)"
   if grep -qiE 'ImagePullBackOff|ErrImagePull|InvalidImageName' <<<"$pods"; then
     # On a TLS-inspecting network the pull fails x509 because the nodes don't trust
-    # the corporate CA (#424). Distinguish it from a generic pull error so the
+    # the corporate CA. Distinguish it from a generic pull error so the
     # remedy can name the CA + the env var, not a vague "retry".
     # Scope the x509 test to the image-pull failure event itself, not any stray
     # x509 event elsewhere in the ns — a stale/unrelated x509 event must not steer
@@ -152,7 +152,7 @@ _diagnose_not_ready() {
 # TRACEBLOC_MYSQL_FIRST_BOOT line the chart's mysql-first-boot init container
 # printed (client/files/mysql-first-boot.sh): "never-served none", "incomplete
 # present", ...; nothing when it printed none or cannot be read. Read through a
-# here-string (backend#1778).
+# here-string.
 _mysql_first_boot_verdict() {
   local logs line v u
   logs="$(kubectl logs -n "$1" deployment/mysql-client -c mysql-first-boot --tail=50 --request-timeout=5s 2>/dev/null || true)"
@@ -176,17 +176,46 @@ _mysql_client_crashlooping() {
   return 1
 }
 
+# A first boot running this long at the end of the run is a stall, not a start: a whole
+# first boot measured 6 s, and the one that stalled ran 128 s before it was killed.
+TB_MYSQL_FIRST_BOOT_STALL_S=300
+# Set by print_summary to the first boot's seconds when the run ends on that stall;
+# install-k8s.sh then exits 1, so the run reads as failed (install.run.failed).
+TB_MYSQL_FIRST_BOOT_STALLED=""
+
+# client_outcome_ok -- whether the run's outcome exits 0: connected, or still starting
+# without a stalled MySQL first boot (TB_MYSQL_FIRST_BOOT_STALLED, set by
+# print_summary). Every other state is a failure.
+client_outcome_ok() {
+  case "${TRACEBLOC_CLIENT_STATE:-}" in
+    connected) return 0 ;;
+    starting) [[ -z "${TB_MYSQL_FIRST_BOOT_STALLED:-}" ]] ;;
+    *) return 1 ;;
+  esac
+}
+
 # _mysql_first_boot_running_s NS -- how long mysql-first-boot has been initialising,
 # from its own "still initialising after Ns" lines, while it is still running; nothing
-# otherwise. A first boot takes seconds (a whole first boot measured 6 s).
+# otherwise. A first boot takes seconds (a whole first boot measured 6 s). A stall it
+# cannot read is logged as "cannot tell" and reads as no stall: the run stays starting.
 _mysql_first_boot_running_s() {
   local st logs line
-  st="$(kubectl get pods -n "$1" -l app=mysql-client --request-timeout=5s \
-    -o 'jsonpath={range .items[*]}{range .status.initContainerStatuses[?(@.name=="mysql-first-boot")]}{.state.running.startedAt}{end}{end}' 2>/dev/null || true)"
+  if ! st="$(kubectl get pods -n "$1" -l app=mysql-client --request-timeout=5s \
+    -o 'jsonpath={range .items[*]}{range .status.initContainerStatuses[?(@.name=="mysql-first-boot")]}{.state.running.startedAt}{end}{end}' 2>/dev/null)"; then
+    log "first boot: cannot tell (the mysql-client pods could not be read)"
+    return 0
+  fi
   [[ -n "$st" ]] || return 0
-  logs="$(kubectl logs -n "$1" deployment/mysql-client -c mysql-first-boot --tail=5 --request-timeout=5s 2>/dev/null || true)"
+  if ! logs="$(kubectl logs -n "$1" deployment/mysql-client -c mysql-first-boot --tail=20 --request-timeout=5s 2>/dev/null)"; then
+    log "first boot: cannot tell (running since ${st}, but its log could not be read)"
+    return 0
+  fi
   line="$(grep -E '^mysql-first-boot: still initialising after [0-9]+s$' <<<"$logs" | tail -n 1 || true)"
-  [[ "$line" =~ after\ ([0-9]+)s$ ]] && printf '%s' "${BASH_REMATCH[1]}"
+  if [[ "$line" =~ after\ ([0-9]+)s$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  else
+    log "first boot: cannot tell (running since ${st}, with no progress line in its last 20 log lines)"
+  fi
   return 0
 }
 
@@ -291,7 +320,7 @@ _reboot_note() {
 # was recorded as a failure by the installer's ERR trap: `set -E` carries the trap
 # into the `$(...)` of `if kc="$(...)"`, where the status is not in a condition, so
 # every successful install without a hint logged `err: … summary.sh … cmd=return 1`
-# after its success screen (backend#5025 O-103).
+# after its success screen.
 _summary_kubeconfig_hint() {
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && -n "${TB_K3S_KUBECONFIG_HINT:-}" ]]; then
     local kc="$TB_K3S_KUBECONFIG_HINT"
@@ -315,7 +344,7 @@ _summary_kubeconfig_lines() {
 # The installer switched kubectl's current context to this cluster (it must: the
 # secure environment is registered against the current context), and a user who
 # also works on other clusters needs to hear that, with the way back, or their
-# next kubectl lands here (backend#5025 O-19). The kubeconfig merge sets
+# next kubectl lands here. The kubeconfig merge sets
 # TB_PREV_KUBE_CONTEXT only when a DIFFERENT context was selected before, so a
 # fresh machine and a re-run print nothing.
 #
@@ -337,7 +366,7 @@ _kube_context_note() {
 # `has tracebloc` fallback would be WRONG here: install.sh and provision.sh both
 # prepend ~/.local/bin to THIS process's PATH, so the installer can resolve
 # tracebloc even when the user's launching shell cannot — exactly the
-# "command not found in a new terminal" case B2 exists to catch (Bugbot #371).
+# "command not found in a new terminal" case B2 exists to catch.
 # Unset (a stale bootstrap that skipped the CLI step) → treat as not-usable and
 # tell the user to open a new terminal: the safe, honest default.
 _cli_runnable_now() {
@@ -375,15 +404,28 @@ TB_PREPULL_CALL_S=10
 # `skipped` (the reason is in the install log).
 TB_PREPULL_VERDICT=""
 
+# _prepull_substrate -- the substrate key the two calls below take: mac-node for
+# native k3s in its VM on a Mac (the node, not the Mac, holds the store), else
+# TRACEBLOC_SUBSTRATE_RESOLVED.
+_prepull_substrate() {
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == k3s && "${OS:-}" == Darwin ]]; then
+    printf 'mac-node'
+  else
+    printf '%s' "${TRACEBLOC_SUBSTRATE_RESOLVED:-}"
+  fi
+}
+
 # _prepull_store_path SUBSTRATE -- the directory whose filesystem holds SUBSTRATE's
 # image store. Native k3s keeps them in its containerd root, TB_K3S_DATA_PATH/agent/containerd:
 # the kubelet's image filesystem, which a mount of its own can put on another disk
-# than the data path (preflight measures it there too, _pf_disk_k3s). Exit 1, printing
-# nothing, for any other substrate (main() refuses every other one before this
-# step): the caller skips it by name.
+# than the data path (preflight measures it there too, _pf_disk_k3s). The macOS node
+# keeps its own inside the node, on the volume _mac_ct_node_argv mounts at
+# /var/lib/rancher/k3s. Exit 1, printing nothing, for any other substrate (main()
+# refuses every other one before this step): the caller skips it by name.
 _prepull_store_path() {
   case "$1" in
     k3s) printf '%s' "${TB_K3S_DATA_PATH}/agent/containerd" ;;
+    mac-node) printf '%s' "/var/lib/rancher/k3s/agent/containerd" ;;
     *) return 1 ;;
   esac
 }
@@ -394,18 +436,26 @@ _prepull_store_path() {
 # preflight reads it, and only when root answers without a password prompt -- this
 # step never asks for one (exit 3). No fallback to the data path: that would measure
 # another filesystem in exactly the case the store has its own, and a skipped prepull
-# costs only the first training's pull. Exit 124 when df did not answer in time.
+# costs only the first training's pull. The macOS node's store is read inside the
+# node (`container exec`), as the kubelet there sees it; exit 1 when the node cannot
+# be named. Exit 124 when df did not answer in time.
 _prepull_df() {
+  local root name
   if [[ "$1" == k3s ]]; then
     _native_k3s_root_ready || return 3
     _bounded_root "$TB_PREPULL_CALL_S" df -Pk "$2"
+  elif [[ "$1" == mac-node ]]; then
+    declare -F _mac_ct_install_root _mac_ct_node_name >/dev/null 2>&1 || return 1
+    root="$(_mac_ct_install_root 2>/dev/null)" && name="$(_mac_ct_node_name 2>/dev/null)" || return 1
+    _bounded "$TB_PREPULL_CALL_S" "${root}/bin/container" exec "$name" df -Pk "$2" </dev/null
   else
     _bounded "$TB_PREPULL_CALL_S" df -Pk "$2"
   fi
 }
 
-# _prepull_disk_rule DIR [SUBSTRATE] -- 0 when DIR's filesystem can take the parent's unpacked
-# footprint (TB_PREPULL_PARENT_DISK_GB, stamped from facts.env) and still hold both:
+# _prepull_disk_rule DIR [SUBSTRATE [GB [WHAT]]] -- 0 when DIR's filesystem can take GB, the
+# footprint of WHAT (default: the parent's, TB_PREPULL_PARENT_DISK_GB, stamped from
+# facts.env) and still hold both:
 # its use stays below the kubelet's image GC threshold
 # (TB_KUBELET_IMAGE_GC_HIGH_PERCENT, the value the installer writes into the kubelet
 # config: past it the kubelet collects images nothing references, the parent first),
@@ -415,7 +465,8 @@ _prepull_df() {
 # be asked without a prompt (k3s), or its answer was not numbers. SUBSTRATE decides
 # how DIR is read (_prepull_df).
 _prepull_disk_rule() {
-  local dir="$1" sizes="" total_kb="" avail_kb="" need_kb after_kb pct_after rc=0
+  local dir="$1" gb="${3:-$TB_PREPULL_PARENT_DISK_GB}" what="${4:-the parent}"
+  local sizes="" total_kb="" avail_kb="" need_kb after_kb pct_after rc=0
   sizes="$(_prepull_df "${2:-}" "$dir" 2>/dev/null)" || rc=$?
   case "$rc" in
     124|137) printf 'df did not answer within %ss on %s' "$TB_PREPULL_CALL_S" "$dir"; return 2 ;;
@@ -427,13 +478,13 @@ _prepull_disk_rule() {
     ''|*[!0-9]*) printf 'df could not tell the free space on %s' "$dir"; return 2 ;;
   esac
   if [[ -z "$avail_kb" || "$total_kb" -eq 0 ]]; then printf 'df could not tell the free space on %s' "$dir"; return 2; fi
-  need_kb=$(( TB_PREPULL_PARENT_DISK_GB * 1024 * 1024 ))
+  need_kb=$(( gb * 1024 * 1024 ))
   after_kb=$(( avail_kb - need_kb ))
   # The kubelet's measure: used = capacity - available, as a share of capacity,
   # rounded up so the rule never reads a filesystem as emptier than it is.
   pct_after=$(( ( (total_kb - after_kb) * 100 + total_kb - 1 ) / total_kb ))
-  printf '%s GB free on %s, %s GB after the parent (about %s GB): %s%% used against the kubelet image GC threshold of %s%%, with a floor of %s GB free' \
-    "$(( avail_kb / 1024 / 1024 ))" "$dir" "$(( after_kb / 1024 / 1024 ))" "$TB_PREPULL_PARENT_DISK_GB" \
+  printf '%s GB free on %s, %s GB after %s (about %s GB): %s%% used against the kubelet image GC threshold of %s%%, with a floor of %s GB free' \
+    "$(( avail_kb / 1024 / 1024 ))" "$dir" "$(( after_kb / 1024 / 1024 ))" "$what" "$gb" \
     "$pct_after" "$TB_KUBELET_IMAGE_GC_HIGH_PERCENT" "$PF_WARN_DISK_GB"
   [[ "$pct_after" -lt "$TB_KUBELET_IMAGE_GC_HIGH_PERCENT" ]] || return 1
   [[ "$after_kb" -ge $(( PF_WARN_DISK_GB * 1024 * 1024 )) ]] || return 1
@@ -456,16 +507,27 @@ _prepull_platform_listed() {
   return 1
 }
 
+# _prepull_job_image MANIFEST -- the image of MANIFEST's container named prepull. The
+# GPU pod's first container pulls the CLI's stage image (training-prepull-configmap.yaml),
+# and the log names the big download, not that one. The quotes and blanks around the
+# reference go by keeping only the characters a reference is made of.
+_prepull_job_image() {
+  printf '%s\n' "$1" | awk '
+    /^[[:space:]]*-[[:space:]]*name:[[:space:]]*prepull[[:space:]]*$/ { f = 1; next }
+    f && /^[[:space:]]*-[[:space:]]*name:/ { f = 0 }
+    f && !done && /^[[:space:]]*image:/ { sub(/^[[:space:]]*image:[[:space:]]*/, ""); gsub(/[^A-Za-z0-9._:\/@-]/, ""); print; done = 1 }'
+}
+
 # _prepull_skip REASON -- the one log line for a stop, and the verdict.
 _prepull_skip() {
   TB_PREPULL_VERDICT="skipped"
   log "training prepull: skipped: $1"
 }
 
-# _prepull_training_parent -- the step. Runs from main() after wait_for_client_ready
+# _prepull_training_parent -- the step. Runs from main() after the example use case
 # and before print_summary; returns 0 always.
 _prepull_training_parent() {
-  local ns="${TB_NAMESPACE:-default}" out rc=0 name="" platforms="" manifest host store disk image
+  local ns="${TB_NAMESPACE:-default}" out rc=0 name="" platforms="" manifest host store disk image sub gb what="the parent"
   log "training prepull: start"
   if ! _gpu_wired; then _prepull_skip "not GPU-wired (only the GPU training images build FROM the torch parent)"; return 0; fi
   if [[ -n "${TRACEBLOC_SKIP_TRAINING_PREPULL:-}" ]]; then _prepull_skip "TRACEBLOC_SKIP_TRAINING_PREPULL is set"; return 0; fi
@@ -483,10 +545,16 @@ _prepull_training_parent() {
   if ! _prepull_platform_listed "$host" "$platforms"; then
     _prepull_skip "this host is ${host}, and the parent is published for ${platforms} only"; return 0
   fi
-  if ! store="$(_prepull_store_path "${TRACEBLOC_SUBSTRATE_RESOLVED:-}")"; then
-    _prepull_skip "substrate '${TRACEBLOC_SUBSTRATE_RESOLVED:-}' has no image store this step knows"; return 0
+  sub="$(_prepull_substrate)"
+  if ! store="$(_prepull_store_path "$sub")"; then
+    _prepull_skip "substrate '${sub}' has no image store this step knows"; return 0
   fi
-  rc=0; disk="$(_prepull_disk_rule "$store" "${TRACEBLOC_SUBSTRATE_RESOLVED:-}")" || rc=$?
+  # A CPU image the earlier step applied may still be downloading into the same store.
+  gb="$TB_PREPULL_PARENT_DISK_GB"
+  if [[ "${TB_PREPULL_CPU_VERDICT:-}" == applied ]]; then
+    gb=$(( gb + TB_PREPULL_CPU_DISK_GB )); what="the parent and the CPU training image downloading beside it"
+  fi
+  rc=0; disk="$(_prepull_disk_rule "$store" "$sub" "$gb" "$what")" || rc=$?
   case "$rc" in
     0) log "training prepull: disk: $disk" ;;
     1) _prepull_skip "the disk rule fails: $disk"; return 0 ;;
@@ -498,14 +566,7 @@ _prepull_training_parent() {
   if [[ "$rc" -ne 0 || "$manifest" != *"kind: Job"* ]]; then
     _prepull_skip "ConfigMap ${name} carries no Job manifest that could be read (kubectl exit ${rc})"; return 0
   fi
-  # The parent's image: the one of the container named prepull. The pod's first
-  # container pulls the CLI's stage image (training-prepull-configmap.yaml), and the
-  # line below names the 4 GiB download, not that one. The quotes and blanks around
-  # the reference go by keeping only the characters a reference is made of.
-  image="$(printf '%s\n' "$manifest" | awk '
-    /^[[:space:]]*-[[:space:]]*name:[[:space:]]*prepull[[:space:]]*$/ { f = 1; next }
-    f && /^[[:space:]]*-[[:space:]]*name:/ { f = 0 }
-    f && !done && /^[[:space:]]*image:/ { sub(/^[[:space:]]*image:[[:space:]]*/, ""); gsub(/[^A-Za-z0-9._:\/@-]/, ""); print; done = 1 }')"
+  image="$(_prepull_job_image "$manifest")"
   rc=0
   out="$(printf '%s\n' "$manifest" | _bounded "$TB_PREPULL_CALL_S" kubectl apply -n "$ns" --request-timeout="${TB_PREPULL_CALL_S}s" -f - 2>>"${LOG_FILE:-/dev/null}")" || rc=$?
   if [[ "$rc" -ne 0 ]]; then _prepull_skip "the Job in ConfigMap ${name} could not be applied (kubectl exit ${rc}; its error is above in the log)"; return 0; fi
@@ -515,8 +576,73 @@ _prepull_training_parent() {
   return 0
 }
 
-# _prepull_summary_line -- the step's verdict, under Mode, on a GPU-wired host only:
-# a CPU host has nothing to download ahead, and the line would be noise there.
+# ── The CPU training image prepull ────────────────────────────────────────────
+#
+# A CPU training pod pulls its whole image as part of its start, about 0.7 GB
+# compressed, so the first training on a fresh host, and the first after its
+# floating tag moved, waits minutes in ContainerCreating. The chart carries a Job
+# that pulls the tabular classification CPU image at the reference the jobs-manager
+# spawns (client/templates/training-prepull-cpu-configmap.yaml), on every edge.
+# This step applies it right after readiness, before the example use case whose first
+# training runs on it, on any host, and returns without waiting. It stops, with one log line, when TRACEBLOC_SKIP_TRAINING_PREPULL is set,
+# the ConfigMap is absent or unreadable, the image store's path cannot be told, or
+# the disk rule fails; it never fails the install and prints nothing on the screen.
+TB_PREPULL_CPU_COMPONENT="training-prepull-cpu"
+# The step's verdict: `applied` or `skipped`. _prepull_training_parent reads it, since
+# an applied image may still be downloading into the store the parent's would share.
+TB_PREPULL_CPU_VERDICT=""
+
+# _prepull_cpu_skip REASON -- the one log line for a stop, and the verdict.
+_prepull_cpu_skip() {
+  TB_PREPULL_CPU_VERDICT="skipped"
+  log "training prepull (cpu): skipped: $1"
+}
+
+# _prepull_training_cpu -- the step. Runs from main() right after
+# wait_for_client_ready and before setup_example_use_case. Returns 0 always.
+_prepull_training_cpu() {
+  local ns="${TB_NAMESPACE:-default}" out rc=0 name manifest store disk image sub job
+  log "training prepull (cpu): start"
+  if [[ -n "${TRACEBLOC_SKIP_TRAINING_PREPULL:-}" ]]; then _prepull_cpu_skip "TRACEBLOC_SKIP_TRAINING_PREPULL is set"; return 0; fi
+  out="$(_bounded "$TB_PREPULL_CALL_S" kubectl get configmap -n "$ns" -l "app.kubernetes.io/component=${TB_PREPULL_CPU_COMPONENT}" \
+    --request-timeout="${TB_PREPULL_CALL_S}s" -o 'go-template={{range .items}}{{.metadata.name}}{{"\n"}}{{end}}' 2>>"${LOG_FILE:-/dev/null}")" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then _prepull_cpu_skip "the ${TB_PREPULL_CPU_COMPONENT} ConfigMap could not be read in namespace ${ns} (kubectl exit ${rc}; its error is above in the log)"; return 0; fi
+  if [[ -z "$out" ]]; then _prepull_cpu_skip "no ${TB_PREPULL_CPU_COMPONENT} ConfigMap in namespace ${ns} (a chart that carries none)"; return 0; fi
+  if [[ "$out" == *$'\n'* ]]; then _prepull_cpu_skip "more than one ${TB_PREPULL_CPU_COMPONENT} ConfigMap in namespace ${ns}, so which one to apply cannot be told"; return 0; fi
+  name="$out"; sub="$(_prepull_substrate)"
+  if ! store="$(_prepull_store_path "$sub")"; then
+    _prepull_cpu_skip "substrate '${sub}' has no image store this step knows"; return 0
+  fi
+  rc=0; disk="$(_prepull_disk_rule "$store" "$sub" "$TB_PREPULL_CPU_DISK_GB" "the CPU training image")" || rc=$?
+  case "$rc" in
+    0) log "training prepull (cpu): disk: $disk" ;;
+    1) _prepull_cpu_skip "the disk rule fails: $disk"; return 0 ;;
+    *) _prepull_cpu_skip "the disk rule cannot tell: $disk"; return 0 ;;
+  esac
+  rc=0
+  manifest="$(_bounded "$TB_PREPULL_CALL_S" kubectl get configmap "$name" -n "$ns" --request-timeout="${TB_PREPULL_CALL_S}s" \
+    -o 'go-template={{index .data "job.yaml"}}' 2>>"${LOG_FILE:-/dev/null}")" || rc=$?
+  if [[ "$rc" -ne 0 || "$manifest" != *"kind: Job"* ]]; then
+    _prepull_cpu_skip "ConfigMap ${name} carries no Job manifest that could be read (kubectl exit ${rc})"; return 0
+  fi
+  image="$(_prepull_job_image "$manifest")"
+  job="$(printf '%s\n' "$manifest" | awk '!done && /^  name:[[:space:]]/ { sub(/^  name:[[:space:]]*/, ""); print; done = 1 }')"
+  if [[ -z "$job" ]]; then _prepull_cpu_skip "the Job in ConfigMap ${name} names no Job"; return 0; fi
+  # The Job's name is one for every pin and tag: the previous run's goes first, so a new
+  # pin never meets an immutable template and a moved tag is pulled again (Always).
+  rc=0
+  _bounded "$TB_PREPULL_CALL_S" kubectl delete job "$job" -n "$ns" --ignore-not-found --request-timeout="${TB_PREPULL_CALL_S}s" >/dev/null 2>>"${LOG_FILE:-/dev/null}" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then _prepull_cpu_skip "the previous Job ${job} could not be deleted (kubectl exit ${rc}; its error is above in the log)"; return 0; fi
+  rc=0
+  out="$(printf '%s\n' "$manifest" | _bounded "$TB_PREPULL_CALL_S" kubectl apply -n "$ns" --request-timeout="${TB_PREPULL_CALL_S}s" -f - 2>>"${LOG_FILE:-/dev/null}")" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then _prepull_cpu_skip "the Job in ConfigMap ${name} could not be applied (kubectl exit ${rc}; its error is above in the log)"; return 0; fi
+  TB_PREPULL_CPU_VERDICT="applied"
+  log "training prepull (cpu): applied: ${out%%$'\n'*} (${image:-?}, about ${TB_PREPULL_CPU_DISK_GB} GB on disk); not waiting for it"
+  return 0
+}
+
+# _prepull_summary_line -- the GPU step's verdict, under Mode, on a GPU-wired host only:
+# a CPU host has no GPU images to download ahead, and the line would be noise there.
 _prepull_summary_line() {
   _gpu_wired || return 0
   case "${TB_PREPULL_VERDICT:-}" in
@@ -555,16 +681,16 @@ _summary_machine_rows() {
 _summary_footer() {
   local logdisp="$1" ns="$2" kdata jdata
   # Data location depends on the storage model: hostpath names the host folder
-  # the volumes use; node-local (RFC-0003 Option C) keeps them in k3s local-path,
+  # the volumes use; node-local keeps them in k3s local-path,
   # on this host or in the macOS node's own volume.
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]]; then
-    # Native k3s, hostpath (client-dev#1782): the PVs name the host directory itself.
+    # Native k3s, hostpath: the PVs name the host directory itself.
     # The macOS node mounts that folder at its own path, so the same line holds there.
     kdata="$(_hostpath_root)"
     echo "Logs ${logdisp}  ·  Data ${kdata}/${ns} (hostPath)"
   elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; then
     # The macOS node: job data in the job-data folder on this Mac when the release
-    # keeps one (client-dev#2320), the rest inside the node, on its own volume.
+    # keeps one, the rest inside the node, on its own volume.
     jdata=""
     if declare -F _mac_ct_job_data_dir >/dev/null; then jdata="$(_mac_ct_job_data_dir)"; fi
     if [[ -n "$jdata" ]]; then
@@ -589,7 +715,7 @@ _summary_footer() {
 print_summary() {
   # NVIDIA "GPU mode" only when the GPU was actually WIRED into the cluster
   # (_gpu_wired) — a detected-but-not-wired GPU runs CPU-only, and printing
-  # "NVIDIA GPU" there is exactly the false claim client#835 removes. AMD keys on
+  # "NVIDIA GPU" there is exactly the false claim the CPU-fallback rule removes. AMD keys on
   # detection.
   # training: the summary's Training row, the device a person reads; mode: the Mode line
   # a machine reads (tb_machine_lines), which says when the Apple GPU takes a job.
@@ -689,16 +815,19 @@ print_summary() {
       _summary_footer "$logdisp" "$ns" >>"${LOG_FILE:-/dev/null}" 2>&1
       ;;
     starting)
-      # A first boot past five minutes is a stall, not a start: it measured 6 s, and the
-      # one that stalled ran 128 s before it was killed.
+      # A first boot past TB_MYSQL_FIRST_BOOT_STALL_S is a stall, and the run fails on it.
       local fbs
       fbs="$(_mysql_first_boot_running_s "$ns")"
-      if [[ -n "$fbs" ]] && (( fbs >= 300 )); then
-        echo -e "  ${TB_WARN}⚠${RESET}  Almost there — but MySQL's first start has been running for $(( fbs / 60 )) minutes, and it normally takes seconds."
+      log "first boot: ${fbs:-none}${fbs:+s} running at the end of the run (stall at ${TB_MYSQL_FIRST_BOOT_STALL_S}s)"
+      if [[ -n "$fbs" ]] && (( fbs >= TB_MYSQL_FIRST_BOOT_STALL_S )); then
+        TB_MYSQL_FIRST_BOOT_STALLED="$fbs"
+        echo -e "  ${TB_ERR}✖ Setup didn't finish — MySQL's first start has been running for $(( fbs / 60 )) minutes, and it normally takes seconds.${RESET}" >&2
         echo ""
-        echo -e "  It is still running, and nothing is lost if it finishes later. To see where it is:"
+        echo -e "  Your secure environment can't run trainings or ingest data until it finishes."
+        echo -e "  If it finishes, your secure environment comes Online by itself. To see where it is:"
         echo -e "    ${TB_CMD}kubectl logs -n ${ns} deploy/mysql-client -c mysql-first-boot${RESET}"
-        echo -e "  If it is still running in ten minutes, contact tracebloc support with that output."
+        echo -e "  If it doesn't, save a support bundle and email it to support@tracebloc.io:"
+        echo -e "    ${TB_CMD}tracebloc doctor --diagnose${RESET}"
       else
         echo -e "  ${TB_WARN}⚠${RESET}  Almost there — tracebloc is installed but still starting."
         echo ""
@@ -825,7 +954,7 @@ _log_advanced_info() {
   fi
   if _gpu_wired; then
     # runtimeClassName: nvidia is REQUIRED — the GPU node's containerd invokes the
-    # NVIDIA runtime only for that class (client#835); a plain pod gets no GPU.
+    # NVIDIA runtime only for that class; a plain pod gets no GPU.
     log "  GPU test: $(_gpu_test_cmd nvidia)"
   fi
   if [[ "$GPU_VENDOR" == "amd" ]]; then
