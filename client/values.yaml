@@ -3198,12 +3198,11 @@ ingestRunToken:
 # data-ingestors `staging` and carries it, and backend staging serves
 # /ingest-token/.
 #
-# prod: FALSE. A prod edge with serviceDbAccounts off spawns
-# images.ingestor.prodDigest (v0.8.2), which predates it, and this map cannot
-# tell it from an edge that spawns prodDigestServiceDb. Flip this only once
-# prodDigest moves past a release containing it. That pin is held on purpose:
-# moving it is bound by the ordering constraint in
-# docs/SECURITY.md §4.1.1.
+# prod: TRUE. A prod edge with service DB accounts on spawns
+# images.ingestor.prodDigestServiceDb, which carries it, and backend main serves
+# /ingest-token/. A prod edge with them off spawns images.ingestor.prodDigest,
+# held behind it (docs/SECURITY.md §4.1.1): there the gate resolves off whatever
+# this map says, see tracebloc.ingestRunToken.
 #
 # An edge upgraded with plain `--reuse-values` from a chart without these keys
 # has neither: the gate resolves off there, the shared-token behaviour it already
@@ -3212,7 +3211,7 @@ ingestRunToken:
 ingestRunTokenByEnv:
   dev: true
   stg: true
-  prod: false
+  prod: true
 
 # ============================================================
 # S3 bootstrap re-parent (final stage)

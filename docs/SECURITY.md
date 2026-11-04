@@ -774,7 +774,7 @@ Previously the tracebloc backend issued Django REST Framework `authtoken` creden
 
 **Intentionally unchanged — edge devices and bots.** Non-interactive service credentials (edge devices, bots) deliberately keep the legacy long-lived DRF `Token`: these are machine identities with no interactive re-login path, so a bounded web-session token doesn't apply. This is by design, not an oversight.
 
-**Ingestion Jobs — per-run token, rolling out per environment.** With `ingestRunToken` on, the jobs-manager gives each ingestion Job its own backend token, scoped to ingestion and valid for one run and 24 hours, instead of the edge's shared long-lived token, so a compromised ingestion pod leaks far less. The chart turns it on for `dev` and `stg` and leaves it off for `prod` (`ingestRunTokenByEnv`) until the pinned prod ingestor supports the per-run token; an older ingestor fails its backend calls under one. Where the backend does not offer the token yet, the jobs-manager falls back to the shared one.
+**Ingestion Jobs — per-run token, rolling out per environment.** With `ingestRunToken` on, the jobs-manager gives each ingestion Job its own backend token, scoped to ingestion and valid for one run and 24 hours, instead of the edge's shared long-lived token, so a compromised ingestion pod leaks far less. The chart turns it on for `dev`, `stg` and `prod` (`ingestRunTokenByEnv`), but never on a secure environment whose ingestor is `images.ingestor.prodDigest` (a prod secure environment with `serviceDbAccounts` off): that pin is held at a release that predates the per-run token, and an older ingestor fails its backend calls under one. That secure environment keeps the shared token, so the backend reads every dataset it ingests as patient data. Where the backend does not offer the token yet, the jobs-manager falls back to the shared one.
 
 **Residual risk — accepted, 2026-10-06.** The web-session token is still stored in JS-readable storage (localStorage + a non-`httpOnly` cookie), so it remains exfiltratable via XSS. The alternative was to move it to an `httpOnly; Secure` cookie (the issue proposed `SameSite=Strict`; the backend half was built as `SameSite=Lax`); that migration has been **assessed and declined**, and SEC-06 is closed as mitigated rather than eliminated.
 
@@ -922,6 +922,7 @@ Cross-reference for reviewers and contributors.
 - **2026-10-29** — §8.3: the per-run ingestion token is on for `stg` as well as `dev`, since the staging ingestor and the staging backend both support it. `prod` stays off while its pinned ingestor predates the per-run token.
 - **2026-10-31** — §12: report a vulnerability through GitHub's private reporting or to security@tracebloc.io, with the times we answer in; the address it named before could not receive mail. A pointer to §12 at the top and in §9.
 - **2026-11-01** — §4.2: restricted DNS (`restrictedDns.enabled`) is on by default wherever the egress gateway routes trainings, so on every machine type, not only on the macOS node; `false` turns it off. §5.5 says so for the other platforms.
+- **2026-11-03** — §8.3: the per-run ingestion token is on for `prod` too, except on a secure environment that runs the held `images.ingestor.prodDigest` ingestor, which keeps the shared token.
 
 ---
 

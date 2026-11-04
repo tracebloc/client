@@ -649,9 +649,9 @@ spec:
         {{- end }}
         # Give each ingestion Job its own short-lived, ingest-scoped
         # backend token instead of the edge's shared one.
-        # Resolved per environment by tracebloc.ingestRunToken -- on for dev only,
-        # see ingestRunTokenByEnv in values.yaml for why stg/prod wait. Always
-        # rendered, "true" or "false", so the edge's posture reads off the pod.
+        # Resolved by tracebloc.ingestRunToken; why each fleet has its default:
+        # ingestRunTokenByEnv in values.yaml. Always rendered, "true" or
+        # "false", so the edge's posture reads off the pod.
         # Canonical name only: client-runtime has never read a legacy spelling.
         # Excluded from the env passthrough below, so `ingestRunToken` is the one
         # knob and an `env.` copy cannot render a second, winning entry.

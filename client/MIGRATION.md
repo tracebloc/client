@@ -2,6 +2,29 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## `ingestRunToken` is on for `prod`
+
+**What changed.** `ingestRunTokenByEnv.prod` is now `true`, as `dev` and `stg`
+are. In a **prod** secure environment, each ingestion run now gets its own
+backend token, scoped to ingestion and valid for one run and 24 hours, instead
+of the secure environment's shared backend token (see 1.9.198 below for how).
+The run's token carries the mark you give the dataset at ingest, so a dataset
+you mark as open data or synthetic data is no longer read as patient data.
+
+**Where it stays off.** A prod secure environment with `serviceDbAccounts` off
+runs the ingestor `images.ingestor.prodDigest` names, which predates the
+per-run token. The chart keeps the shared token there, even with
+`ingestRunToken: true`, and its datasets are still read as patient data.
+
+**What you have to do: nothing.** The prod ingestor and the prod backend both
+support the per-run token.
+
+**To keep a prod secure environment as it was**, set `ingestRunToken: false`.
+
+**Upgrading with plain `--reuse-values`** keeps the value the release already
+stored, so the setting stays off there. `--reset-then-reuse-values`, which the
+auto-upgrade runs, picks up the new default.
+
 ## The log Collector no longer waits for the telemetry token
 
 **What changed.** The chart decides whether to run the telemetry Collector

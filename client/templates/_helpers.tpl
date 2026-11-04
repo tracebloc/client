@@ -2213,9 +2213,12 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
     1. `ingestRunToken` -- an explicit operator override, true or false.
     2. `ingestRunTokenByEnv[<resolved CLIENT_ENV>]` -- the fleet default.
 
-  Shipped default: on for dev and stg, off for prod. The token is BOUND to one
-  ingestor, and an ingestor without the token support breaks under it; why each
-  fleet has its answer: see ingestRunTokenByEnv in values.yaml.
+  NEVER ON THE prodDigest PIN, whichever answer the two give. The token is BOUND
+  to one ingestor, and a secure environment whose ingestor resolves to
+  `images.ingestor.prodDigest` (a prod secure environment with service DB
+  accounts off, see tracebloc.ingestorDigest) runs a release held behind the
+  token support (docs/SECURITY.md §4.1.1), whose backend calls fail under one.
+  That edge keeps the shared token, so the backend reads its data as patient data.
 
   NIL-SAFE BOTH WAYS. An edge upgraded with plain `--reuse-values` from a chart
   that predates these keys has NEITHER of them: the override reads as unset and
@@ -2225,14 +2228,18 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   explicit "true" / "false" so the edge's posture is visible on the pod.
 */}}
 {{- define "tracebloc.ingestRunToken" -}}
+{{- $on := "" -}}
 {{- $override := (default dict .Values).ingestRunToken -}}
 {{- if not (kindIs "invalid" $override) -}}
-{{- if $override }}true{{ end -}}
+{{- if $override }}{{ $on = "true" }}{{ end -}}
 {{- else -}}
 {{- $env := include "tracebloc.clientEnv" . -}}
 {{- $byEnv := default dict .Values.ingestRunTokenByEnv -}}
-{{- if get $byEnv $env }}true{{ end -}}
+{{- if get $byEnv $env }}{{ $on = "true" }}{{ end -}}
 {{- end -}}
+{{- $pin := (default dict (index (default dict .Values.images) "ingestor")).prodDigest | default "" -}}
+{{- if and $on $pin (eq (include "tracebloc.ingestorDigest" .) $pin) }}{{ $on = "" }}{{ end -}}
+{{- $on -}}
 {{- end }}
 
 {{/*

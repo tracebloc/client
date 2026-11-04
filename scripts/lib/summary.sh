@@ -34,9 +34,68 @@ TRACEBLOC_CLIENT_STATE=""
 # 2026-12-31; a non-empty canonical wins).
 if [[ -n "${TRACEBLOC_READY_TIMEOUT:-}" ]]; then READY_TIMEOUT="$TRACEBLOC_READY_TIMEOUT"; fi
 READY_TIMEOUT="${READY_TIMEOUT:-600}"
+# A run that would end starting with MySQL's first boot still running then waits for
+# it, up to TB_MYSQL_FIRST_BOOT_STALL_S plus two progress lines more (_mysql_first_boot_settle):
+# about 660 s on top of READY_TIMEOUT. TRACEBLOC_MYSQL_FIRST_BOOT_SETTLE=0 turns that off,
+# for a user who asks; CI never sets it (a CI journey always runs the code path it
+# checks: the tester's hard rule).
 
 wait_for_client_ready() {
   local ns="${TB_NAMESPACE:-default}"
+  _client_ready_gate "$ns" "$READY_TIMEOUT"
+  # jobs-manager's wait-for-mysql gives up and backs off before a slow first boot's
+  # stall, so the gate can read crash while MySQL's first boot is still running. That
+  # crash, and only that one (the first boot read as running, mysql-client not
+  # looping, nothing but wait-for-mysql backing off), is still starting.
+  local from_crash=""
+  if [[ "$TRACEBLOC_CLIENT_STATE" == crash ]] && _mysql_first_boot_running_now "$ns" \
+    && ! _mysql_client_crashlooping "$ns" && _only_wait_for_mysql_backing_off "$ns"; then
+    log "first boot: still running, and only jobs-manager's wait-for-mysql is backing off: still starting"
+    TRACEBLOC_CLIENT_STATE=starting from_crash=1
+  fi
+  # Still starting with MySQL's first boot running: wait for it to end or to stall
+  # (_mysql_first_boot_settle). One that ended may have let the services come up, or
+  # failed, so they are read again, briefly.
+  if [[ "$TRACEBLOC_CLIENT_STATE" == starting ]] && _mysql_first_boot_settle "$ns"; then
+    log "first boot: ended after the readiness gate; reading the services again for up to ${TB_MYSQL_FIRST_BOOT_RECHECK_S}s"
+    _client_ready_gate "$ns" "$TB_MYSQL_FIRST_BOOT_RECHECK_S"
+    # jobs-manager's wait-for-mysql init container exits 1 after a while with MySQL
+    # blocked and backs off, so right after a long first boot a crash reading can be
+    # that backoff alone. Only then is it read as starting; any other crash loop, or
+    # pods that can't be read, keeps the crash.
+    if [[ "$TRACEBLOC_CLIENT_STATE" == crash ]] && ! _mysql_client_crashlooping "$ns" \
+      && { _only_wait_for_mysql_backing_off "$ns" || { sleep 2; _only_wait_for_mysql_backing_off "$ns"; }; }; then
+      log "first boot: after the wait only jobs-manager's wait-for-mysql is backing off: still starting"
+      TRACEBLOC_CLIENT_STATE=starting
+    fi
+  elif [[ -n "$from_crash" ]] && (( ${TB_MYSQL_FIRST_BOOT_SETTLED_S:-0} < TB_MYSQL_FIRST_BOOT_STALL_S )); then
+    # A crash read as starting whose wait neither saw the first boot end nor reached
+    # the stall (a read that could not tell): the crash stands.
+    log "first boot: the wait could not tell how the first boot went: the crash stands"
+    TRACEBLOC_CLIENT_STATE=crash
+  fi
+  return 0
+}
+
+# _only_wait_for_mysql_backing_off NS -- the containers in NS waiting in CrashLoopBackOff,
+# init and app alike, are all jobs-manager's wait-for-mysql init container (and there
+# is at least one). Fails closed: pods that can't be read are not "only that".
+_only_wait_for_mysql_backing_off() {
+  local rows name reason seen=""
+  rows="$(kubectl get pods -n "$1" --request-timeout=5s \
+    -o 'jsonpath={range .items[*]}{range .status.initContainerStatuses[*]}{.name} {.state.waiting.reason}{"\n"}{end}{range .status.containerStatuses[*]}{.name} {.state.waiting.reason}{"\n"}{end}{end}' 2>/dev/null)" || return 1
+  while read -r name reason; do
+    [[ "$reason" == CrashLoopBackOff ]] || continue
+    [[ "$name" == wait-for-mysql ]] || return 1
+    seen=1
+  done <<<"$rows"
+  [[ -n "$seen" ]]
+}
+
+# _client_ready_gate NS SECONDS -- wait up to SECONDS for the client's workloads, then
+# set TRACEBLOC_CLIENT_STATE from what they show.
+_client_ready_gate() {
+  local ns="$1"
   # The workloads that must be Ready are READ from the release, not rebuilt from
   # the namespace: _client_workloads (common.sh) is the one helper
   # the stop-and-check gate (assess.sh) and --diagnose use too, and the
@@ -47,7 +106,7 @@ wait_for_client_ready() {
   # connection's; the others are the services starting. One result line for both:
   # "✔ Online" once jobs-manager is up, never a line for the services alone.
   local rows="" role d jm="" all_ready=true rejected=false
-  local deadline=$(( $(date +%s) + READY_TIMEOUT ))
+  local deadline=$(( $(date +%s) + $2 ))
 
   tb_live "Starting your services..."
   if rows="$(_client_workloads "$ns")"; then
@@ -177,8 +236,20 @@ _mysql_client_crashlooping() {
 }
 
 # A first boot running this long at the end of the run is a stall, not a start: a whole
-# first boot measured 6 s, and the one that stalled ran 128 s before it was killed.
-TB_MYSQL_FIRST_BOOT_STALL_S=300
+# first boot measured 6 s, and the one that stalled ran 128 s before it was killed. Ten
+# minutes leaves room for slow hardware.
+TB_MYSQL_FIRST_BOOT_STALL_S=600
+# mysql-first-boot's progress line comes every tb_tick_s (client/files/mysql-first-boot.sh),
+# counted from its own start.
+TB_MYSQL_FIRST_BOOT_TICK_S=30
+# With no count ever read, the wait ends after this many progress reads in a row that
+# cannot tell (an unreadable log, the line pushed out of the tail, a restarted container).
+TB_MYSQL_FIRST_BOOT_UNREAD_MAX=3
+# After a first boot that ended during the wait, the services are read again this long.
+TB_MYSQL_FIRST_BOOT_RECHECK_S=120
+# The first boot's count when the wait ended with it still running; print_summary
+# takes the larger of this and its own read, so a failed re-read cannot undo a stall.
+TB_MYSQL_FIRST_BOOT_SETTLED_S=""
 # Set by print_summary to the first boot's seconds when the run ends on that stall;
 # install-k8s.sh then exits 1, so the run reads as failed (install.run.failed).
 TB_MYSQL_FIRST_BOOT_STALLED=""
@@ -199,13 +270,16 @@ client_outcome_ok() {
 # otherwise. A first boot takes seconds (a whole first boot measured 6 s). A stall it
 # cannot read is logged as "cannot tell" and reads as no stall: the run stays starting.
 _mysql_first_boot_running_s() {
-  local st logs line
-  if ! st="$(kubectl get pods -n "$1" -l app=mysql-client --request-timeout=5s \
-    -o 'jsonpath={range .items[*]}{range .status.initContainerStatuses[?(@.name=="mysql-first-boot")]}{.state.running.startedAt}{end}{end}' 2>/dev/null)"; then
-    log "first boot: cannot tell (the mysql-client pods could not be read)"
-    return 0
-  fi
+  local st
+  st="$(_mysql_first_boot_started "$1")" || return 0
   [[ -n "$st" ]] || return 0
+  _mysql_first_boot_count "$1" "$st"
+}
+
+# _mysql_first_boot_count NS STARTED -- the running first boot's last "still initialising
+# after Ns" count, from its log; nothing, logged as "cannot tell", when it has none.
+_mysql_first_boot_count() {
+  local st="$2" logs line
   if ! logs="$(kubectl logs -n "$1" deployment/mysql-client -c mysql-first-boot --tail=20 --request-timeout=5s 2>/dev/null)"; then
     log "first boot: cannot tell (running since ${st}, but its log could not be read)"
     return 0
@@ -217,6 +291,91 @@ _mysql_first_boot_running_s() {
     log "first boot: cannot tell (running since ${st}, with no progress line in its last 20 log lines)"
   fi
   return 0
+}
+
+# _mysql_first_boot_running_now NS -- the pods positively say mysql-first-boot is
+# running; a read that can't tell is not.
+_mysql_first_boot_running_now() {
+  local st
+  st="$(_mysql_first_boot_started "$1")" && [[ -n "$st" ]]
+}
+
+# _mysql_first_boot_started NS -- when the running mysql-first-boot started (an RFC 3339
+# time), nothing when none is running; fails, logged as "cannot tell", when the pods
+# cannot be read or answer something that is not a time.
+_mysql_first_boot_started() {
+  local st
+  if ! st="$(kubectl get pods -n "$1" -l app=mysql-client --request-timeout=5s \
+    -o 'jsonpath={range .items[*]}{range .status.initContainerStatuses[?(@.name=="mysql-first-boot")]}{.state.running.startedAt}{end}{end}' 2>/dev/null)"; then
+    log "first boot: cannot tell (the mysql-client pods could not be read)"
+    return 1
+  fi
+  if [[ -n "$st" && ! "$st" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]]; then
+    log "first boot: cannot tell (the mysql-client pods answered no start time)"
+    return 1
+  fi
+  printf '%s' "$st"
+}
+
+# _mysql_first_boot_settle NS -- a first boot still running when the readiness gate
+# ends is waited on until it ends, or until its own count reaches the stall, so
+# print_summary can tell a stall from a slow start. The gate's READY_TIMEOUT (600 s)
+# starts before mysql-first-boot does, so its count is still short of the stall when
+# the gate gives up. A pod read that cannot tell keeps waiting. A progress line that
+# cannot be read counts on from the last one read (by SECONDS); with none ever read,
+# TB_MYSQL_FIRST_BOOT_UNREAD_MAX such reads in a row end the wait. Bounded in
+# rounds and in wall time: the stall left to count, plus two progress lines.
+# TRACEBLOC_MYSQL_FIRST_BOOT_SETTLE=0 turns it off. Succeeds only when the first boot
+# ended during the wait, so the caller reads the services again.
+_mysql_first_boot_settle() {
+  local st c count="" unread=0 rounds=0 max_rounds left deadline ended="" why t0=$SECONDS last_t est
+  TB_MYSQL_FIRST_BOOT_SETTLED_S=""
+  if [[ "${TRACEBLOC_MYSQL_FIRST_BOOT_SETTLE:-}" == 0 ]]; then
+    log "first boot: no wait after the readiness gate (TRACEBLOC_MYSQL_FIRST_BOOT_SETTLE=0)"
+    return 1
+  fi
+  st="$(_mysql_first_boot_started "$1")" || return 1
+  [[ -n "$st" ]] || return 1
+  count="$(_mysql_first_boot_count "$1" "$st")"
+  last_t=$SECONDS
+  if (( ${count:-0} >= TB_MYSQL_FIRST_BOOT_STALL_S )); then
+    TB_MYSQL_FIRST_BOOT_SETTLED_S="$count"
+    return 1
+  fi
+  left=$(( TB_MYSQL_FIRST_BOOT_STALL_S - ${count:-0} + 2 * TB_MYSQL_FIRST_BOOT_TICK_S ))
+  max_rounds=$(( (left + TB_MYSQL_FIRST_BOOT_TICK_S - 1) / TB_MYSQL_FIRST_BOOT_TICK_S ))
+  deadline=$(( SECONDS + left ))
+  tb_live "Waiting for MySQL's first start..."
+  _tb_animate || _tb_live_hold   # plain output: the line when the wait starts
+  tb_live_detail "${count:-0}s of ${TB_MYSQL_FIRST_BOOT_STALL_S}s"
+  why="the wait's bound"
+  while (( rounds < max_rounds && SECONDS < deadline )); do
+    sleep "$TB_MYSQL_FIRST_BOOT_TICK_S"
+    rounds=$(( rounds + 1 ))
+    # A pod read that cannot tell is not an ended first boot: keep waiting.
+    if st="$(_mysql_first_boot_started "$1")"; then
+      if [[ -z "$st" ]]; then ended=1; why="it ended"; break; fi
+      if c="$(_mysql_first_boot_count "$1" "$st")" && [[ -n "$c" ]]; then
+        count="$c"; unread=0; last_t=$SECONDS
+      elif [[ -n "$count" ]]; then
+        # The pods say it still runs but its count can't be read: it counts on
+        # from the last one read.
+        est=$(( count + SECONDS - last_t ))
+        if (( est >= TB_MYSQL_FIRST_BOOT_STALL_S )); then
+          count="$est"; why="the stall (its count estimated: the progress lines could not be read)"; break
+        fi
+      else
+        unread=$(( unread + 1 ))
+        if (( unread >= TB_MYSQL_FIRST_BOOT_UNREAD_MAX )); then why="${unread} progress reads in a row could not tell"; break; fi
+      fi
+      if (( ${count:-0} >= TB_MYSQL_FIRST_BOOT_STALL_S )); then why="the stall"; break; fi
+    fi
+    tb_live_detail "${count:-0}s of ${TB_MYSQL_FIRST_BOOT_STALL_S}s"
+  done
+  tb_live_done
+  [[ -n "$ended" ]] || TB_MYSQL_FIRST_BOOT_SETTLED_S="$count"
+  log "first boot: waited $(( SECONDS - t0 ))s after the readiness gate, until ${why}; ${count:-no}${count:+s} counted (stall at ${TB_MYSQL_FIRST_BOOT_STALL_S}s)"
+  [[ -n "$ended" ]]
 }
 
 # _helm_release_revision NS -- the release's newest revision (the release is
@@ -818,6 +977,9 @@ print_summary() {
       # A first boot past TB_MYSQL_FIRST_BOOT_STALL_S is a stall, and the run fails on it.
       local fbs
       fbs="$(_mysql_first_boot_running_s "$ns")"
+      if [[ -n "${TB_MYSQL_FIRST_BOOT_SETTLED_S:-}" ]] && (( TB_MYSQL_FIRST_BOOT_SETTLED_S > ${fbs:-0} )); then
+        fbs="$TB_MYSQL_FIRST_BOOT_SETTLED_S"
+      fi
       log "first boot: ${fbs:-none}${fbs:+s} running at the end of the run (stall at ${TB_MYSQL_FIRST_BOOT_STALL_S}s)"
       if [[ -n "$fbs" ]] && (( fbs >= TB_MYSQL_FIRST_BOOT_STALL_S )); then
         TB_MYSQL_FIRST_BOOT_STALLED="$fbs"
