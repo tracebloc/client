@@ -72,9 +72,18 @@ _trim_label() {
   printf '%s' "$v"
 }
 
-# _host_machine_name — this host's short name, the machine name's default.
+# _host_machine_name — this host's short name, the machine name's default. A
+# hostname that is an IP address has no short name (its first label is an octet):
+# macOS's ComputerName if it has one, else the address whole.
 _host_machine_name() {
-  local raw; raw="$(hostname 2>/dev/null || uname -n 2>/dev/null || true)"
+  local raw name="" ipv4='^[0-9]+(\.[0-9]+){3}$'; raw="$(hostname 2>/dev/null || uname -n 2>/dev/null || true)"
+  raw="$(_trim_label "$raw")"
+  if [[ "$raw" =~ $ipv4 || "$raw" == *:* ]]; then
+    if command -v scutil >/dev/null 2>&1; then name="$(scutil --get ComputerName 2>/dev/null || true)"; fi
+    name="$(_trim_label "$name")"
+    printf '%s' "${name:-$raw}"
+    return 0
+  fi
   _trim_label "${raw%%.*}"
 }
 
