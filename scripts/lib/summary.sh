@@ -56,7 +56,8 @@ wait_for_client_ready() {
   # Still starting with MySQL's first boot running: wait for it to end or to stall
   # (_mysql_first_boot_settle). One that ended may have let the services come up, or
   # failed, so they are read again, briefly.
-  if [[ "$TRACEBLOC_CLIENT_STATE" == starting ]] && _mysql_first_boot_settle "$ns"; then
+  if [[ "$TRACEBLOC_CLIENT_STATE" == starting ]] \
+    && { _mysql_first_boot_settle "$ns" || { [[ -n "$from_crash" && -n "$TB_MYSQL_FIRST_BOOT_GONE" ]]; }; }; then
     log "first boot: ended after the readiness gate; reading the services again for up to ${TB_MYSQL_FIRST_BOOT_RECHECK_S}s"
     _client_ready_gate "$ns" "$TB_MYSQL_FIRST_BOOT_RECHECK_S"
     # jobs-manager's wait-for-mysql init container exits 1 after a while with MySQL
@@ -250,6 +251,7 @@ TB_MYSQL_FIRST_BOOT_RECHECK_S=120
 # The first boot's count when the wait ended with it still running; print_summary
 # takes the larger of this and its own read, so a failed re-read cannot undo a stall.
 TB_MYSQL_FIRST_BOOT_SETTLED_S=""
+TB_MYSQL_FIRST_BOOT_GONE=""   # set by _mysql_first_boot_settle: the pods read fine and none was running
 # Set by print_summary to the first boot's seconds when the run ends on that stall;
 # install-k8s.sh then exits 1, so the run reads as failed (install.run.failed).
 TB_MYSQL_FIRST_BOOT_STALLED=""
@@ -329,13 +331,15 @@ _mysql_first_boot_started() {
 # ended during the wait, so the caller reads the services again.
 _mysql_first_boot_settle() {
   local st c count="" unread=0 rounds=0 max_rounds left deadline ended="" why t0=$SECONDS last_t est
-  TB_MYSQL_FIRST_BOOT_SETTLED_S=""
+  TB_MYSQL_FIRST_BOOT_SETTLED_S="" TB_MYSQL_FIRST_BOOT_GONE=""
   if [[ "${TRACEBLOC_MYSQL_FIRST_BOOT_SETTLE:-}" == 0 ]]; then
     log "first boot: no wait after the readiness gate (TRACEBLOC_MYSQL_FIRST_BOOT_SETTLE=0)"
     return 1
   fi
   st="$(_mysql_first_boot_started "$1")" || return 1
-  [[ -n "$st" ]] || return 1
+  # Read fine, none running: it ended since the caller's check. Not a wait that
+  # succeeded, so the caller decides from TB_MYSQL_FIRST_BOOT_GONE.
+  [[ -n "$st" ]] || { TB_MYSQL_FIRST_BOOT_GONE=1; return 1; }
   count="$(_mysql_first_boot_count "$1" "$st")"
   last_t=$SECONDS
   if (( ${count:-0} >= TB_MYSQL_FIRST_BOOT_STALL_S )); then

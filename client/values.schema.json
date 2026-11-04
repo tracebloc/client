@@ -302,7 +302,7 @@
     },
     "appleGpuRunner": {
       "type": "object",
-      "description": "Not in use yet; leave both false. `enabled` is for the tracebloc runner a later tracebloc release starts on a Mac, and the macOS installer sets it itself. `gpuTraining` sends GPU trainings to that runner: while it is false the chart names the runner no engine bundle, and every training on a Mac runs on the CPU.",
+      "description": "The tracebloc runner, which trains on a Mac's Apple GPU. `enabled` renders its cluster identity; the macOS installer sets it on a Mac whose tracebloc CLI carries the runner. `gpuTraining` (default true) sends GPU trainings to the runner wherever a pinned release names a macOS engine bundle; false names the runner no bundle, and every training on a Mac runs on the CPU.",
       "additionalProperties": false,
       "properties": {
         "enabled": {
@@ -311,7 +311,7 @@
         },
         "gpuTraining": {
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },

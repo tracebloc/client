@@ -1877,11 +1877,11 @@ Call with the ROOT context: {{ include "tracebloc.appleGpuBundle" . }}
 {{/*
 tracebloc.appleGpuTraining — "true" when appleGpuRunner.gpuTraining is true, so
 GPU trainings may go to the tracebloc runner on a Mac; empty otherwise. The
-switch that keeps them off without a CLI update: while it is off the chart names
+switch that turns them off without a CLI update: while it is off the chart names
 the runner no bundle (tracebloc.appleGpuBundle), the runner advertises no GPU,
 and jobs-manager trains every Mac GPU job on the CPU and moves any still waiting
-for the Apple GPU there. The chart default is false. Read defensively, as
-tracebloc.appleGpuRunner is.
+for the Apple GPU there. The chart default is true; a values file that drops the
+key or the map reads as off, as tracebloc.appleGpuRunner reads `enabled`.
 
 Call with the ROOT context: {{ include "tracebloc.appleGpuTraining" . }}
 */}}

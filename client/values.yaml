@@ -380,13 +380,14 @@ gpu:
         cpu: 50m
         memory: 64Mi
 
-# -- Not in use yet: leave both false. `enabled` is for the tracebloc runner a
-# later tracebloc release starts on a Mac, and the macOS installer sets it itself.
-# `gpuTraining` sends GPU trainings to that runner: while it is false the chart
-# names the runner no engine bundle, and every training on a Mac runs on the CPU.
+# -- The tracebloc runner, which trains on a Mac's Apple GPU. `enabled` renders
+# its cluster identity; the macOS installer sets it on a Mac whose tracebloc CLI
+# carries the runner. `gpuTraining` sends GPU trainings to the runner wherever a
+# pinned release names a macOS engine bundle. Set it false to keep every
+# training on a Mac on the CPU.
 appleGpuRunner:
   enabled: false
-  gpuTraining: false
+  gpuTraining: true
 
 # -- StorageClass configuration
 # When create: true, the StorageClass name is release-unique (e.g. "<release-name>-storage-class")
