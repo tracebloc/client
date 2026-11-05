@@ -36,6 +36,11 @@
 #  release tag and the asset URLs the same way the installer does.
 # =============================================================================
 
+# The xtrace hold (common.sh). A no-op with a common.sh from before it, so a mixed
+# set of libs runs, unheld, rather than stopping on a missing command.
+declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
+declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
+
 # Where k3s reads its configuration, and what it writes. Fixed by upstream.
 TB_K3S_ETC_DIR="/etc/rancher/k3s"
 TB_K3S_CONFIG_PATH="${TB_K3S_ETC_DIR}/config.yaml"
@@ -363,7 +368,10 @@ _native_k3s_stage_install_script() {
 #     installs the k3s-selinux policy from rpm.rancher.io.
 #   - HOME=/root: the script runs as root, and nothing it writes may land, root-owned,
 #     in the daily user's home.
-_native_k3s_run_install_script() {
+# _native_k3s_run_install_script runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__native_k3s_run_install_script below is the function itself.
+_native_k3s_run_install_script() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__native_k3s_run_install_script "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__native_k3s_run_install_script() {
   local script="$1" pair
   local -a env_args=(
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -644,7 +652,10 @@ TB_K3S_REINSTALL='run "tracebloc delete" (it removes k3s and its data), then ins
 # Under --print the reads run as this user, who can see the file but not read it, and
 # cannot see k3s's data: a file that is there is kept (the run writes nothing), and
 # otherwise the writes are listed, the same ones a carried token makes.
-_native_k3s_pin_token() {
+# _native_k3s_pin_token runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__native_k3s_pin_token below is the function itself.
+_native_k3s_pin_token() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__native_k3s_pin_token "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__native_k3s_pin_token() {
   local file="$TB_K3S_TOKEN_PATH" srv="${TB_K3S_DATA_PATH}/server" t="" passwd="" tok="" p="" tmp
   local how="$TB_K3S_REINSTALL"
   if tb_root test -e "$file"; then

@@ -28,6 +28,11 @@
 #               floor but behind the latest release.
 # =============================================================================
 
+# The xtrace hold (common.sh). A no-op with a common.sh from before it, so a mixed
+# set of libs runs, unheld, rather than stopping on a missing command.
+declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
+declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
+
 # --force / --reinstall (or TRACEBLOC_FORCE_REINSTALL=1) bypasses the gate and
 # runs the full flow. Defaulted here so the gate is safe to consult even if the
 # arg scan never set it; main()'s arg parsing flips it to 1 on the flag.
@@ -193,15 +198,17 @@ _assess_release_pending() {
 # reduced through tb_client_env as the chart's tracebloc.clientEnv does. Returns 1
 # when the values can't be read. Read-only and bounded.
 _assess_release_client_env() {
-  local rel="$1" ns="$2" vals raw
-  vals="$(_bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm get values "$rel" -n "$ns" 2>/dev/null)" || return 1
-  raw="$(awk '
+  local rel="$1" ns="$2" raw
+  # The stored values hold clientPassword and the chart's other secrets: read inside
+  # the pipe, never held, so a trace shows only the stage. pipefail: a helm that
+  # fails returns 1. The awk reads to EOF, so helm is never SIGPIPE'd.
+  raw="$(set -o pipefail; _bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm get values "$rel" -n "$ns" 2>/dev/null </dev/null | awk '
     /^[^[:space:]#]/ { in_env = ($0 ~ /^env:/); next }
     in_env && /^[[:space:]]+(TRACEBLOC_ENV|CLIENT_ENV):/ {
       k=$1; sub(/:$/, "", k); v=$0; sub(/^[^:]*:[[:space:]]*/, "", v); gsub(/["\047[:space:]]/, "", v)
       if (v != "") val[k] = v
     }
-    END { print (val["TRACEBLOC_ENV"] != "" ? val["TRACEBLOC_ENV"] : val["CLIENT_ENV"]) }' <<<"$vals")"
+    END { print (val["TRACEBLOC_ENV"] != "" ? val["TRACEBLOC_ENV"] : val["CLIENT_ENV"]) }')" || return 1
   raw="$(tb_client_env "${raw:-prod}")"
   printf '%s' "${raw:-prod}"
 }
@@ -220,7 +227,10 @@ _assess_release_client_env() {
 # that same stage. So the probe only judges a release installed for that stage: a
 # dev or staging client re-checked from a shell without its env would read
 # `invalid` on prod and have a working credential rotated.
-_assess_credential_rejected() {
+# _assess_credential_rejected runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__assess_credential_rejected below is the function itself.
+_assess_credential_rejected() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__assess_credential_rejected "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__assess_credential_rejected() {
   local ns="$1" rel id pw verdict rel_env run_env
   rel="${INSTALLED_CLIENT_RELEASE:-$ns}"
   declare -F verify_credentials >/dev/null 2>&1 || return 1
@@ -248,14 +258,17 @@ _assess_credential_rejected() {
 # Values that cannot be read are NOT a reason to reinstall a healthy machine: false.
 # Read-only and bounded. The release is named after its namespace.
 _assess_gpu_request_unsupported() {
-  local _ns="$1" _vals _re='^[[:space:]]*(TRACEBLOC_)?GPU_(REQUESTS|LIMITS):[[:space:]]*"?'
+  local _ns="$1" _gpu='amd' _re='^[[:space:]]*(TRACEBLOC_)?GPU_(REQUESTS|LIMITS):[[:space:]]*"?'
   [[ -n "$_ns" ]] || return 1
-  _vals="$(_bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm get values "$_ns" -n "$_ns" 2>/dev/null)" || return 1
-  grep -Eq "${_re}amd\.com/gpu" <<<"$_vals" && return 0
   if [[ "${OS:-}" == Linux && "${ARCH:-}" != x86_64 && "${ARCH:-}" != amd64 ]]; then
-    grep -Eq "${_re}nvidia\.com/gpu" <<<"$_vals" && return 0
+    _gpu='(amd|nvidia)'
   fi
-  return 1
+  # The stored values hold clientPassword and the chart's other secrets: grepped
+  # inside the pipe, never held, so a trace shows no value. pipefail: a helm that
+  # fails is false. `grep -c`, not -q: it reads to EOF, so helm is never SIGPIPE'd.
+  ( set -o pipefail
+    _bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm get values "$_ns" -n "$_ns" 2>/dev/null </dev/null \
+      | grep -Ec "${_re}${_gpu}\.com/gpu" >/dev/null )
 }
 
 # _assess_classify_release — the reads once k3s runs: the tracebloc release, a wedged helm op, the credential, the workloads, the

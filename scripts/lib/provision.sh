@@ -19,9 +19,17 @@
 #  interactive; a non-interactive enroll-token login is a CLI follow-up.
 # =============================================================================
 
+# The xtrace hold (common.sh). A no-op with a common.sh from before it, so a mixed
+# set of libs runs, unheld, rather than stopping on a missing command.
+declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
+declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
+
 # _provisioning_preset: true when the operator already supplied a values file or
 # credentials, so browser sign-in is skipped and install_client_helm uses them.
-_provisioning_preset() {
+# _provisioning_preset runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__provisioning_preset below is the function itself.
+_provisioning_preset() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__provisioning_preset "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__provisioning_preset() {
   [[ -n "${TRACEBLOC_VALUES_FILE:-}" ]] && return 0
   [[ -n "${TRACEBLOC_CLIENT_ID:-}" && -n "${TRACEBLOC_CLIENT_PASSWORD:-}" ]] && return 0
   return 1
@@ -113,16 +121,23 @@ _name_refused() {
   { _tb_refused_lines "$1" "$(_name_rule)" >/dev/tty; } 2>/dev/null || true
 }
 
-# _name_all_digits NAME -- true when NAME's slug is only digits. Its namespace would be
-# a number, which the chart's labels render unquoted and Kubernetes refuses.
-_name_all_digits() { [[ "$(_name_slug "${1:-}")" =~ ^[0-9]+$ ]]; }
+# _name_has_letter NAME -- true when NAME's namespace (_name_slug) has a letter, or NAME
+# is only signs outside ASCII, which _name_slug drops and the CLI transliterates or names
+# itself. A namespace with no letter is a number, which the chart's labels render
+# unquoted and Kubernetes refuses, or nothing the name said ("!!!", "---"). An empty
+# NAME has none. install-wsl.ps1's Test-NameHasLetter.
+_name_has_letter() {
+  local s; s="$(_name_slug "${1:-}")"
+  [[ "$s" == *[a-z]* ]] && return 0
+  [[ -z "$s" && -n "$(printf '%s' "${1:-}" | LC_ALL=C tr -d '\000-\177')" ]]
+}
 
 # _client_name_default -- the name Enter gives the secure environment at the name
 # prompt: this host's name (_host_machine_name) as its namespace will read, with
-# "machine-" in front of an all-digit one.
+# "machine-" in front of one with no letter.
 _client_name_default() {
   local s; s="$(_name_slug "$(_host_machine_name)")"
-  if _name_all_digits "$s"; then s="$(_name_slug "machine-${s}")"; fi
+  if [[ -n "$s" ]] && ! _name_has_letter "$s"; then s="$(_name_slug "machine-${s}")"; fi
   printf '%s' "$s"
 }
 
@@ -375,7 +390,10 @@ _show_create_notices() {
 # presets, and the Windows installer's handed-over credential, never reach it.
 # _provisioning_preset is deliberately left as it is: this only fills in the
 # password it reads.
-_provision_wants_preset_password() {
+# _provision_wants_preset_password runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__provision_wants_preset_password below is the function itself.
+_provision_wants_preset_password() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__provision_wants_preset_password "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__provision_wants_preset_password() {
   [[ -z "${TRACEBLOC_VALUES_FILE:-}" && -z "${TRACEBLOC_STDIN_CRED_FILE:-}" ]] || return 1
   [[ -n "${TRACEBLOC_CLIENT_ID:-}" && -z "${TRACEBLOC_CLIENT_PASSWORD:-}" ]]
 }
@@ -386,7 +404,10 @@ _provision_wants_preset_password() {
 # is asked again, with no cap (Ctrl-C stops); a rejection asks for the Client ID too,
 # Enter keeping it. An inactive account, or a terminal that gives no input (EOF),
 # stops with the remedy. Never prints the password.
-_provision_prompt_preset_password() {
+# _provision_prompt_preset_password runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__provision_prompt_preset_password below is the function itself.
+_provision_prompt_preset_password() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__provision_prompt_preset_password "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__provision_prompt_preset_password() {
   local _pw="" _id _rc _status
   local _hint="Enter the password shown when that Client ID was created (typing is hidden)."
   info "Installing your secure environment with Client ID ${TRACEBLOC_CLIENT_ID}."
@@ -572,7 +593,7 @@ provision_client() {
   # A TRACEBLOC_CLIENT_NAME that can't be used is asked for on a terminal, as a typed
   # one is below; with no terminal it stops the run further down.
   client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
-  if [[ -z "$_reuse_ns" ]] && _name_all_digits "$client_name" && _prompt_tty; then
+  if [[ -z "$_reuse_ns" && -n "$client_name" ]] && ! _name_has_letter "$client_name" && _prompt_tty; then
     printf '%s' "$_name_lead" >/dev/tty 2>/dev/null || true; _name_lead=""
     _name_refused "TRACEBLOC_CLIENT_NAME \"${client_name}\" can't be used: a name needs at least one letter."
     client_name=""
@@ -641,7 +662,7 @@ provision_client() {
       # path uses.
       client_name="$(_strip_paste_garbage "$client_name")"
       client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
-      if [[ -n "$client_name" ]] && _name_all_digits "$client_name"; then
+      if [[ -n "$client_name" ]] && ! _name_has_letter "$client_name"; then
         _name_refused "\"${client_name}\" can't be used: a name needs at least one letter."
         client_name=""
         [[ "$_name_read_ok" == 1 ]] && continue
@@ -672,11 +693,11 @@ provision_client() {
     client_location="$(_detect_location_zone)"; client_location="${client_location%% *}"
   fi
 
-  # An all-digit name reaches here only from TRACEBLOC_CLIENT_NAME with no terminal to
-  # ask on: on one, it is asked for above.
-  if [[ -z "$_reuse_ns" ]] && _name_all_digits "$client_name"; then
+  # A name with no letter reaches here only from TRACEBLOC_CLIENT_NAME with no terminal
+  # to ask on: on one, it is asked for above.
+  if [[ -z "$_reuse_ns" && -n "$client_name" ]] && ! _name_has_letter "$client_name"; then
     tb_fail_next "Set TRACEBLOC_CLIENT_NAME to a name with a letter in it, then run the installer again:"
-    error_said "TRACEBLOC_CLIENT_NAME \"${client_name}\" can't be used: a name needs at least one letter." "A name needs at least one letter: TRACEBLOC_CLIENT_NAME is '${client_name}', all digits, so its namespace would be a number, which the chart's labels render unquoted and Kubernetes refuses. Set TRACEBLOC_CLIENT_NAME to a name that has one, or unset it and re-run in a terminal to be prompted."
+    error_said "TRACEBLOC_CLIENT_NAME \"${client_name}\" can't be used: a name needs at least one letter." "A name needs at least one letter: TRACEBLOC_CLIENT_NAME is '${client_name}', which has none, so its namespace would be a number, which the chart's labels render unquoted and Kubernetes refuses, or nothing the name said. Set TRACEBLOC_CLIENT_NAME to a name that has one, or unset it and re-run in a terminal to be prompted."
   fi
   if [[ -z "$client_name" ]]; then
     if _prompt_tty; then
@@ -814,7 +835,10 @@ TB_CRED_KEYS="TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD TRACEBLOC_NAMESPACE 
 # key given twice, no TRACEBLOC_CLIENT_ID, or an id with neither a password nor
 # TRACEBLOC_CLIENT_ADOPTED=1. A refusal returns 1 with the reason in
 # _PROVISION_CRED_WHY, which names lines and keys and never a value.
-_provision_read_credential() {
+# _provision_read_credential runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__provision_read_credential below is the function itself.
+_provision_read_credential() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__provision_read_credential "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__provision_read_credential() {
   local line key k ok n=0 seen=" "
   _PROVISION_CRED_WHY=""
   while IFS= read -r line || [[ -n "$line" ]]; do

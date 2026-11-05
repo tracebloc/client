@@ -169,18 +169,24 @@ download failure, and the next tick tries again.
   (`client/files/sigstore`, copied from Sigstore's TUF repository), and cosign
   verifies with them, `--offline`. The release proves those keys verify each client
   chart it signs, with no TUF and no network, before it publishes it, so a chart
-  whose keys Sigstore has moved on from never reaches the index. If Sigstore rotates
-  one of these keys, releases stop at that check until the chart ships the new one,
-  and a client still on a chart without it refuses the next chart, keeps its release
-  and moves on only through the installer.
+  whose keys Sigstore has moved on from never reaches the index.
+- **Each release must pass the previous chart's check.** Right after signing, the
+  release runs the chart check of the newest released chart below it, with the keys
+  that chart ships, on the new client chart (`scripts/verify-with-previous-trust-root.sh`;
+  the previous chart is read from the public index and held to its digest). A release
+  that clients on that chart would refuse stops there, unpublished. So when Sigstore
+  rotates one of these keys, a bridge release ships first: it carries the new keys and
+  still verifies with the old ones. A client that missed the bridge release refuses
+  the next chart, keeps its release and moves on only through the installer.
 - **Where the copies live.** The tick keeps its own copy of the signer identity;
   `scripts/tests/auto-upgrade-chart-verify.sh` holds it, the cosign build and the
   refusal's words to `install.sh` and golden `07-release-not-signed`.
 
 `scripts/tests/release-upload-scope.bats` refuses a release workflow that attaches
 a chart without its bundle, signs a chart before the last `helm package` or after
-the chart artifact is uploaded, never verifies a bundle `--offline`, or verifies
-against an identity other than the one `install.sh` checks.
+the chart artifact is uploaded, never verifies a bundle `--offline`, verifies
+against an identity other than the one `install.sh` checks, or does not run the
+previous chart's check on the signed client chart before anything is published.
 
 ## 3. Why cosign keyless (and not minisign / gpg)
 

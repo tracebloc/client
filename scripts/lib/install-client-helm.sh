@@ -5,6 +5,11 @@
 #  and GPU detection. Values file is written to HOST_DATA_DIR/values.yaml.
 # =============================================================================
 
+# The xtrace hold (common.sh). A no-op with a common.sh from before it, so a mixed
+# set of libs runs, unheld, rather than stopping on a missing command.
+declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
+declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
+
 # Stamped from scripts/spec/facts.env by scripts/check-facts.sh — do not hand-edit.
 # The Windows installer waits for the same APIService with the same TB_METRICS_WAIT_S
 # knob, so the two defaults are one fact, gated in CI.
@@ -152,15 +157,19 @@ _mem_to_bytes() {
 # Provenance is normalised here: anything unrecognised, including absent, is
 # `unknown`, never a guess.
 _existing_training_values() {
-  local ns="${TB_NAMESPACE:-}" out size prov
+  local ns="${TB_NAMESPACE:-}" out
   [[ -n "$ns" ]] || return 0
   # helm get has no request timeout, so gate it behind a BOUNDED probe: a
   # wedged API degrades to machine sizing / the static default instead of
   # hanging values generation. A missing namespace also means there
   # is no release to carry — skip the helm call entirely.
   kubectl get namespace "$ns" --request-timeout=5s >/dev/null 2>&1 || return 0
-  out="$(helm get values "$ns" -n "$ns" 2>/dev/null)" || return 0
-  [[ -n "$out" ]] || return 0
+  # The stored values hold clientPassword and the chart's other secrets, so they are
+  # read inside the pipe and never held: only the three keys below leave it. A trace
+  # (bash -x, which the install log keeps) then shows "<size>|<provenance>", never
+  # the values. pipefail: a helm that fails carries nothing. The awk reads to EOF
+  # (no early exit), so helm is never SIGPIPE'd into a false failure.
+  #
   # READ RESOURCE_REQUESTS, FALL BACK TO RESOURCE_LIMITS.
   #
   # This used to read RESOURCE_LIMITS only, which was fine while both fields
@@ -178,27 +187,22 @@ _existing_training_values() {
   # RESOURCE_REQUESTS still carries the WHOLE envelope, so it is the field to
   # read. LIMITS remains the fallback for a release installed before requests
   # was written, or a chart-direct install that set only that key.
-  size="$(printf '%s\n' "$out" | awk '
-    /^[[:space:]]*RESOURCE_REQUESTS:/ {
-      sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit
-    }')"
-  if [[ -z "$size" ]]; then
-    size="$(printf '%s\n' "$out" | awk '
-      /^[[:space:]]*RESOURCE_LIMITS:/ {
-        sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit
-      }')"
-  fi
-  # No carried size means nothing to attribute; the caller sizes the machine.
-  [[ -n "$size" ]] || return 0
-  prov="$(printf '%s\n' "$out" | awk '
-    /^[[:space:]]*RESOURCE_PROVENANCE:/ {
-      sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit
-    }')"
-  case "$prov" in
-    installer|user) ;;
-    *) prov="unknown" ;;
-  esac
-  printf '%s|%s' "$size" "$prov"
+  #
+  # Each key is its FIRST line, read whole; an empty RESOURCE_REQUESTS falls back to
+  # LIMITS. No carried size prints nothing: nothing to attribute, the caller sizes
+  # the machine.
+  out="$(set -o pipefail; helm get values "$ns" -n "$ns" 2>/dev/null </dev/null | awk '
+    function val(   v) { v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); gsub(/"/, "", v); return v }
+    /^[[:space:]]*RESOURCE_REQUESTS:/   && !sr { sr = 1; req = val() }
+    /^[[:space:]]*RESOURCE_LIMITS:/     && !sl { sl = 1; lim = val() }
+    /^[[:space:]]*RESOURCE_PROVENANCE:/ && !sp { sp = 1; prov = val() }
+    END {
+      size = (req != "" ? req : lim)
+      if (size == "") exit
+      if (prov != "installer" && prov != "user") prov = "unknown"
+      printf "%s|%s", size, prov
+    }')" || return 0
+  printf '%s' "$out"
 }
 
 # The installed release's carried ENVELOPE (RESOURCE_REQUESTS, or LIMITS when
@@ -1416,7 +1420,8 @@ _yaml_sq_unescape() {                    # body of a '...' scalar -> raw value
   printf '%s' "${1//$_sq$_sq/$_sq}"
 }
 
-# _extract_yaml_value — value of top-level scalar key $2 in values file $1.
+# _extract_yaml_value — value of top-level scalar key $2 in values file $1 (`-`
+# reads STDIN, so a caller can pipe values in without writing them to a file).
 # CONTRACT: echoes nothing and returns 0 when the key is absent (or the file is
 # unreadable). Callers rely on "empty means no value"; they must not have to
 # distinguish absent-key from read-error, and none of them do.
@@ -1542,7 +1547,10 @@ _client_id_from_secret() {
 # are different facts: the restart after helm reads "absent" as "no pod holds an
 # old credential" and "cannot tell" as "maybe one does".
 # Callers in `$( )` under `set -e` must handle the 2 (`|| …`).
-_client_password_from_secret() {
+# _client_password_from_secret runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__client_password_from_secret below is the function itself.
+_client_password_from_secret() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__client_password_from_secret "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__client_password_from_secret() {
   local rel="$1" ns="$2" rows b64 out="" name canon legacy n=0
   has kubectl || return 2
   rows="$(kubectl get secret -n "$ns" -l "app.kubernetes.io/instance=${rel}" \
@@ -1640,13 +1648,7 @@ detect_installed_client() {
   INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; INSTALLED_CLIENT_RELEASE=""; INSTALLED_CLIENT_UNKNOWN=0
   # No helm => nothing helm-installed here; a genuine (documented) "no client".
   has helm || return 0
-  local _gvf _rel _ns _id _list _unreadable=0
-  # A mktemp failure is an environment error, NOT proof of "no client here" — flag
-  # UNKNOWN so the guards fail closed rather than skip. Fall back to a path in a
-  # dir we own (never a predictable world-writable /tmp path under sudo) before
-  # giving up.
-  _gvf="$(mktemp 2>/dev/null)" || _gvf="${HOST_DATA_DIR:+${HOST_DATA_DIR}/.tb-detect-values.$$}"
-  [[ -n "$_gvf" ]] || { INSTALLED_CLIENT_UNKNOWN=1; return 0; }
+  local _rel _ns _id _list _unreadable=0
   # Capture `helm list`'s exit code: a FAILED enumeration (wedged/unreachable API,
   # kubeconfig glitch) must NOT read as "no client here" — that fails OPEN and lets
   # a re-install silently overwrite an existing client. `helm list` returns 0 with
@@ -1659,12 +1661,15 @@ detect_installed_client() {
   # _recover_pending_helm_release knows how to clear — so a killed-mid-flight client
   # stays visible and the one-client guard can't wave through an overwrite.
   if ! _list="$(helm list -A --deployed --failed --pending --uninstalling 2>/dev/null)"; then
-    INSTALLED_CLIENT_UNKNOWN=1; rm -f "$_gvf"; return 0
+    INSTALLED_CLIENT_UNKNOWN=1; return 0
   fi
   while read -r _rel _ns; do
     [[ -z "$_rel" ]] && continue
-    if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
-      _id="$(_extract_yaml_value "$_gvf" clientId)"
+    # The values hold clientPassword and the chart's other secrets, so clientId is
+    # read inside the pipe: no file an interrupted run would leave behind, and no
+    # variable a trace would print. pipefail: a helm that fails is an unreadable
+    # client. _extract_yaml_value's grep reads to EOF, so helm is never SIGPIPE'd.
+    if _id="$(set -o pipefail; helm get values "$_rel" -n "$_ns" 2>/dev/null </dev/null | _extract_yaml_value - clientId)"; then
       # VALUES READABLE BUT NO clientId IS NO LONGER "not a client":
       # clientId stopped being `required` and the chart now tells
       # operators to drop it from release values once the Secret carries it — so
@@ -1695,7 +1700,6 @@ detect_installed_client() {
   # A client release existed but we couldn't read its clientId, and no OTHER
   # release gave a definitive id -> unknown (fail closed).
   [[ -z "$INSTALLED_CLIENT_ID" && "$_unreadable" == 1 ]] && INSTALLED_CLIENT_UNKNOWN=1
-  rm -f "$_gvf"
   return 0
 }
 
@@ -1758,7 +1762,10 @@ _backend_url() {
 # Validate the entered Client ID / password against the backend's
 # api-token-auth/ endpoint — the same call jobs-manager makes at runtime —
 # using curl (already a dependency). Echoes: valid | invalid | inactive | unverified.
-verify_credentials() {
+# verify_credentials runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced_verify_credentials below is the function itself.
+verify_credentials() { { _tb_trace_off; } 2>/dev/null; _tb_untraced_verify_credentials "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced_verify_credentials() {
   local client_id="$1" client_password="$2" backend code
   backend="$(_backend_url)"
   # SECURITY: never put the password on curl's argv — it would be world-readable
@@ -1826,7 +1833,10 @@ _dashboard_link_json_field() {
 }
 
 # _dashboard_link_mint ID PASSWORD -- the install link's URL on stdout, or nothing.
-_dashboard_link_mint() {
+# _dashboard_link_mint runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__dashboard_link_mint below is the function itself.
+_dashboard_link_mint() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__dashboard_link_mint "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__dashboard_link_mint() {
   local client_id="${1:-}" client_password="${2:-}" backend body token scheme url
   [[ -n "$client_id" && -n "$client_password" ]] || return 0
   backend="$(_backend_url)"
@@ -1850,7 +1860,10 @@ _dashboard_link_mint() {
 # the release's Secret first (what its pods authenticate with, on every path,
 # the adopt and re-run ones included), else this run's TB_CLIENT_ID /
 # TB_CLIENT_PASSWORD. Nothing when neither is readable.
-_dashboard_link_credential() {
+# _dashboard_link_credential runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__dashboard_link_credential below is the function itself.
+_dashboard_link_credential() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__dashboard_link_credential "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__dashboard_link_credential() {
   local ns="${TB_NAMESPACE:-}" id="" pw=""
   if [[ -n "$ns" ]]; then
     id="$(_client_id_from_secret "$ns" "$ns")"
@@ -1917,7 +1930,10 @@ _dashboard_link_interactive() {
 # or keeps a link with no browser to open it in for print_dashboard_link. Prints
 # nothing itself.
 _TB_DASHBOARD_OPENED=""; _TB_DASHBOARD_LINK=""
-open_dashboard_link() {
+# open_dashboard_link runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced_open_dashboard_link below is the function itself.
+open_dashboard_link() { { _tb_trace_off; } 2>/dev/null; _tb_untraced_open_dashboard_link "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced_open_dashboard_link() {
   _TB_DASHBOARD_OPENED=""; _TB_DASHBOARD_LINK=""
   [[ "${TRACEBLOC_CLIENT_STATE:-}" == "connected" ]] || return 0
   _dashboard_link_interactive || return 0
@@ -1974,7 +1990,10 @@ print_dashboard_link() {
 # LAST '@' so a ':' or '@' inside the password is tolerated. Echoes YAML lines
 # for the env: block (each prefixed with a newline, 2-space indent), or nothing
 # when the host has no proxy set.
-_chart_proxy_env_yaml() {
+# _chart_proxy_env_yaml runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__chart_proxy_env_yaml below is the function itself.
+_chart_proxy_env_yaml() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__chart_proxy_env_yaml "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__chart_proxy_env_yaml() {
   local raw="" var
   for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
     if [[ -n "${!var:-}" ]]; then raw="${!var}"; break; fi
@@ -2018,7 +2037,10 @@ _chart_proxy_env_yaml() {
 # TRACEBLOC_REGISTRY_PASSWORD also mint the chart's imagePullSecret
 # (dockerRegistry), whose server defaults to the mirror host. Emits nothing when
 # no mirror is configured, so a default install's values are unchanged.
-_image_mirror_yaml() {
+# _image_mirror_yaml runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__image_mirror_yaml below is the function itself.
+_image_mirror_yaml() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__image_mirror_yaml "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__image_mirror_yaml() {
   local mirror="${TRACEBLOC_IMAGE_REGISTRY:-}"
   local reg_user="${TRACEBLOC_REGISTRY_USERNAME:-}"
   local reg_pass="${TRACEBLOC_REGISTRY_PASSWORD:-}"
@@ -3982,11 +4004,13 @@ _values_pin_mysql_84() {
 # fail-closed: refuse an arm64 reconcile we cannot prove is 8.4 rather than report
 # success and CrashLoop (the same stance as the adopt-reconcile arch gate).
 _release_pins_mysql_84() {
-  local _rel="$1" _ns="$2" _vals
+  local _rel="$1" _ns="$2"
   [[ -n "$_rel" && -n "$_ns" ]] || return 1
   kubectl get namespace "$_ns" --request-timeout=5s >/dev/null 2>&1 || return 1
-  _vals="$(helm get values "$_rel" -n "$_ns" 2>/dev/null || true)"
-  _values_pin_mysql_84 <<<"$_vals"
+  # The stored values hold clientPassword and the chart's other secrets: piped
+  # straight into the reader, never held, so a trace shows no value. A helm that
+  # fails is read as empty values (`|| :`), "not 8.4", whatever pipefail says.
+  { helm get values "$_rel" -n "$_ns" 2>/dev/null </dev/null || :; } | _values_pin_mysql_84
 }
 
 # _values_hostpath_storage -- the top-level hostPath block of `helm get values` on
@@ -4078,7 +4102,7 @@ _values_hostpath_storage() {
 _native_k3s_release_storage() {
   [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]] || return 0
   [[ "${TB_RELEASE_STORAGE_READ:-}" != 1 ]] || return 0
-  local early="" ns="${TB_NAMESPACE:-}" out rc=0 vals line enabled="" root="" ds="" jd="" want="${TB_STORAGE_MODE:-node-local}" kc ctx rec
+  local early="" ns="${TB_NAMESPACE:-}" out rc=0 line enabled="" root="" ds="" jd="" want="${TB_STORAGE_MODE:-node-local}" kc ctx rec
   if [[ "${1:-}" == early ]]; then early=1; ns="$(_client_default_namespace)"; fi
   [[ -n "$ns" ]] || return 0
   kc="$(_native_k3s_kubeconfig_target)"; ctx="$(_native_k3s_context)"
@@ -4106,9 +4130,12 @@ _native_k3s_release_storage() {
   [[ "$rc" -eq 0 ]] || error "${cant}. Check that 'helm --kube-context ${ctx} list -n ${ns}' answers, then re-run."
   if ! grep -qxF -- "$ns" <<<"$out"; then [[ -n "$early" ]] || TB_RELEASE_STORAGE_READ=1; return 0; fi
   TB_RELEASE_STORAGE_READ=1
-  vals="$(_bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm --kubeconfig "$kc" --kube-context "$ctx" get values "$ns" -n "$ns" 2>/dev/null)" || rc=$?
+  # The stored values hold clientPassword and the chart's other secrets: piped
+  # straight into the reader, never held, so a trace shows only its four lines.
+  # pipefail: a helm that fails stops the run as before. The reader reads to EOF
+  # (it decides in END), so helm is never SIGPIPE'd.
+  out="$(set -o pipefail; _bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm --kubeconfig "$kc" --kube-context "$ctx" get values "$ns" -n "$ns" 2>/dev/null </dev/null | _values_hostpath_storage)" || rc=$?
   [[ "$rc" -eq 0 ]] || error "${cant}. Check that 'helm --kube-context ${ctx} get values ${ns} -n ${ns}' answers, then re-run."
-  out="$(_values_hostpath_storage <<<"$vals")"
   [[ "$out" != unreadable ]] \
     || error "${cant}: its stored hostPath values are in a form this installer does not read. Check them with 'helm --kube-context ${ctx} get values ${ns} -n ${ns}', then re-run."
   while IFS= read -r line; do
@@ -4589,9 +4616,11 @@ install_client_helm() {
   # TRACEBLOC_CLIENT_PASSWORD to provision without typing the secret inline
   # (CI / automation / golden images). Verified the same way as the prompt.
   local _noninteractive_creds=0
+  { _tb_trace_off; } 2>/dev/null   # the password stays out of bash -x's trace (common.sh)
   if [[ -n "${TRACEBLOC_CLIENT_ID:-}" && -n "${TRACEBLOC_CLIENT_PASSWORD:-}" ]]; then
     _noninteractive_creds=1
   fi
+  _tb_trace_on
 
   if [[ "$_noninteractive_creds" == 0 && -f "$values_file" && "${TRACEBLOC_CLIENT_ADOPTED:-}" != 1 ]] && _tty_available; then
     hint "Previous configuration found."
@@ -4604,9 +4633,12 @@ install_client_helm() {
     done
     if [[ "$use_existing" == "y" || "$use_existing" == "yes" || -z "$use_existing" ]]; then
       default_client_id=$(_extract_yaml_value "$values_file" "clientId")
+      # The password stays out of bash -x's trace (_tb_trace_off, common.sh).
+      { _tb_trace_off; } 2>/dev/null
       default_client_password=$(_extract_yaml_value "$values_file" "clientPassword")
+      [[ -z "$default_client_password" ]] || log "Using existing clientPassword as default."
+      _tb_trace_on
       [[ -n "$default_client_id" ]] && log "Using existing clientId as default."
-      [[ -n "$default_client_password" ]] && log "Using existing clientPassword as default."
     fi
   fi
 
@@ -4633,6 +4665,9 @@ install_client_helm() {
     return 0
   fi
 
+  # Every line from here to the end of the credential prompt holds the password,
+  # so it runs with bash -x held off (_tb_trace_off, common.sh).
+  { _tb_trace_off; } 2>/dev/null
   if [[ "$_noninteractive_creds" == 1 ]]; then
     # Credentials supplied via env — verify once, no prompt, no re-prompt.
     TB_CLIENT_ID=$(_sanitize_credential "$TRACEBLOC_CLIENT_ID")
@@ -4718,6 +4753,7 @@ install_client_helm() {
     default_client_id=""; default_client_password=""
   done
   fi
+  _tb_trace_on
 
   # ── One-client-per-machine guard ─────────────────────────────────────────
   # A machine runs exactly one tracebloc client: it shares this cluster and the
@@ -4770,7 +4806,9 @@ install_client_helm() {
   # verify_credentials gates it to UUIDs, so this is hardening rather than a live
   # break, but the interpolation itself is now safe.
   TB_CLIENT_ID_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_ID")"
+  { _tb_trace_off; } 2>/dev/null
   TB_CLIENT_PASSWORD_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_PASSWORD")"
+  _tb_trace_on
 
   # ── GPU request + runtime class ───────────────
   # Request a GPU for training jobs, keyed to the vendor's scheduler resource
@@ -4836,14 +4874,19 @@ install_client_helm() {
   # Translate a corporate proxy on the host into the chart's split proxy keys so
   # every egress-needing workload inherits it (see _chart_proxy_env_yaml). Empty
   # when the host has no proxy — the env: block is then unchanged.
+  # The proxy's password and the mirror's are held with bash -x off (common.sh).
   local proxy_env_yaml
+  { _tb_trace_off; } 2>/dev/null
   proxy_env_yaml="$(_chart_proxy_env_yaml)"
-  [[ -n "$proxy_env_yaml" ]] && log "Corporate proxy detected on host — propagating to client workloads via chart values."
+  [[ -z "$proxy_env_yaml" ]] || log "Corporate proxy detected on host — propagating to client workloads via chart values."
+  _tb_trace_on
 
   # Private registry mirror: re-home every image onto TRACEBLOC_IMAGE_REGISTRY
   # for restricted-network / air-gapped installs. Empty when unset (values unchanged).
   local image_mirror_yaml
+  { _tb_trace_off; } 2>/dev/null
   image_mirror_yaml="$(_image_mirror_yaml)"
+  _tb_trace_on
   if [[ -n "${TRACEBLOC_IMAGE_REGISTRY:-}" ]]; then
     log "Image registry mirror configured — pulling all images from ${TRACEBLOC_IMAGE_REGISTRY}."
     [[ -n "${TRACEBLOC_REGISTRY_USERNAME:-}" ]] && log "Mirror credentials provided — minting an imagePullSecret for the mirror."
@@ -5177,8 +5220,10 @@ EOF
   # password after helm, the pods may have started on a different one, so that
   # restarts below.
   local _prev_password _prev_unreadable=0
+  { _tb_trace_off; } 2>/dev/null   # the password stays out of bash -x's trace (common.sh)
   _prev_password="$(_client_password_from_secret "$TB_NAMESPACE" "$TB_NAMESPACE")" \
     || _prev_unreadable=1
+  _tb_trace_on
   # The lock's prefix has a line of its own, so the call still starts its line, where
   # release-name-equals-namespace.sh reads the release's name from.
   _tb_helm_lock
@@ -5215,11 +5260,17 @@ EOF
   # roll them on a Secret change. Restart the ones that authenticate so they use it.
   # An unreadable read before helm with one that reads after it is "cannot tell",
   # and restarts; unreadable on both sides is a cluster nothing here can roll.
-  local _now_password
+  local _now_password _changed=0
+  { _tb_trace_off; } 2>/dev/null   # the password stays out of bash -x's trace (common.sh)
   _now_password="$(_client_password_from_secret "$TB_NAMESPACE" "$TB_NAMESPACE")" || _now_password=""
   if [[ "${TRACEBLOC_CREDENTIAL_REISSUED:-0}" == 1 ]] \
      || [[ "$_prev_unreadable" == 1 && -n "$_now_password" ]] \
      || _credential_changed_under_pods "$_prev_password" "$_now_password"; then
+    _changed=1
+  fi
+  _prev_password=""; _now_password=""
+  _tb_trace_on
+  if [[ "$_changed" == 1 ]]; then
     _restart_credential_consumers "$TB_NAMESPACE" \
       || error "This machine's new credential is in place, but its services are still on the old one."
   fi

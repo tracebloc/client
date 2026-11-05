@@ -38,6 +38,11 @@
 #  suite runs in both unit jobs with those tools stubbed (mac-container.bats).
 # =============================================================================
 
+# The xtrace hold (common.sh). A no-op with a common.sh from before it, so a mixed
+# set of libs runs, unheld, rather than stopping on a missing command.
+declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
+declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
+
 TB_MAC_CT_MARKER=".tracebloc-verified"
 
 # _mac_ct_version_ok VERSION -- 0 when VERSION is a release tag like 1.4.1.
@@ -497,13 +502,13 @@ _mac_ct_start_cause() {
   printf '%s' " Apple's network service did not start, a known problem on macOS 27.0. Update macOS to 27.0.1 or later, then run this installer again."
 }
 
-# _mac_ct_start_failed ROOT LOGS MARK -- `system start` failed or was cut off. Apple's CLI
+# _mac_ct_start_failed ROOT LOGS [MARK] -- `system start` failed or was cut off. Apple's CLI
 # registers the apiserver with launchd before it waits on --timeout, so a failure can
 # leave this installer's system registered, and the next run would find an `ours` it
 # cannot ask. Look, stop what is ours and left behind, and say what is true: "safe to
 # re-run" only when launchd shows nothing registered afterwards. Never returns.
 _mac_ct_start_failed() {
-  local root="$1" logs="$2" mark="$3" left running cause
+  local root="$1" logs="$2" mark="${3:-0}" left running cause
   cause="$(_mac_ct_start_cause "$logs" "$mark")"
   left="$(_mac_ct_system_state 2>/dev/null)" || left=unknown
   if [[ "$left" == ours\ * ]]; then
@@ -1136,7 +1141,10 @@ _mac_ct_node_size() {
 # which holds it, is not loaded: a node run without the proxy would pull direct and
 # fail late, naming nothing of ours. A proxy value with a line break in it is refused by
 # the variable's name, never its value: it would end its line in the env file early.
-_mac_ct_node_proxy_env() {
+# _mac_ct_node_proxy_env runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__mac_ct_node_proxy_env below is the function itself.
+_mac_ct_node_proxy_env() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__mac_ct_node_proxy_env "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__mac_ct_node_proxy_env() {
   if ! declare -F _node_proxy_env >/dev/null 2>&1; then
     echo "Apple container: the installer's proxy reader (cluster.sh) is not loaded, so this run cannot tell whether the node needs a proxy."
     return 1
@@ -1340,7 +1348,10 @@ TB_MAC_CT_NODE_TOKEN_RE='^[0-9a-f]{32}$'
 #   its token over (one k3s already refuses to start is this case) can only be
 #   reinstalled, and the refusal says how.
 TB_MAC_CT_NODE_TOKEN=""
-_mac_ct_node_token() {
+# _mac_ct_node_token runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__mac_ct_node_token below is the function itself.
+_mac_ct_node_token() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__mac_ct_node_token "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__mac_ct_node_token() {
   local ct="$1" name="$2" dir="$3" state="$4" file="${3}/token" t="" passwd="" tok="" p="" rc
   local how="$TB_MAC_CT_NODE_REINSTALL"
   TB_MAC_CT_NODE_TOKEN=""
@@ -1513,7 +1524,10 @@ _mac_ct_node_drop_local_api() {
 # _mac_ct_node_dir/k3s.yaml. Reuses a running node created with this argv, starts a
 # stopped one, recreates one created with another argv on its volume, and refuses a
 # container or a volume of its name that nothing shows this installer made.
-_mac_ct_ensure_node() {
+# _mac_ct_ensure_node runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__mac_ct_ensure_node below is the function itself.
+_mac_ct_ensure_node() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__mac_ct_ensure_node "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__mac_ct_ensure_node() {
   local root ct name dir image cfgfile cidrs node cfg kubelet size want have="" rc since start="" mkvol="" state casum running=""
   local penv pold="" pchanged=""
   _native_k3s_check_version
@@ -2076,7 +2090,10 @@ _mac_ct_runner_kubeconfig_yaml() {
 # runner's kubeconfig, each 0600 in a 0700 folder; prints the kubeconfig's path. Exit 1,
 # printing why, when the node's CA cannot be read, kubectl issues no token, or a file
 # cannot be written. The token never reaches the log or the output.
-_mac_ct_runner_kubeconfig() {
+# _mac_ct_runner_kubeconfig runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__mac_ct_runner_kubeconfig below is the function itself.
+_mac_ct_runner_kubeconfig() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__mac_ct_runner_kubeconfig "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__mac_ct_runner_kubeconfig() {
   local ns="$1" node dir ca tok rc=0 saved_umask
   node="$(_mac_ct_node_dir)" || { echo "cannot tell where the node's files are"; return 1; }
   dir="${node}/runner"
@@ -2397,7 +2414,10 @@ TB_MAC_CT_LAN_WAIT_S=120
 # Capture-then-slice, never `sed | head -n 1`: head closes the pipe early (the
 # early-close rule, .cursor/BUGBOT.md). base64's own status is read, so a value that
 # does not decode is refused by name rather than handed to curl as a partial file.
-_mac_ct_api_try() {
+# _mac_ct_api_try runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__mac_ct_api_try below is the function itself.
+_mac_ct_api_try() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__mac_ct_api_try "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__mac_ct_api_try() {
   local kc="$1" d f v rc=0
   d="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-api-XXXXXX")" || { echo "could not create a temporary folder"; return 100; }
   for f in certificate-authority-data client-certificate-data client-key-data; do

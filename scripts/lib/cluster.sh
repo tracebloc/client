@@ -5,6 +5,11 @@
 #  guard. Native k3s's code that reads them lives in k3s.sh and mac-container.sh.
 # =============================================================================
 
+# The xtrace hold (common.sh). A no-op with a common.sh from before it, so a mixed
+# set of libs runs, unheld, rather than stopping on a missing command.
+declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
+declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
+
 # Ensure HOST_DATA_DIR and its logs and mysql dirs exist, the chart's hostPath root on native k3s.
 # Only chmod the container data subdirs; do not make HOST_DATA_DIR or files like values.yaml world-readable.
 _ensure_tracebloc_dirs() {
@@ -110,7 +115,10 @@ _augment_no_proxy() {
 # both set to the augmented list above. NOTHING when the host sets no HTTP(S)
 # proxy: a NO_PROXY alone proxies nothing. k3s.sh hands them to upstream's
 # install.sh, which writes them into k3s.service.env, and the macOS node runs with them.
-_node_proxy_env() {
+# _node_proxy_env runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__node_proxy_env below is the function itself.
+_node_proxy_env() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__node_proxy_env "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__node_proxy_env() {
   local var have_http="" no_proxy_val
   for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
     [[ -n "${!var:-}" ]] && have_http=1
@@ -543,7 +551,10 @@ _render_kubelet_config() {
 # When a proxy is configured, ensure THIS installer's own kubectl/helm/curl
 # bypass it for the cluster API (127.0.0.1) and the in-cluster ranges. Go
 # already auto-bypasses loopback, but exporting NO_PROXY also covers helm/curl.
-_export_host_no_proxy() {
+# _export_host_no_proxy runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__export_host_no_proxy below is the function itself.
+_export_host_no_proxy() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__export_host_no_proxy "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__export_host_no_proxy() {
   local var
   for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
     if [[ -n "${!var:-}" ]]; then
@@ -1008,12 +1019,20 @@ guard_leftover_data() {
       log "Wiped leftover data under ${where} (user choice)."
       ;;
     newdir)
-      local newdir=""
-      while _tty_usable && _read_sanitized "  New data directory (absolute or under \$HOME): " newdir \
-            && [[ -z "$newdir" ]]; do
-        tb_refused "A directory is required." "Use a directory under \$HOME, as an absolute path or relative to it."
+      # A directory validate_config would refuse is asked again under its ✖ line and
+      # what can be used (_tb_data_dir_check, its rule), with no cap: Ctrl-C stops. A
+      # failed read (EOF, no live input) can't be fixed by asking again, so it stops,
+      # naming the setting that gives the directory.
+      local newdir="" newdir_ok=""
+      while _tty_usable && _read_sanitized "  New data directory (absolute or under \$HOME): " newdir; do
+        if _tb_data_dir_check "$newdir"; then newdir_ok=1; break; fi
+        tb_refused "$(_tb_data_dir_said "$newdir")" "$_TB_DATA_DIR_RULE"
       done
-      [[ -n "$newdir" ]] || error "No new directory given — aborting."
+      if [[ -z "$newdir_ok" ]]; then
+        TB_EXIT_REFUSED=1
+        tb_fail_next "Set TRACEBLOC_HOST_DATA_DIR to a directory under \$HOME, then run the installer again:"
+        error_said "No new data directory was given" "No new data directory was given at the prompt (the read failed). Set TRACEBLOC_HOST_DATA_DIR to a directory under \$HOME, then run the installer again."
+      fi
       HOST_DATA_DIR="$newdir"
       # Re-resolve + re-validate the new path, then re-check it for leftovers too.
       if declare -F validate_config >/dev/null 2>&1; then validate_config; fi

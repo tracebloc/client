@@ -645,7 +645,7 @@ data:
           log "release '$RELEASE_NAME' has been stuck in '$STATUS' for ${AGE}s (>= threshold"
           log "${WEDGE_MIN_AGE_SECONDS}s): a previous 'helm upgrade' is presumed killed"
           log "mid-operation and ABANDONED. Rolling back to the last deployed revision"
-          log "(revision $TARGET_REV) so auto-upgrade can proceed (#554). This DISCARDS the values from the"
+          log "(revision $TARGET_REV) so auto-upgrade can proceed. This DISCARDS the values from the"
           log "interrupted upgrade${PENDING_REV:+ (revision $PENDING_REV)}. If that upgrade was intentional,"
           log "recover its values BEFORE the next tick re-applies chart defaults:"
           log "  helm history $RELEASE_NAME -n $RELEASE_NAMESPACE"

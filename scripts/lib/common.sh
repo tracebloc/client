@@ -960,6 +960,40 @@ assert_tool_runs() {
   error "$name was installed but won't run — a corrupt or wrong-architecture binary (this machine is ${ARCH:-$(uname -m)}). Re-run the installer to re-download it; if it recurs, remove ${rm_path:-the $name on your PATH} (and any package-manager copy) first."
 }
 
+# ── Secrets and bash -x ──────────────────────────────────────────────────────
+# Run under `bash -x` (the usual way to debug a run), every command and assignment
+# is traced to stderr, and setup_log_file tees stderr into the install log, which a
+# diagnose bundle carries. A secret held in a variable, passed as an argument or read
+# from a file would be traced with it. So the code that holds one runs with xtrace
+# held off, and puts the caller's xtrace back when it is done:
+#   * inline: `{ _tb_trace_off; } 2>/dev/null` ... `_tb_trace_on` (the braces keep the
+#     helper's own lines out of the trace). Holds nest; only the outermost restores.
+#   * a whole function: NAME is a one-line wrapper written beside it, in its own file
+#     (so BASH_SOURCE and BASH_LINENO, which error() and the ERR trap record, name
+#     that file), holding xtrace off around _tb_untraced_NAME, the function itself.
+#     The wrapper's own call is still traced, so a caller passing a secret in its
+#     arguments holds xtrace off itself. scripts/tests/common.bats checks each
+#     inline hold is released on its way out.
+# A secret-holding stretch that exits (error) leaves xtrace off, which hides more,
+# never less.
+_TB_TRACE_HOLD=0; _TB_TRACE_WAS=""
+_tb_trace_off() {
+  if [[ "${_TB_TRACE_HOLD:-0}" -le 0 ]]; then
+    _TB_TRACE_HOLD=0
+    case "$-" in *x*) _TB_TRACE_WAS=1 ;; *) _TB_TRACE_WAS="" ;; esac
+  fi
+  _TB_TRACE_HOLD=$(( ${_TB_TRACE_HOLD:-0} + 1 ))
+  set +x
+}
+_tb_trace_on() {
+  _TB_TRACE_HOLD=$(( ${_TB_TRACE_HOLD:-1} - 1 ))
+  if [[ "$_TB_TRACE_HOLD" -le 0 ]]; then
+    _TB_TRACE_HOLD=0
+    [[ -z "${_TB_TRACE_WAS:-}" ]] || set -x
+  fi
+  return 0
+}
+
 # _bounded SECONDS CMD… — run CMD with a deadline, so a wedged external call can't
 # hang a headless install (installer rule: every kubectl/helm/systemctl probe must be
 # bounded). Returns CMD's exit status, or 124 when the deadline fired. Output is
@@ -1094,7 +1128,7 @@ _bounded_capture() {
 # _bounded_root SECONDS CMD… — like _bounded, but for a command that runs as root.
 # `_bounded` execs `timeout`, a BINARY, which resolves `sudo` from PATH and so
 # bypasses the root-aware `sudo()` shadow below — and as root (the normal
-# `--prepare-host` path, where RFC 0001 often has no sudo binary at all)
+# `--prepare-host` path, where a least-privilege install often has no sudo binary at all)
 # `timeout sudo CMD` then fails to find sudo and the caller misreads a live daemon
 # as dead. So the bound goes INSIDE the executor: `tb_root timeout
 # SECS CMD` runs bare as root and through the real sudo otherwise, and under
@@ -1604,7 +1638,7 @@ spin_cmd_bounded() {
   fi
 }
 
-# ── Root-aware privileged execution (RFC 0001 A2) ────────────────────────────
+# ── Root-aware privileged execution ────────────────────────────
 #  The installer's privileged steps are written as `sudo <cmd>`. Two gaps that
 #  needlessly excluded real users — a shared-cluster researcher, a root
 #  container/VM:
@@ -2151,6 +2185,48 @@ tb_ignored_setting_reason() {
   esac
 }
 
+# _tb_data_dir_check DIR -- whether DIR can hold this machine's data: a directory under
+# $HOME, never $HOME itself, whose parent exists and that is no system path. Sets
+# _TB_DATA_DIR to DIR as far as it was resolved (a leading ~ and a $HOME-relative path
+# expanded, the parent's links followed) and, when DIR can't be used, _TB_DATA_DIR_WHY to
+# empty, parent, root, system, home or outside. validate_config's HOST_DATA_DIR rule and
+# the new-directory prompt (cluster.sh, guard_leftover_data) both read it.
+_tb_data_dir_check() {
+  local dir="${1:-}" parent
+  _TB_DATA_DIR="$dir"; _TB_DATA_DIR_WHY=""
+  # Fail closed on an empty value (e.g. --data-dir= with no path) — otherwise the
+  # $HOME-relative rewrite below resolves "" to a surprise dir like $HOME/$USER.
+  [[ -n "$dir" ]] || { _TB_DATA_DIR_WHY=empty; return 1; }
+  # Expand a leading ~ / ~/ and a $HOME-relative path (_tb_home_path): otherwise
+  # --data-dir=~/foo is read as the literal "$HOME/~/foo" and fails parent resolution.
+  dir="$(_tb_home_path "$dir")"; _TB_DATA_DIR="$dir"
+  # Resolve via parent directory — the target itself may not exist yet on first run
+  parent="$(cd -P "$(dirname "$dir")" 2>/dev/null && pwd)" || true
+  [[ -n "$parent" ]] || { _TB_DATA_DIR_WHY=parent; return 1; }
+  dir="$parent/$(basename "$dir")"; _TB_DATA_DIR="$dir"
+  [[ "$dir" != "/" ]] || { _TB_DATA_DIR_WHY=root; return 1; }
+  ! _tb_system_path "$dir" || { _TB_DATA_DIR_WHY=system; return 1; }
+  # Must be strictly UNDER $HOME — never $HOME itself. $HOME is reachable via a
+  # bare '~', HOST_DATA_DIR=$HOME, or --data-dir=$HOME; adopting it would make the
+  # installer chmod 777 home-level logs/mysql dirs, bind-mount all of $HOME into
+  # the cluster, and treat any existing ~/data or ~/mysql as install data.
+  [[ "$dir" != "$HOME" ]] || { _TB_DATA_DIR_WHY=home; return 1; }
+  [[ "${dir#$HOME/}" != "$dir" ]] || { _TB_DATA_DIR_WHY=outside; return 1; }
+}
+
+# _tb_data_dir_said DIR -- why _tb_data_dir_check refused DIR, as the ✖ line under a
+# typed directory says it. _TB_DATA_DIR_RULE is the line under it: what can be used.
+_TB_DATA_DIR_RULE='Use a directory under $HOME whose parent exists, as an absolute path or relative to $HOME.'
+_tb_data_dir_said() {
+  case "$_TB_DATA_DIR_WHY" in
+    empty)       printf 'A directory is required.' ;;
+    parent)      printf '"%s" can'"'"'t be used: its parent directory doesn'"'"'t exist.' "$1" ;;
+    root|system) printf '"%s" can'"'"'t be used: it is a system directory.' "$1" ;;
+    home)        printf '"%s" can'"'"'t be used: it is $HOME itself.' "$1" ;;
+    *)           printf '"%s" can'"'"'t be used: it isn'"'"'t under $HOME.' "$1" ;;
+  esac
+}
+
 validate_config() {
   [[ -n "${HOME:-}" ]]  || error "\$HOME is not set — cannot determine user home directory"
   [[ -n "${USER:-}" ]]  || USER="$(whoami)" || error "Cannot determine current user"
@@ -2167,31 +2243,19 @@ validate_config() {
   [[ "$TB_STORAGE_MODE" == "node-local" && -n "${HOST_DATASET_DIR:-}" ]] \
     && error "TRACEBLOC_HOST_DATASET_DIR is not supported with node-local storage (datasets would land on ephemeral in-node storage, not the export). Use hostpath mode (TRACEBLOC_STORAGE_MODE=hostpath) for network-mount datasets."
 
-  # HOST_DATA_DIR must be under $HOME and must not be a system path (security)
-  local dir="$HOST_DATA_DIR"
-  # Fail closed on an empty value (e.g. --data-dir= with no path) — otherwise the
-  # $HOME-relative rewrite below resolves "" to a surprise dir like $HOME/$USER.
-  [[ -n "$dir" ]] || error "HOST_DATA_DIR must not be empty (got '')."
-  # Expand a leading ~ / ~/ and a $HOME-relative path (_tb_home_path): otherwise
-  # --data-dir=~/foo is read as the literal "$HOME/~/foo" and fails parent resolution.
-  dir="$(_tb_home_path "$dir")"
-  # Resolve via parent directory — the target itself may not exist yet on first run
-  local parent
-  parent="$(cd -P "$(dirname "$dir")" 2>/dev/null && pwd)" || true
-  [[ -z "$parent" ]] && error "HOST_DATA_DIR parent directory could not be resolved: $(dirname "$dir")"
-  dir="$parent/$(basename "$dir")"
-  [[ "$dir" == "/" ]] && error "HOST_DATA_DIR cannot be root (/)"
-  _tb_system_path "$dir" && error "HOST_DATA_DIR cannot be a system path: $dir"
-  # Must be strictly UNDER $HOME — never $HOME itself. $HOME is reachable via a
-  # bare '~', HOST_DATA_DIR=$HOME, or --data-dir=$HOME; adopting it would make the
-  # installer chmod 777 home-level logs/mysql dirs, bind-mount all of $HOME into
-  # the cluster, and treat any existing ~/data or ~/mysql as install data
-  # .
-  [[ "$dir" == "$HOME" ]] && \
-    error "HOST_DATA_DIR must be a subdirectory of \$HOME, not \$HOME itself (got: $HOST_DATA_DIR)."
-  [[ "${dir#$HOME/}" == "$dir" ]] && \
-    error "HOST_DATA_DIR must be under \$HOME (got: $HOST_DATA_DIR)"
-  HOST_DATA_DIR="$dir"
+  # HOST_DATA_DIR must be under $HOME and must not be a system path (security):
+  # _tb_data_dir_check, the rule the new-directory prompt asks again by.
+  if ! _tb_data_dir_check "$HOST_DATA_DIR"; then
+    case "$_TB_DATA_DIR_WHY" in
+      empty)  error "HOST_DATA_DIR must not be empty (got '')." ;;
+      parent) error "HOST_DATA_DIR parent directory could not be resolved: $(dirname "$_TB_DATA_DIR")" ;;
+      root)   error "HOST_DATA_DIR cannot be root (/)" ;;
+      system) error "HOST_DATA_DIR cannot be a system path: $_TB_DATA_DIR" ;;
+      home)   error "HOST_DATA_DIR must be a subdirectory of \$HOME, not \$HOME itself (got: $HOST_DATA_DIR)." ;;
+      *)      error "HOST_DATA_DIR must be under \$HOME (got: $HOST_DATA_DIR)" ;;
+    esac
+  fi
+  HOST_DATA_DIR="$_TB_DATA_DIR"
   tb_export_host_data_dir
 
   # Optional dataset dir: unlike HOST_DATA_DIR it MAY live outside

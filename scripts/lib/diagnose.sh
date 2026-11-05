@@ -17,6 +17,11 @@
 #  Side-effect-safe to source (function definitions only).
 # =============================================================================
 
+# The xtrace hold (common.sh). A no-op with a common.sh from before it, so a mixed
+# set of libs runs, unheld, rather than stopping on a missing command.
+declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
+declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
+
 # Redact secrets from a file IN PLACE. Applied to every collected file before
 # archiving. `sed -i.bak` + `rm .bak` is portable across GNU and BSD/macOS sed.
 _redact_file() {
@@ -60,18 +65,31 @@ TB_DIAG_VALUES_KEEP="env.TRACEBLOC_ENV env.CLIENT_ENV
   narrowEdgeuserByEnv dropEdgeuserByEnv serviceDbAccountsByEnv ingestRunTokenByEnv
   bootstrapDbReparentByEnv rotateMysqlRootByEnv selfRotateMysqlRootByEnv"
 # A key named like a secret, as diagnose.bats reads one (case-insensitive, an awk ERE).
-TB_DIAG_SECRET_KEY_RE='pass(word|wd)?|secret|credential|api[_-]?key|private[_-]?key|token$|auth$'
+TB_DIAG_SECRET_KEY_RE='pass(word|wd)?|secret|credential|creds?$|api[_-]?key|private[_-]?key|key$|tokens?$|auth$'
+# Kept paths whose last key reads like a secret but holds a switch, not one: each is
+# null, true or false in client/values.yaml (diagnose.bats checks it), and only the
+# path itself is let through, nothing under it.
+TB_DIAG_SECRET_NAME_OK="perExperimentDbCreds"
 TB_DIAG_VALUE_HIDDEN="[not collected]"
 
 # _diag_values_view -- the Helm values YAML on STDIN as the bundle shows it: each line under
 # a TB_DIAG_VALUES_KEEP path as it is; any other key with its value replaced by
 # TB_DIAG_VALUE_HIDDEN, a list item the same, a multi-line value's further lines dropped;
 # comments and anything it cannot read as a key, a list item or a value's continuation
-# dropped. Reads to EOF.
+# dropped. Under a kept path the secret-name check still runs on every key: one inside a
+# list item (`- key: v` and its sibling lines), one inside a flow collection
+# (`k: {a: b}`, `- [..]`), whose whole value is then hidden, and one that a kept value's
+# further lines read as (any piece of the line, so a multi-line flow's `, k: v` too),
+# which hides that line and the lines under it. Reads to EOF.
 _diag_values_view() {
   # One line: BSD awk refuses a -v value that holds a newline.
-  awk -v keep="${TB_DIAG_VALUES_KEEP//$'\n'/ }" -v hid="$TB_DIAG_VALUE_HIDDEN" -v sre="$TB_DIAG_SECRET_KEY_RE" '
-    BEGIN { nk = split(keep, K, /[[:space:]]+/); depth = 0; cont = -1 }
+  awk -v keep="${TB_DIAG_VALUES_KEEP//$'\n'/ }" -v hid="$TB_DIAG_VALUE_HIDDEN" -v sre="$TB_DIAG_SECRET_KEY_RE" \
+      -v okp="$TB_DIAG_SECRET_NAME_OK" '
+    BEGIN {
+      nk = split(keep, K, /[[:space:]]+/); n = split(okp, T, /[[:space:]]+/)
+      for (i = 1; i <= n; i++) if (T[i] != "") OK[T[i]] = 1
+      depth = 0; cont = -1; chid = -1
+    }
     function kept(p,   i) {
       for (i = 1; i <= depth; i++) if (B[i]) return 0
       for (i = 1; i <= nk; i++) {
@@ -81,31 +99,62 @@ _diag_values_view() {
       return 0
     }
     function path(   i, p) { p = ""; for (i = 1; i <= depth; i++) p = p (p == "" ? "" : ".") N[i]; return p }
+    function iskey(s) { return s ~ /^("[^"]*"|'"'"'[^'"'"']*'"'"'|[A-Za-z0-9_.\/-]+)[[:space:]]*:([[:space:]]|$)/ }
+    function keyof(s) { sub(/[[:space:]]*:([[:space:]].*)?$/, "", s); gsub(/^["'"'"']|["'"'"']$/, "", s); return s }
+    function secret(k) { return tolower(k) ~ sre }
+    # Any piece of a line, split at flow punctuation, that reads as a secret-named key.
+    function anysecret(s,   n, i, P) {
+      gsub(/[][{}]/, ",", s)
+      n = split(s, P, ",")
+      for (i = 1; i <= n; i++) {
+        sub(/^[[:space:]]+/, "", P[i]); sub(/^(-[[:space:]]+)+/, "", P[i])
+        if (iskey(P[i]) && secret(keyof(P[i]))) return 1
+      }
+      return 0
+    }
+    # A flow collection holding a key named like a secret, at any depth.
+    function flowsecret(s) { return s ~ /^[[{}]/ && anysecret(s) }
     /^[[:space:]]*$/ { next }
     /^[[:space:]]*#/ { next }
     /^(---|\.\.\.)[[:space:]]*$/ { next }
     {
       match($0, /^ */); ind = RLENGTH; body = substr($0, ind + 1)
-      # A further line of the value above: shown only where that value is.
-      if (cont >= 0 && ind > cont) { if (contok) print; next }
-      cont = -1
+      # A further line of the value above: shown only where that value is, and even
+      # there a line that reads as a secret-named key hides with the lines under it.
+      if (cont >= 0 && ind > cont) {
+        if (!contok) next
+        if (chid >= 0 && ind > chid) next
+        chid = -1
+        b = body; sub(/^(-[[:space:]]+)+/, "", b); pre = substr($0, 1, length($0) - length(b))
+        if (iskey(b) && secret(keyof(b))) { print pre keyof(b) ": " hid; chid = ind; next }
+        if (anysecret(b)) { print pre hid; chid = ind; next }
+        print; next
+      }
+      cont = -1; chid = -1
       while (depth > 0 && I[depth] >= ind) depth--
       if (body ~ /^-([[:space:]]|$)/) {
         p = path()
-        if (kept(p)) { print; cont = ind; contok = 1 }
-        else { print substr($0, 1, ind) "- " hid; cont = ind; contok = 0 }
-        next
+        if (!kept(p)) { print substr($0, 1, ind) "- " hid; cont = ind; contok = 0; next }
+        # A kept list item: a mapping in it is read like any other, from its own column.
+        rest = body; sub(/^(-([[:space:]]+|$))+/, "", rest)
+        depth++; N[depth] = "-"; I[depth] = ind; B[depth] = 0
+        if (!iskey(rest)) {
+          if (flowsecret(rest)) { print substr($0, 1, ind) "- " hid; cont = ind; contok = 0 }
+          else { print; cont = ind; contok = 1 }
+          next
+        }
+        ind = length($0) - length(rest); body = rest
       }
-      if (body !~ /^("[^"]*"|'"'"'[^'"'"']*'"'"'|[A-Za-z0-9_.\/-]+)[[:space:]]*:([[:space:]]|$)/) next
-      key = body; sub(/[[:space:]]*:([[:space:]].*)?$/, "", key); gsub(/^["'"'"']|["'"'"']$/, "", key)
+      if (!iskey(body)) next
+      key = keyof(body)
       rest = body; sub(/^("[^"]*"|'"'"'[^'"'"']*'"'"'|[^:]+)[[:space:]]*:[[:space:]]*/, "", rest)
       depth++; N[depth] = key; I[depth] = ind
-      # Never kept: a key named like a secret, and a key holding a dot, which would
-      # otherwise read as the prefix of a kept path.
-      B[depth] = (tolower(key) ~ sre || index(key, ".") > 0)
       p = path()
+      # Never kept: a key named like a secret (unless the path is TB_DIAG_SECRET_NAME_OK),
+      # and a key holding a dot, which would otherwise read as the prefix of a kept path.
+      B[depth] = ((secret(key) && !(p in OK)) || index(key, ".") > 0)
       if (rest == "" || rest ~ /^#/) { print substr($0, 1, ind) key ":"; next }
-      if (kept(p)) { print; cont = ind; contok = 1; next }
+      if (kept(p) && !flowsecret(rest)) { print; cont = ind; contok = 1; next }
       print substr($0, 1, ind) key ": " hid; cont = ind; contok = 0
     }
   '
@@ -167,7 +216,7 @@ run_diagnose() {
   ctx="${ctx#\"}"; ctx="${ctx%\"}"; [[ "$ctx" != null ]] || ctx=""
   if [[ -n "$ctx" && -z "${TB_KUBE_CONTEXT_PIN:-}" ]] && declare -F _native_k3s_pin_context >/dev/null 2>&1; then
     _native_k3s_pin_context "$ctx" \
-      || { rm -rf "$outdir"; echo "  diagnose: cannot write the temporary file that names tracebloc's kube context" >&2; return 1; }
+      || { rm -rf "$outdir"; tb_scratch_reap; echo "  diagnose: cannot write the temporary file that names tracebloc's kube context" >&2; return 1; }
   fi
   ns="${TB_NAMESPACE:-}"
   if [[ -z "$ns" ]] && has kubectl; then
@@ -180,7 +229,7 @@ run_diagnose() {
   info "secure environment version: ${cver:-unknown}   (namespace: $ns)"
   info "Collecting diagnostics — this is safe; credentials are redacted before the file is written."
 
-  # RFC 0001 host audit — read-only capability/privilege probe + install tier.
+  # Host audit — read-only capability/privilege probe + install tier.
   # --diagnose installs nothing, so showing the detected tier here is honest and
   # useful for support. Guarded: a stale bootstrap may not have fetched probe.sh.
   # Sets PROBE_*/INSTALL_TIER, which the 00-host.txt section below records. The panel
@@ -217,9 +266,9 @@ run_diagnose() {
     # block the whole bundle on an unresponsive NFS/overlay mount. No marker
     # needed: the guard reads `set +e` and does not flag this region.
     df -h 2>/dev/null | head -20
-    # RFC 0001 install-tier readout (set by host_audit above; plain for the bundle).
+    # Install-tier readout (set by host_audit above; plain for the bundle).
     if declare -F run_host_probes >/dev/null 2>&1; then
-      echo; echo "## install tier (RFC 0001)"
+      echo; echo "## install tier"
       echo "INSTALL_TIER=${INSTALL_TIER:-?}  reason=${INSTALL_TIER_REASON:-?}"
       echo "privilege=${PROBE_PRIVILEGE:-?}"
     fi
@@ -310,6 +359,9 @@ run_diagnose() {
   fi
 
   # ── proxy / env ──
+  # A proxy URL may carry a password: written with bash -x held off (common.sh), so the
+  # trace does not show it; _redact_tree takes it out of the file below.
+  { _tb_trace_off; } 2>/dev/null
   {
     echo "## proxy environment"
     local v
@@ -317,6 +369,7 @@ run_diagnose() {
       echo "$v=${!v:-<unset>}"
     done
   } > "$d/05-proxy.txt" 2>&1
+  _tb_trace_on
 
   # ── REDACT every collected file, THEN archive ──
   _redact_tree "$d"

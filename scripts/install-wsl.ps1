@@ -3089,7 +3089,7 @@ function Get-ClientName {
   $name = (ConvertTo-SanitizedInput -Value "$env:TRACEBLOC_CLIENT_NAME").Trim()
   $why = $null
   if ($name) {
-    if (-not (Test-AllDigitName $name)) { return $name }
+    if (Test-NameHasLetter $name) { return $name }
     $why = "TRACEBLOC_CLIENT_NAME `"$name`" can't be used: a name needs at least one letter"
   }
   if (-not (Test-BootstrapCanPrompt)) { Stop-ClientNameUnasked -Why $why }
@@ -3110,7 +3110,7 @@ function Get-ClientName {
     $name = (ConvertTo-SanitizedInput -Value "$typed").Trim()
     if (-not $name) { $name = $default }
     if (-not $name) { $why = 'A name is required'; continue }
-    if (-not (Test-AllDigitName $name)) { return $name }
+    if (Test-NameHasLetter $name) { return $name }
     $why = "`"$name`" can't be used: a name needs at least one letter"
   }
 }
@@ -3133,7 +3133,7 @@ function Get-HostComputerName { [Environment]::MachineName }
 # one '-', none at either end, 63 at most); provision.sh's _client_name_default.
 function Get-DefaultClientName {
   $n = ConvertTo-ClientNameSlug "$(Get-HostComputerName)"
-  if ($n -and (Test-AllDigitName $n)) { $n = ConvertTo-ClientNameSlug "machine-$n" }
+  if ($n -and -not (Test-NameHasLetter $n)) { $n = ConvertTo-ClientNameSlug "machine-$n" }
   return $n
 }
 
@@ -3147,11 +3147,15 @@ function ConvertTo-ClientNameSlug {
   return $n
 }
 
-# True when the name's slug is only digits: its namespace would be a number, which the
-# chart's labels render unquoted and Kubernetes refuses. provision.sh's _name_all_digits.
-function Test-AllDigitName {
+# True when the name's slug has a letter, or the name is only signs outside ASCII, which
+# the slug drops and the CLI names itself. A slug with no letter is a number, which the
+# chart's labels render unquoted and Kubernetes refuses, or nothing the name said ("!!!",
+# "---"). An empty name has none. provision.sh's _name_has_letter.
+function Test-NameHasLetter {
   param([string]$Name)
-  return ((ConvertTo-ClientNameSlug $Name) -match '^[0-9]+$')
+  $s = ConvertTo-ClientNameSlug $Name
+  if ($s -cmatch '[a-z]') { return $true }
+  return ((-not $s) -and ($Name -match '[^\x00-\x7F]'))
 }
 
 # provision.sh's _machine_labels: TRACEBLOC_MACHINE_NAME / TRACEBLOC_CLIENT_PROVIDER,

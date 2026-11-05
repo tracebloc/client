@@ -2,7 +2,7 @@
 # =============================================================================
 #  probe.sh — least-privilege install: host CAPABILITY + PRIVILEGE detection.
 #
-#  RFC 0001 (least-privilege install). This module answers ONE question, read-
+#  Least-privilege install. This module answers ONE question, read-
 #  only and never-fatal: "what is the LOWEST-privilege tier that can install
 #  tracebloc on THIS host?" — so the installer can stop demanding sudo up front.
 #

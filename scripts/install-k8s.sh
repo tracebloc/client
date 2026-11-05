@@ -249,7 +249,9 @@ main() {
     # installs the same prerequisites, so it can be mid-download when it dies.
     # Its status takes tb_exit_rc's rule, inlined: like the
     # declare -F guard above it, this trap cannot assume the libs loaded.
-    trap '_tb_rc=$?; if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi; if declare -F tb_scratch_reap >/dev/null 2>&1; then tb_scratch_reap; fi; [ "$_tb_rc" -ne 0 ] || [ "${_tb_done:-0}" = 1 ] || _tb_rc=1; exit "$_tb_rc"' EXIT
+    # A refusal that set its way out (tb_fail_next) shows it through tb_end_of_run;
+    # a plain failure ends silent, as before.
+    trap '_tb_rc=$?; if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi; if declare -F tb_scratch_reap >/dev/null 2>&1; then tb_scratch_reap; fi; [ "$_tb_rc" -ne 0 ] || [ "${_tb_done:-0}" = 1 ] || _tb_rc=1; if [ "$_tb_rc" -ne 0 ] && [ -n "${TB_EXIT_REFUSED:-}" ] && [ -n "${_TB_FAIL_SET:-}" ] && declare -F tb_end_of_run >/dev/null 2>&1; then tb_end_of_run "$_tb_rc"; fi; exit "$_tb_rc"' EXIT
     setup_log_file
     # The leftover-data answers apply here too: prepare-host on native k3s refuses
     # --wipe-data and lists the named user's data with no wipe offered, and the

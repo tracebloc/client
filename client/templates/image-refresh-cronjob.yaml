@@ -1036,7 +1036,7 @@ data:
             continue
           fi
           if [ -n "$first_observed" ] && [ -z "$applied" ] && [ "$pin_ignored" != "1" ]; then
-            log "  digest unchanged and workload runs '${have}' on :${IMAGE_TAG}, but this is a fresh install (observed here, no digest ever applied) -- NOT rolling (#1008); it stays on :${IMAGE_TAG} (IfNotPresent-safe) until a genuine upstream digest change pins it."
+            log "  digest unchanged and workload runs '${have}' on :${IMAGE_TAG}, but this is a fresh install (observed here, no digest ever applied) -- NOT rolling; it stays on :${IMAGE_TAG} (IfNotPresent-safe) until a genuine upstream digest change pins it."
             continue
           fi
           if [ "$pin_ignored" = "1" ]; then

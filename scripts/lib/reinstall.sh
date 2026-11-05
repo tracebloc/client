@@ -18,7 +18,7 @@
 # _reinstall_k3d_said -- whether tracebloc's own data says this machine runs on k3d.
 # 0: it does; 1: it does not; 2: it cannot tell. TB_REINSTALL_SAID says what said
 # so, or what could not be read; for 2, TB_REINSTALL_REMEDY says how to make it
-# answer. For 0, TB_REINSTALL_RECORD is the record that said so (empty when the
+# answer, and TB_REINSTALL_NEXT says it to a person, naming the file to fix. For 0, TB_REINSTALL_RECORD is the record that said so (empty when the
 # kubeconfig did) and TB_REINSTALL_CTX the context k3d wrote for its cluster.
 # It reads files in this order, and the first that exists decides:
 #   1. the install record (tb_record_path): its substrate (_reinstall_record_says);
@@ -30,21 +30,24 @@
 # When none of them says so, Docker answers (_reinstall_k3d_live).
 _reinstall_k3d_said() {
   local rec dst text="" f ctx kc rc
-  TB_REINSTALL_SAID=""; TB_REINSTALL_REMEDY=""; TB_REINSTALL_RECORD=""; TB_REINSTALL_CTX=""; TB_REINSTALL_VIA_DOCKER=""
+  TB_REINSTALL_SAID=""; TB_REINSTALL_REMEDY=""; TB_REINSTALL_NEXT=""; TB_REINSTALL_RECORD=""; TB_REINSTALL_CTX=""; TB_REINSTALL_VIA_DOCKER=""
+  TB_REINSTALL_FOR=""
   rec="$(tb_record_path)"
   if [[ -e "$rec" ]]; then
     text="$(cat "$rec" 2>/dev/null)" || text=""
     # A record the clear left behind says the k3d it names is cleared, whatever a root copy says.
     [[ "$text" != *'"k3d_cleared"'* ]] || return 1
     _reinstall_record_says "the install record ${rec}" "$text" \
-      "Check it is the file this installer wrote, or move it aside, then re-run." "$rec"
+      "Check it is the file this installer wrote, or move it aside, then re-run." "$rec" \
+      "Move ${rec} aside, then run the installer again:"
     return
   fi
   if [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] && dst="$(_tb_record_root_copy_path)" \
       && _tb_record_root_access && _tb_record_root_run test -e "$dst" 2>/dev/null; then
     text="$(_tb_record_root_run cat "$dst" 2>/dev/null)" || text=""
     _reinstall_record_says "the install record's root copy ${dst}" "$text" \
-      "Check it is the file this installer wrote ('sudo cat ${dst}'), or move it aside, then re-run." "$dst"
+      "Check it is the file this installer wrote ('sudo cat ${dst}'), or move it aside, then re-run." "$dst" \
+      "Move ${dst} aside, then run the installer again:"
     return
   fi
   ctx="k3d-${CLUSTER_NAME:-}"
@@ -60,6 +63,7 @@ _reinstall_k3d_said() {
       1) ;;
       *) TB_REINSTALL_SAID="there is no install record, and your kubeconfig ${f} cannot be read"
          TB_REINSTALL_REMEDY="Make it readable for you, or point KUBECONFIG away from it, then re-run."
+         TB_REINSTALL_NEXT="Make ${f} readable for you, or point KUBECONFIG away from it.\nThen run the installer again:"
          return 2 ;;
     esac
   done
@@ -88,13 +92,14 @@ _reinstall_k3d_live() {
   has k3d || return 1
   TB_REINSTALL_SAID="k3d is installed here, and Docker did not answer whether it has the containers of the k3d cluster '${1}'"
   TB_REINSTALL_REMEDY="Start Docker and check that 'docker ps' works for you, then re-run."
+  TB_REINSTALL_NEXT="Start Docker, then run the installer again:"
   return 2
 }
 
-# _reinstall_record_says WHO TEXT REMEDY FILE -- _reinstall_k3d_said's answer for the
-# record WHO, the file FILE, whose text is TEXT: 0 when its substrate is k3d, 1 for
+# _reinstall_record_says WHO TEXT REMEDY FILE NEXT -- _reinstall_k3d_said's answer for
+# the record WHO, the file FILE, whose text is TEXT: 0 when its substrate is k3d, 1 for
 # any other substrate, 2 when it cannot tell (an empty TEXT is a record that could
-# not be read). A substrate the record names decides over its artefacts; a record
+# not be read), with REMEDY and NEXT as TB_REINSTALL_REMEDY and TB_REINSTALL_NEXT. A substrate the record names decides over its artefacts; a record
 # with no substrate field says k3d when it lists an artefact only k3d records
 # (_reinstall_k3d_artefact). The context is k3d's for the record's cluster, else
 # CLUSTER_NAME's.
@@ -107,7 +112,7 @@ _reinstall_record_says() {
     TB_REINSTALL_SAID="${1} names no substrate, but lists a ${kind} artefact, which only a k3d install records"
   else
     TB_REINSTALL_SAID="${1} exists, but its substrate cannot be read from it"
-    TB_REINSTALL_REMEDY="$3"
+    TB_REINSTALL_REMEDY="$3"; TB_REINSTALL_NEXT="$5"
     return 2
   fi
   name="$(_tb_record_prior cluster_name "$2")"; name="${name#\"}"; name="${name%\"}"
@@ -186,14 +191,16 @@ _reinstall_exists_as() {
 # as its owner is refused as cannot tell (_reinstall_unread_as).
 _reinstall_k3d_said_for() {
   local u="$1" h="$2" rec dst kc ctx text rc=0
-  TB_REINSTALL_SAID=""; TB_REINSTALL_REMEDY=""; TB_REINSTALL_RECORD=""; TB_REINSTALL_CTX=""
+  TB_REINSTALL_SAID=""; TB_REINSTALL_REMEDY=""; TB_REINSTALL_NEXT=""; TB_REINSTALL_RECORD=""; TB_REINSTALL_CTX=""
+  TB_REINSTALL_FOR="$u"
   rec="${h}${TB_RECORD_USER_PATH#\~}"
   _reinstall_exists_as "$u" "$rec" || rc=$?
   case "$rc" in
     0) text="$(tb_root_as "$u" cat "$rec" 2>/dev/null)" || text=""
        [[ "$text" != *'"k3d_cleared"'* ]] || return 1
        _reinstall_record_says "${u}'s install record ${rec}" "$text" \
-         "Check it is the file this installer wrote, or move it aside, then re-run prepare-host." "$rec"
+         "Check it is the file this installer wrote, or move it aside, then re-run prepare-host." "$rec" \
+         "Move ${rec} aside, then run prepare-host again."
        return ;;
     2) _reinstall_unread_as "$u" "${u}'s install record ${rec}"; return 2 ;;
   esac
@@ -202,7 +209,8 @@ _reinstall_k3d_said_for() {
   case "$rc" in
     0) text="$(tb_root_n cat "$dst" 2>/dev/null)" || text=""
        _reinstall_record_says "the install record's root copy ${dst}" "$text" \
-         "Check it is the file this installer wrote, or move it aside, then re-run prepare-host." "$dst"
+         "Check it is the file this installer wrote, or move it aside, then re-run prepare-host." "$dst" \
+         "Move ${dst} aside, then run prepare-host again."
        return ;;
     2) _reinstall_unread_as root "the install record's root copy ${dst}"; return 2 ;;
   esac
@@ -222,16 +230,23 @@ _reinstall_k3d_said_for() {
   esac
   TB_REINSTALL_SAID="${u} has no install record, and their kubeconfig ${kc} cannot be read"
   TB_REINSTALL_REMEDY="Make it readable for ${u}, then re-run prepare-host."
+  TB_REINSTALL_NEXT="Make ${kc} readable for ${u}, then run prepare-host again."
   return 2
 }
 
 # _reinstall_unread_as USER WHAT -- refuse as cannot tell: WHAT cannot be looked for
-# as USER. Its remedy names the sudo it needs, so it is said here, by error, and never
-# kept in a variable (prepare-host-root-guard.py).
+# as USER, for the user prepare-host prepares (TB_REINSTALL_FOR). Its remedy names the
+# sudo it needs, so it is said here and never kept in a variable
+# (prepare-host-root-guard.py).
 _reinstall_unread_as() {
-  [[ "$1" != root ]] \
-    || error "This run cannot tell whether this machine runs tracebloc on k3d, and native k3s is never set up beside it: ${2} cannot be read as root. Check that 'sudo true' works, then re-run prepare-host."
-  error "This run cannot tell whether this machine runs tracebloc on k3d, and native k3s is never set up beside it: ${2} cannot be read as ${1}. Check that 'sudo -u ${1} true' works, then re-run prepare-host."
+  local head="Can't tell whether ${TB_REINSTALL_FOR:-} runs an older tracebloc install on this machine"
+  _reinstall_log_open
+  if [[ "$1" == root ]]; then
+    tb_fail_next "Check that this works for you, then run prepare-host again:" "sudo true"
+    error_said "$head" "This run cannot tell whether this machine runs tracebloc on k3d, and native k3s is never set up beside it: ${2} cannot be read as root. Check that 'sudo true' works, then re-run prepare-host."
+  fi
+  tb_fail_next "Check that this works for you, then run prepare-host again:" "sudo -u ${1} true"
+  error_said "$head" "This run cannot tell whether this machine runs tracebloc on k3d, and native k3s is never set up beside it: ${2} cannot be read as ${1}. Check that 'sudo -u ${1} true' works, then re-run prepare-host."
 }
 
 # refuse_k3d_machine -- stop the run by name when tracebloc's own data says this
@@ -384,31 +399,48 @@ _reinstall_drop_context() {
 # refuse_k3d_machine over the administrator's own data.
 refuse_k3d_for_user() {
   local rc=0
+  # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
+  TB_EXIT_REFUSED=1
   _reinstall_k3d_said_for "$1" "$2" || rc=$?
   _reinstall_refuse "$rc"
 }
 
+# _reinstall_log_open -- the install log a k3d stop's end block names, which holds what
+# said k3d and what to delete: install-k8s.sh asks before setup_log_file, so the stop
+# opens it when no run has (prepare-host's has).
+_reinstall_log_open() {
+  [[ -n "${LOG_FILE:-}" ]] || LOG_FILE="$(_choose_log_file)"
+}
+
 # _reinstall_refuse RC -- the refusal for the answer RC of _reinstall_k3d_said or
 # _reinstall_k3d_said_for: 1 returns 0, 2 refuses as cannot tell, 0 refuses with the
-# way off k3d. The way off is the Windows refusal's (install-wsl.ps1,
-# Assert-NoRetiredInstall): 'tracebloc delete', then the record that said k3d and the
-# context's entries a delete can leave behind.
+# way off k3d. The person reads one ✖ line and, in the end block, what to do; what
+# said k3d and the files to delete after the delete go to the log. The way off is the
+# Windows refusal's (install-wsl.ps1, Assert-NoRetiredInstall): 'tracebloc delete',
+# then the record that said k3d and the context's entries a delete can leave behind.
+# prepare-host's refusal names the user it prepares (TB_REINSTALL_FOR), who deletes.
 _reinstall_refuse() {
-  local engine="native k3s"
+  local engine="native k3s" who="${TB_REINSTALL_FOR:-}"
   # A Mac names its one runtime, as tb_substrate_resolve's refusal there does; a build
   # whose map leaves a Mac no one runtime names the substrate this run resolved.
   if [[ "${OS:-$(uname -s 2>/dev/null)}" == "Darwin" ]]; then
     engine="$(_tb_substrate_fresh_here)" || engine="${TRACEBLOC_SUBSTRATE_RESOLVED:-}"
     engine+=" in Apple's container runtime"
   fi
+  local head="This machine runs an older tracebloc install" runs="this machine runs an older tracebloc install" whose="your"
+  [[ -z "$who" ]] || { runs="${who} runs an older tracebloc install on this machine"; head="$runs"; whose="${who}'s"; }
+  [[ "$1" == 1 ]] || _reinstall_log_open
   # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
   case "$1" in
     1) TB_EXIT_REFUSED=""; return 0 ;;
-    2) error "This run cannot tell whether this machine runs tracebloc on k3d, and ${engine} is never set up beside it: ${TB_REINSTALL_SAID}. ${TB_REINSTALL_REMEDY}" ;;
+    2) if [[ -n "$who" ]]; then tb_fail_next "${TB_REINSTALL_NEXT/run the installer again/run prepare-host again}" ""; else tb_fail_next "$TB_REINSTALL_NEXT"; fi
+       error_said "Can't tell whether ${runs}" \
+         "This run cannot tell whether this machine runs tracebloc on k3d, and ${engine} is never set up beside it: ${TB_REINSTALL_SAID}. ${TB_REINSTALL_REMEDY}" ;;
   esac
-  warn "This machine runs tracebloc on k3d: ${TB_REINSTALL_SAID}."
-  hint "This installer no longer sets up k3d, and it never sets up ${engine} beside it."
-  hint "Moving this machine to ${engine} is a reinstall: its secure environment and its data are deleted, its datasets must be ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc."
-  hint "To move it, delete that secure environment with 'tracebloc delete'. Then delete ${TB_REINSTALL_RECORD:+${TB_REINSTALL_RECORD} and }the ${TB_REINSTALL_CTX} entries from your kubeconfig if they are still there, and run this installer again."
-  error "Nothing was changed."
+  if [[ -n "$who" ]]; then
+    tb_fail_next "Deleting it keeps ${whose} use cases and models on tracebloc; its datasets must be ingested again.\nTo prepare this machine, delete it first as ${who}:" "tracebloc delete"
+  else
+    tb_fail_next "Deleting it keeps ${whose} use cases and models on tracebloc; its datasets must be ingested again.\nTo install, delete it first:" "tracebloc delete"
+  fi
+  error_said "$head" "This machine runs tracebloc on k3d: ${TB_REINSTALL_SAID}. This installer no longer sets up k3d, and it never sets up ${engine} beside it. Moving this machine to ${engine} is a reinstall: its secure environment and its data are deleted, its datasets must be ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc. To move it, delete that secure environment with 'tracebloc delete'. Then delete ${TB_REINSTALL_RECORD:+${TB_REINSTALL_RECORD} and }the ${TB_REINSTALL_CTX} entries from your kubeconfig if they are still there, and run this installer again. Nothing was changed."
 }

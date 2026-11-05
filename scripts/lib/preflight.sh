@@ -17,6 +17,11 @@
 #  This file is side-effect-safe to source (defaults + function defs only).
 # =============================================================================
 
+# The xtrace hold (common.sh). A no-op with a common.sh from before it, so a mixed
+# set of libs runs, unheld, rather than stopping on a missing command.
+declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
+declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
+
 # Thresholds (overridable via env — for unusual sites or tests).
 # RAM floors are derived from the real stack, not guessed: the always-on control
 # plane requests ~2.1 GiB, + k3s ~0.8 + the OS ~0.7 ≈ ~4.4 GiB just to stay
@@ -1388,7 +1393,10 @@ _pf_proxy_hostport() {
 # Echo the first explicit proxy from the environment as a bare host:port (creds
 # stripped), or empty when none is set. HTTPS takes precedence (that's the one that
 # matters for our all-HTTPS egress).
-_pf_env_proxy() {
+# _pf_env_proxy runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__pf_env_proxy below is the function itself.
+_pf_env_proxy() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__pf_env_proxy "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__pf_env_proxy() {
   local v val
   for v in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy; do
     val="${!v:-}"; [[ -n "$val" ]] && { _pf_proxy_hostport "$val"; return 0; }
@@ -1401,7 +1409,10 @@ _pf_env_proxy() {
 # authenticated proxy needs the credentials to answer the CONNECT, or it 407s and
 # the inspection probe silently returns 'unknown'. NEVER print/log this;
 # display always uses the credential-stripped _pf_env_proxy.
-_pf_env_proxy_raw() {
+# _pf_env_proxy_raw runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__pf_env_proxy_raw below is the function itself.
+_pf_env_proxy_raw() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__pf_env_proxy_raw "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__pf_env_proxy_raw() {
   local v val
   for v in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy; do
     val="${!v:-}"; [[ -n "$val" ]] && { printf '%s' "$val"; return 0; }
@@ -1448,7 +1459,10 @@ _pf_issuer_is_public() {
 # one is set); a non-public issuer means a corporate CA is re-signing TLS. Bounded
 # and non-hanging: needs openssl AND a timeout tool, else 'unknown' (we never run
 # an unbounded openssl s_client that a blackholed 443 could hang forever).
-_pf_detect_tls_inspection() {
+# _pf_detect_tls_inspection runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__pf_detect_tls_inspection below is the function itself.
+_pf_detect_tls_inspection() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__pf_detect_tls_inspection "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__pf_detect_tls_inspection() {
   has openssl || { echo "unknown"; return 0; }
   { has timeout || has gtimeout; } || { echo "unknown"; return 0; }
   local host="github.com" raw issuer creds user="" pass=""

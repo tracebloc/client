@@ -527,7 +527,7 @@ _persist_tools_on_path() {
   # a fresh shell already finds the tools, and we must not double-append.
   if [ -f "$rc" ] && grep -qF '.local/bin' "$rc" 2>/dev/null; then return 0; fi
   {
-    printf '\n# Added by tracebloc installer (RFC 0001 #1175): user-local tools\n'
+    printf '\n# Added by tracebloc installer: user-local tools\n'
     printf 'export PATH="%s/.local/bin:$PATH"\n' "$HOME"
   } >> "$rc" 2>/dev/null || return 0
   log "Added ${HOME}/.local/bin to your PATH in ${rc}: a new terminal (or 'source ${rc}') resolves kubectl and helm."
