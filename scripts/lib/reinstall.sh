@@ -149,13 +149,13 @@ _reinstall_context_in() {
   # customer-copy-no-ticket-refs.sh reads this body line by line.
   _TB_REINSTALL_CTX="$1" awk '
     BEGIN { want = ENVIRON["_TB_REINSTALL_CTX"]; q = sprintf("%c", 39); dq = sprintf("%c", 34); key = "^" dq "?name" dq "?[ \t]*:"; found = 0 }
-    /^[^ \t#-]/ { sec = $0; sub(/[ \t]*:.*/, "", sec); gsub(dq, "", sec); next }
+    /^[^ \t\r#-]/ { sec = $0; sub(/[ \t]*:.*/, "", sec); gsub(dq, "", sec); next }
     sec == "contexts" {
       l = $0
       sub(/^[ \t]*(-[ \t]+)?/, "", l)
       if (l !~ key) next
       sub(key "[ \t]*", "", l)
-      sub(/[ \t]+#.*$/, "", l); sub(/[ \t]+$/, "", l)
+      sub(/[ \t\r]+#.*$/, "", l); sub(/[ \t\r]+$/, "", l)
       f = substr(l, 1, 1)
       if ((f == dq || f == q) && length(l) >= 2 && substr(l, length(l), 1) == f) l = substr(l, 2, length(l) - 2)
       if (l == want) found = 1
@@ -266,9 +266,10 @@ _reinstall_k3d_unreachable() {
 # _reinstall_k3d_stamp -- the timestamp the moved-aside record's name carries.
 _reinstall_k3d_stamp() { date -u +%Y%m%dT%H%M%SZ; }
 
-# _reinstall_k3d_clear -- remove every k3d-* context from each kubeconfig file and
-# move the install record aside to <record>.k3d-<timestamp>, then say so in one line,
-# naming the cluster the record or the context named (TB_REINSTALL_CTX).
+# _reinstall_k3d_clear -- remove the retired install's context, k3d-<cluster>
+# (TB_REINSTALL_CTX), from each kubeconfig file and move the install record aside to
+# <record>.k3d-<timestamp>, then say so in two lines, naming that cluster. Every other
+# context, k3d's for another cluster too, is the user's and stays.
 # 0 when done; 1 when a file cannot be changed, which leaves the refusal to stand.
 # The cluster side is never touched. A root copy of the record is not ours to move, so
 # when one exists the user's record is rewritten with k3d_cleared, which _reinstall_k3d_said
@@ -286,7 +287,7 @@ _reinstall_k3d_clear() {
     tmp="$(mktemp "${f}.tb-XXXXXX" 2>/dev/null)" || { _reinstall_k3d_undo "$saved"; return 1; }
     bak="$(mktemp "${f}.tb-bak-XXXXXX" 2>/dev/null)" && cat "$f" >"$bak" 2>/dev/null || { rm -f "$tmp" "$bak"; _reinstall_k3d_undo "$saved"; return 1; }
     saved+="${bak}"$'\t'"${f}"$'\n'
-    if ! { _reinstall_drop_k3d_contexts <"$f" >"$tmp" 2>/dev/null && cat "$tmp" >"$f" 2>/dev/null; }; then rm -f "$tmp"; _reinstall_k3d_undo "$saved"; return 1; fi
+    if ! { _reinstall_drop_context "$TB_REINSTALL_CTX" <"$f" >"$tmp" 2>/dev/null && cat "$tmp" >"$f" 2>/dev/null; }; then rm -f "$tmp"; _reinstall_k3d_undo "$saved"; return 1; fi
     rm -f "$tmp"
   done
   IFS=$' \t\n'
@@ -296,9 +297,11 @@ _reinstall_k3d_clear() {
     if ! _reinstall_k3d_mark "$aside" "$rec" "$cluster"; then
       mv "$aside" "$rec" 2>/dev/null; _reinstall_k3d_undo "$saved"; return 1
     fi
-    info "Docker is not available on this machine, so its old k3d secure environment '${cluster}' is left as it is: this installer deleted the k3d-* contexts from your kubeconfig and moved ${rec} to ${aside}. It stays listed on tracebloc as Offline."
+    info "Docker isn't available, so the old secure environment '${cluster}' stays as it is. It shows as Offline on tracebloc."
+    info "Deleted its kubectl context ${TB_REINSTALL_CTX} and moved its install record to ${aside}."
   else
-    info "Docker is not available on this machine, so its old k3d secure environment '${cluster}' is left as it is: this installer deleted the k3d-* contexts from your kubeconfig. It stays listed on tracebloc as Offline."
+    info "Docker isn't available, so the old secure environment '${cluster}' stays as it is. It shows as Offline on tracebloc."
+    info "Deleted its kubectl context ${TB_REINSTALL_CTX}."
   fi
   _reinstall_k3d_drop_backups "$saved"
   return 0
@@ -332,17 +335,41 @@ _reinstall_k3d_drop_backups() {
   while IFS=$'\t' read -r b f; do [[ -z "$b" ]] || rm -f "$b"; done <<<"$1"
 }
 
-# _reinstall_drop_k3d_contexts -- the kubeconfig text on stdin, less each item under
-# contexts: named k3d-*, and a current-context that names one. Block layout only,
-# which is the one kubectl and k3d write.
-_reinstall_drop_k3d_contexts() {
-  awk '
+# _reinstall_drop_context CONTEXT -- the kubeconfig text on stdin, less the item
+# under contexts: named CONTEXT, and a current-context that names it. A name is read
+# as _reinstall_context_in reads it. An item starts at a dash in its list's column,
+# and its name is a key in the item's own column: a list nested in a context (its
+# extensions) neither ends it nor names it. Block layout only, which kubectl and k3d write.
+_reinstall_drop_context() {
+  # sprintf makes the quote characters, so no line holds an odd number of them:
+  # customer-copy-no-ticket-refs.sh reads this body line by line.
+  _TB_REINSTALL_CTX="$1" awk '
+    function unq(l,  f) {
+      sub(/[ \t\r]+#.*$/, "", l); sub(/[ \t\r]+$/, "", l)
+      f = substr(l, 1, 1)
+      if ((f == dq || f == q) && length(l) >= 2 && substr(l, length(l), 1) == f) l = substr(l, 2, length(l) - 2)
+      return l
+    }
+    function named(l) { if (l !~ key) return 0; sub(key "[ \t]*", "", l); return unq(l) == want }
     function flush() { if (n > 0 && !drop) for (i = 1; i <= n; i++) print buf[i]; n = 0; drop = 0 }
-    function nm(l,  q) { q = "[\\042\\047]?"; sub(/^[ \t]*(-[ \t]+)?/, "", l); if (l !~ ("^" q "name" q "[ \t]*:")) return ""; sub(("^" q "name" q "[ \t]*:[ \t]*" q), "", l); return l }
-    /^[^ \t#-]/ { flush(); sec = $0; sub(/[ \t]*:.*/, "", sec); if ($0 ~ /^current-context[ \t]*:[ \t]*[\042\047]?k3d-/) next; print; next }
+    BEGIN { want = ENVIRON["_TB_REINSTALL_CTX"]; q = sprintf("%c", 39); dq = sprintf("%c", 34); key = "^" dq "?name" dq "?[ \t]*:"; n = 0; drop = 0; col = -1 }
+    /^[^ \t\r#-]/ {
+      flush(); sec = $0; sub(/[ \t]*:.*/, "", sec); gsub(dq, "", sec); col = -1
+      if (sec == "current-context") { v = $0; sub(/^[^:]*:[ \t]*/, "", v); if (unq(v) == want) next }
+      print; next
+    }
     sec == "contexts" {
-      if ($0 ~ /^[ \t]*-[ \t]/ || $0 ~ /^[ \t]*-$/) { flush() }
-      v = nm($0); if (v ~ /^k3d-/) drop = 1
+      l0 = $0; sub(/\r$/, "", l0)
+      match(l0, /^[ \t]*/); lead = RLENGTH; rest = substr(l0, lead + 1)
+      if (rest ~ /^-([ \t]|$)/ && (col < 0 || lead == col)) {
+        flush(); col = lead
+        match(rest, /^-[ \t]*/); kcol = lead + RLENGTH; rest = substr(rest, RLENGTH + 1)
+        if (rest == "" || rest ~ /^#/) kcol = -1
+        else if (named(rest)) drop = 1
+      } else if (col >= 0 && rest != "" && rest !~ /^#/) {
+        if (kcol < 0) kcol = lead
+        if (lead == kcol && named(rest)) drop = 1
+      }
       buf[++n] = $0; next
     }
     { print }

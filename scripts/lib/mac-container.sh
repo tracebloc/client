@@ -271,7 +271,7 @@ _mac_ct_drop() {
 _mac_ct_ensure_runtime() {
   local dest why tmp pkg
   dest="$(_mac_ct_install_root)" || error "Apple container: cannot tell where to unpack the runtime (above)."
-  if [[ -e "$dest" ]]; then
+  if ! _mac_ct_pkg_due "$dest"; then
     if why="$(_mac_ct_check_marker "$dest")" && why="$(_mac_ct_check_binaries "$dest")"; then
       log "Apple container ${TRACEBLOC_APPLE_CONTAINER_VERSION}: reusing the checked runtime in ${dest}."
       tb_record_write apple-container "$TRACEBLOC_APPLE_CONTAINER_VERSION" "${dest%/*}"
@@ -290,6 +290,10 @@ _mac_ct_ensure_runtime() {
   tb_record_write apple-container "$TRACEBLOC_APPLE_CONTAINER_VERSION" "${dest%/*}"
   log "Apple container ${TRACEBLOC_APPLE_CONTAINER_VERSION}: unpacked and checked in ${dest}."
 }
+
+# _mac_ct_pkg_due DEST -- _mac_ct_ensure_runtime downloads the package: nothing is at
+# the install root DEST yet.
+_mac_ct_pkg_due() { [[ ! -e "$1" ]]; }
 
 # =============================================================================
 #  Part 2: the runtime started, on our kernel and the pinned init image.
@@ -402,8 +406,8 @@ _mac_ct_ensure_kernel() {
   TB_MAC_CT_KERNEL_FILE=""
   why="$(_mac_ct_check_pins)" || error "$why"
   dir="$(_mac_ct_kernel_dir)" || error "Apple container: cannot tell where to keep the kernel (above)."
-  file="${dir}/vmlinux-sha256-${want}"
-  if [[ -e "$file" ]]; then
+  file="$(_mac_ct_kernel_file "$dir")"
+  if ! _mac_ct_kernel_due "$file"; then
     _verify_sha256 "$want" "$file" \
       || error "Apple container: the kept kernel ${file} no longer hashes to its pinned sha256. This installer does not delete it: move it out of the way yourself, then re-run."
     TB_MAC_CT_KERNEL_FILE="$file"
@@ -415,7 +419,7 @@ _mac_ct_ensure_kernel() {
   mkdir -p "$dir" || error "Apple container: could not create ${dir}."
   tmp="$(mktemp -d "${dir}/.download.XXXXXX")" || error "Apple container: could not create a download folder in ${dir}."
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    -H "Authorization: Bearer ${token}" "https://ghcr.io/v2/${repo}/blobs/sha256:${want}" -o "${tmp}/vmlinux" \
+    -H "Authorization: Bearer ${token}" "$(_mac_ct_kernel_url)" -o "${tmp}/vmlinux" \
     || { rm -rf "$tmp"; error "Couldn't download the kernel for Apple container from ${image}. Check that this machine can reach ghcr.io and pkg-containers.githubusercontent.com, then re-run."; }
   # About 30 MB at 6.18.35; an error page or a truncated stream is far shorter.
   _assert_download_size "${tmp}/vmlinux" 10000000 "the kernel for Apple container" "$tmp" "ghcr.io / pkg-containers.githubusercontent.com"
@@ -424,6 +428,15 @@ _mac_ct_ensure_kernel() {
   mv "${tmp}/vmlinux" "$file" || { rm -rf "$tmp"; error "Apple container: could not move the checked kernel into ${file}."; }
   rm -rf "$tmp"
   TB_MAC_CT_KERNEL_FILE="$file"
+}
+
+# _mac_ct_kernel_file DIR -- where the pinned kernel is kept in DIR (_mac_ct_kernel_dir).
+_mac_ct_kernel_file() { printf '%s/vmlinux-sha256-%s' "$1" "${TRACEBLOC_MAC_KERNEL_SHA256:-}"; }
+# _mac_ct_kernel_due FILE -- _mac_ct_ensure_kernel downloads the kernel: no kept FILE.
+_mac_ct_kernel_due() { [[ ! -e "$1" ]]; }
+# _mac_ct_kernel_url -- the pinned kernel's blob on ghcr.io.
+_mac_ct_kernel_url() {
+  printf 'https://ghcr.io/v2/%s/blobs/sha256:%s' "${TRACEBLOC_MAC_KERNEL_IMAGE#ghcr.io/}" "${TRACEBLOC_MAC_KERNEL_SHA256:-}"
 }
 
 # _mac_ct_write_vminit_config ROOT -- the install root's config.toml names the init
@@ -456,13 +469,42 @@ _mac_ct_stop_system() {
   [[ "$state" == none ]] || { echo "Apple container: the container system did not stop (state: ${state})."; return 1; }
 }
 
-# _mac_ct_start_failed ROOT LOGS -- `system start` failed or was cut off. Apple's CLI
+# _mac_ct_refuse_stop CLI MESSAGE -- stop the run on a system of this installer's that is
+# still registered, or may be. Re-running changes nothing until the user stops it, so the
+# end block names the stop (as _mac_ct_refuse_foreign does), never "safe to re-run".
+# Never returns.
+_mac_ct_refuse_stop() {
+  # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
+  TB_EXIT_REFUSED=1
+  tb_fail_next "Stop it, then run the installer again:" "\"${1}\" system stop"
+  error "$2"
+}
+
+# _mac_ct_start_cause LOGS MARK -- one sentence, with its leading space, naming why `system start`
+# failed when the network plugin's own log says so; nothing otherwise. macOS 27.0's packet-filter
+# daemon exits with `no pf starter references held`, so vmnet never comes up and the start
+# never finishes. The log only appends, so MARK is its byte size before the start and only
+# what came after it counts; a log now smaller than MARK was replaced, so all of it counts.
+# The log line is the signal, never the OS version.
+_mac_ct_start_cause() {
+  local log="${1}/container-network-vmnet-default.log" mark="${2:-0}" size fresh
+  [[ -r "$log" ]] || return 0
+  size="$(wc -c <"$log" 2>/dev/null | tr -d ' ')" || return 0
+  [[ "$size" =~ ^[0-9]+$ && "$mark" =~ ^[0-9]+$ ]] || return 0
+  (( size >= mark )) || mark=0
+  fresh="$(tail -c +"$((mark + 1))" "$log" 2>/dev/null)" || return 0
+  [[ "$fresh" == *'no pf starter references held'* ]] || return 0
+  printf '%s' " Apple's network service did not start, a known problem on macOS 27.0. Update macOS to 27.0.1 or later, then run this installer again."
+}
+
+# _mac_ct_start_failed ROOT LOGS MARK -- `system start` failed or was cut off. Apple's CLI
 # registers the apiserver with launchd before it waits on --timeout, so a failure can
 # leave this installer's system registered, and the next run would find an `ours` it
 # cannot ask. Look, stop what is ours and left behind, and say what is true: "safe to
 # re-run" only when launchd shows nothing registered afterwards. Never returns.
 _mac_ct_start_failed() {
-  local root="$1" logs="$2" left running
+  local root="$1" logs="$2" mark="$3" left running cause
+  cause="$(_mac_ct_start_cause "$logs" "$mark")"
   left="$(_mac_ct_system_state 2>/dev/null)" || left=unknown
   if [[ "$left" == ours\ * ]]; then
     running="${left#ours }"
@@ -470,9 +512,9 @@ _mac_ct_start_failed() {
     left="$(_mac_ct_system_state 2>/dev/null)" || left=unknown
   fi
   case "$left" in
-    none) error "Apple container: the container system did not start (its logs are in ${logs}). Nothing it started is left running, so it's safe to re-run this installer." ;;
-    ours\ *) error "Apple container: the container system did not start (its logs are in ${logs}), and a system of this installer's is still registered. Stop it yourself (\"${running}/bin/container\" system stop), then re-run." ;;
-    *) error "Apple container: the container system did not start (its logs are in ${logs}), and this run cannot tell whether it left a system registered. Run \"${root}/bin/container\" system stop, then re-run this installer." ;;
+    none) error "Apple container: the container system did not start (its logs are in ${logs}). Nothing it started is left running, so it's safe to re-run this installer.${cause}" ;;
+    ours\ *) _mac_ct_refuse_stop "${running}/bin/container" "Apple container: the container system did not start (its logs are in ${logs}), and a system of this installer's is still registered. Stop it yourself (\"${running}/bin/container\" system stop), then re-run.${cause}" ;;
+    *) _mac_ct_refuse_stop "${root}/bin/container" "Apple container: the container system did not start (its logs are in ${logs}), and this run cannot tell whether it left a system registered. Run \"${root}/bin/container\" system stop, then re-run this installer.${cause}" ;;
   esac
 }
 
@@ -509,7 +551,7 @@ _mac_ct_refuse_foreign() {
 # pinned runtime with the pinned init image; restarts it when it runs another of this
 # installer's versions or another init image; refuses anyone else's.
 _mac_ct_start_system() {
-  local root app logs ref state running out why
+  local root app logs ref state running out why mark=0
   why="$(_mac_ct_check_pins)" || error "$why"
   root="$(_mac_ct_install_root)" && app="$(_mac_ct_app_root)" && logs="$(_mac_ct_log_root)" \
     || error "Apple container: cannot tell where the runtime lives (above)."
@@ -534,18 +576,21 @@ _mac_ct_start_system() {
   if [[ "$state" == ours\ * && "$state" != "ours ${root}" ]]; then
     running="${state#ours }"; running="${running%% (*}"
     _bounded 120 "${running}/bin/container" system stop </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
-      || error "Apple container: could not stop this installer's earlier container system, so the pinned one was not started. Stop it yourself (\"${running}/bin/container\" system stop), then re-run."
+      || _mac_ct_refuse_stop "${running}/bin/container" "Apple container: could not stop this installer's earlier container system, so the pinned one was not started. Stop it yourself (\"${running}/bin/container\" system stop), then re-run."
     # A stop that exits 0 is not a stop launchd agrees with: look again, and start only on none.
     state="$(_mac_ct_system_state)" \
-      || error "Apple container: this installer's earlier container system was told to stop, but this run cannot tell whether it did (above), so the pinned one was not started. Run \"${running}/bin/container\" system stop, then re-run."
+      || _mac_ct_refuse_stop "${running}/bin/container" "Apple container: this installer's earlier container system was told to stop, but this run cannot tell whether it did (above), so the pinned one was not started. Run \"${running}/bin/container\" system stop, then re-run."
     [[ "$state" == none ]] \
-      || error "Apple container: this installer's earlier container system was told to stop, but it is still registered, so the pinned one was not started. Stop it yourself (\"${running}/bin/container\" system stop), then re-run."
+      || _mac_ct_refuse_stop "${running}/bin/container" "Apple container: this installer's earlier container system was told to stop, but it is still registered, so the pinned one was not started. Stop it yourself (\"${running}/bin/container\" system stop), then re-run."
   fi
   if [[ "$state" == none ]]; then
     mkdir -p "$app" "$logs" || error "Apple container: could not create ${app} or ${logs}."
+    mark=0
+    [[ ! -r "${logs}/container-network-vmnet-default.log" ]] \
+      || mark="$(wc -c <"${logs}/container-network-vmnet-default.log" | tr -d ' ')"
     _bounded 330 "${root}/bin/container" system start --install-root "$root" --app-root "$app" --log-root "$logs" \
       --disable-kernel-install --timeout 300 </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
-      || _mac_ct_start_failed "$root" "$logs"
+      || _mac_ct_start_failed "$root" "$logs" "${mark:-0}"
   fi
   _bounded 120 "${root}/bin/container" system kernel set --force --arch arm64 --binary "$TB_MAC_CT_KERNEL_FILE" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
     || error "Apple container: the container system refused the pinned kernel ${TB_MAC_CT_KERNEL_FILE}."
@@ -1482,7 +1527,7 @@ _mac_ct_ensure_node() {
   mkdir -p "$dir" || error "Apple container: could not create ${dir}."
   cfgfile="${dir}/config.yaml"
   cidrs="$(_mac_ct_node_cidrs "$cfgfile")" || exit 1
-  node="$(_native_k3s_node_name "$cfgfile")" || exit 1
+  node="$(_native_k3s_node_name "$cfgfile")" || _native_k3s_node_name_stop "$?" "$cfgfile"
   cfg="$(_mac_ct_node_config "$node" "$cidrs")" || error "Apple container: could not render the node's k3s config (above)."
   # The node is k3s whatever this run resolved, so it gets darwin_k3s's reservation.
   kubelet="$(TRACEBLOC_SUBSTRATE_RESOLVED=k3s _render_kubelet_config)" || error "Apple container: could not render the node's kubelet drop-in."
@@ -1911,6 +1956,11 @@ _mac_ct_stop_run_node() {
 TB_MAC_CT_RUNNER_LABEL="io.tracebloc.runner"
 # The chart's ServiceAccount for the runner (tracebloc.appleGpuRunnerAccount).
 TB_MAC_CT_RUNNER_ACCOUNT="tracebloc-runner"
+# The ConfigMap the chart renders exactly when it sends GPU trainings to the runner
+# (client/templates/apple-gpu-bundle-configmap.yaml). Its name is fixed there, the
+# runner's contract constant, never the release's; mac-container-runner.bats reads it
+# back from the template.
+TB_MAC_CT_RUNNER_BUNDLE_CM="tracebloc-apple-gpu-bundle"
 TB_MAC_CT_RUNNER_TOKEN_S=31536000
 TB_MAC_CT_RUNNER_THROTTLE_S=30
 TRACEBLOC_MAC_CT_RUNNER_PROBE_S=30
@@ -1918,6 +1968,10 @@ TRACEBLOC_MAC_CT_RUNNER_PROBE_S=30
 # folder this Mac keeps (_mac_ct_runner_gpu_ready); the summary's Mode reads it. Cleared
 # where the lib is sourced, so a value in the environment decides nothing.
 TRACEBLOC_MAC_GPU_RUNNER_READY=""
+# 1 once _mac_ct_runner_gpu_ready finds the runner ready but the chart sending it no GPU
+# training (_mac_ct_runner_bundle_rendered); the summary's Training row reads it. Cleared
+# the same way.
+TRACEBLOC_MAC_GPU_TRAINING_OFF=""
 # This run's answer to "does the CLI carry the runner?", asked once (_mac_ct_runner_on).
 # Cleared where the lib is sourced, so a value in the environment decides nothing.
 TRACEBLOC_MAC_CT_RUNNER_ON=""
@@ -2079,15 +2133,46 @@ _mac_ct_runner_loaded() {
   esac
 }
 
+# _mac_ct_runner_bundle_rendered NS -- whether the release in NS sends GPU trainings to
+# the runner: `yes` when the chart rendered ConfigMap TB_MAC_CT_RUNNER_BUNDLE_CM there,
+# `no` when the API says it is not there, `unknown` for any other answer. The chart
+# renders it exactly where tracebloc.appleGpuBundle holds (a pinned macOS engine bundle,
+# the training pins, which only prod turns on by itself, and appleGpuRunner.gpuTraining;
+# client/templates/apple-gpu-bundle-configmap.yaml), the one gate jobs-manager's GPU
+# routing reads too, and it reflects every value the release keeps, overrides included.
+# It reads no Helm values, so none of their secrets.
+_mac_ct_runner_bundle_rendered() {
+  local ns="$1" out rc=0
+  [[ -n "$ns" ]] || { printf unknown; return 0; }
+  out="$(_bounded 30 kubectl --kubeconfig "$(_native_k3s_kubeconfig_target)" --context "$(_native_k3s_context)" \
+    -n "$ns" get configmap "$TB_MAC_CT_RUNNER_BUNDLE_CM" -o name --request-timeout=20s </dev/null 2>&1)" || rc=$?
+  if [[ "$rc" -eq 0 && "$out" == "configmap/${TB_MAC_CT_RUNNER_BUNDLE_CM}" ]]; then printf yes; return 0; fi
+  if [[ "$rc" -ne 0 && "$out" == *NotFound* ]]; then printf no; return 0; fi
+  log "The tracebloc runner: whether ConfigMap ${ns}/${TB_MAC_CT_RUNNER_BUNDLE_CM} exists cannot be told (kubectl exit ${rc}): ${out%%$'\n'*}"
+  printf unknown
+}
+
 # _mac_ct_runner_gpu_ready -- sets TRACEBLOC_MAC_GPU_RUNNER_READY=1, and says so, when this
-# run keeps a job-data folder on this Mac and it is there: the runner refuses the GPU
-# without it.
+# run keeps a job-data folder on this Mac and it is there (the runner refuses the GPU
+# without it), and the release sends GPU trainings to the runner
+# (_mac_ct_runner_bundle_rendered). Where it sends none (GPU training off in the chart,
+# or no pinned macOS engine bundle, as on a dev or stg install) it says nothing and sets
+# TRACEBLOC_MAC_GPU_TRAINING_OFF=1 instead: every training on this Mac runs on the CPU.
+# An answer it cannot read sets neither.
 _mac_ct_runner_gpu_ready() {
   local jd
   jd="$(_mac_ct_job_data_dir)"
   [[ -n "$jd" && -d "$jd" ]] || return 0
-  TRACEBLOC_MAC_GPU_RUNNER_READY=1
-  success "GPU training set up"
+  case "$(_mac_ct_runner_bundle_rendered "${TB_NAMESPACE:-}")" in
+    yes)
+      TRACEBLOC_MAC_GPU_RUNNER_READY=1
+      success "GPU training set up" ;;
+    no)
+      TRACEBLOC_MAC_GPU_TRAINING_OFF=1
+      log "The tracebloc runner: the chart sends it no GPU training (no ConfigMap ${TB_MAC_CT_RUNNER_BUNDLE_CM}: appleGpuRunner.gpuTraining is off, or this environment pins no macOS engine bundle), so trainings on this Mac run on the CPU." ;;
+    *)
+      log "The tracebloc runner: whether the chart sends it GPU trainings cannot be told, so the summary does not name the Apple GPU." ;;
+  esac
 }
 
 # _mac_ct_ensure_runner -- the runner's login item, when this run sets up the runner
@@ -2101,7 +2186,7 @@ _mac_ct_ensure_runner() {
   local ns="${TB_NAMESPACE:-}" bin="${TRACEBLOC_CLI_BIN:-}" home dir plist runner_log kcfg want have="" loaded=0 why
   local bundles listed=0 bad
   local cpu="GPU training falls back to the CPU. It's safe to re-run this installer."
-  TRACEBLOC_MAC_GPU_RUNNER_READY=""
+  TRACEBLOC_MAC_GPU_RUNNER_READY=""; TRACEBLOC_MAC_GPU_TRAINING_OFF=""
   if ! _mac_ct_runner_on; then
     [[ "${OS:-}" != "Darwin" ]] || log "The tracebloc runner: $(_mac_ct_runner_off_why), so no runner login item."
     # On the macOS node this run sets out to train on the GPU (detect_gpu logs it), so a
@@ -2206,6 +2291,7 @@ _mac_ct_install_macos() {
   # shellcheck disable=SC2034  # consumed cross-file by setup-linux.sh's _fetch_* (the download's OS)
   OS_DL=darwin
   _set_tools_target
+  _mac_ct_expect_downloads "$kver"
   saved_umask="$(umask)"
   umask 022
   install_kubectl "$kver"
@@ -2216,6 +2302,29 @@ _mac_ct_install_macos() {
   _mac_ct_ensure_runtime
   _mac_ct_start_system
   tb_live_done "System tools ready"
+}
+
+# _mac_ct_expect_downloads KVER -- on a terminal, tell step b's live line what it will
+# download before the first byte (tb_live_expect), so it shows the share that arrived:
+# kubectl KVER, Helm, Apple's container package and the kernel, each only where the
+# step fetches it, by the same test the step asks. The kernel's size is asked with a
+# pull token of its own; with none, its size is unknown and the line shows the bytes.
+_mac_ct_expect_downloads() {
+  local dest file token=""
+  tb_live_watching || return 0
+  _kubectl_expect "$1"
+  _helm_expect
+  if dest="$(_mac_ct_install_root 2>/dev/null)" && _mac_ct_pkg_due "$dest"; then
+    tb_live_expect "$(_mac_ct_pkg_url)"
+  fi
+  if file="$(_mac_ct_kernel_dir 2>/dev/null)" && file="$(_mac_ct_kernel_file "$file")" && _mac_ct_kernel_due "$file"; then
+    if token="$(_mac_ct_registry_token "${TRACEBLOC_MAC_KERNEL_IMAGE#ghcr.io/}" 2>/dev/null)"; then
+      tb_live_expect "$(_mac_ct_kernel_url)" -H "Authorization: Bearer ${token}"
+    else
+      tb_live_expect ""
+    fi
+  fi
+  return 0
 }
 
 # _mac_ct_create_cluster -- step c on the macOS node: the k3s node in Apple's VM, Ready,
@@ -2255,7 +2364,7 @@ _mac_ct_create_cluster() {
 # ── The Local Network prompt (option a) ──────────────────────────
 #  The node's API reaches this Mac through Apple's container-runtime-linux helper, which
 #  forwards 127.0.0.1:6443 into the VM. It is a launchd agent, so macOS's Local Network
-#  privacy gates it (TN3179). Until the user allows "container-runtime-linux" in
+#  privacy gates it (TN3179). Until the user allows it (TB_MAC_CT_LAN_DIALOG) in
 #  System Settings › Privacy & Security › Local Network, every connection to the port is
 #  accepted and then reset (curl exit 35, or 56 once a TLS session was open), while the
 #  API answers inside the node. Measured on the e2e Mac: a grant turned 31 resets into
@@ -2271,6 +2380,8 @@ _mac_ct_create_cluster() {
 #  chart has installed jobs-manager.
 
 TB_MAC_CT_LAN_HELPER="container-runtime-linux"
+# macOS's dialog truncates the process name to this; the prompt and the refusal quote it.
+TB_MAC_CT_LAN_DIALOG="container-runti…"
 TB_MAC_CT_LAN_SETTINGS="System Settings › Privacy & Security › Local Network"
 # How long the first call waits for the user to answer the prompt.
 TB_MAC_CT_LAN_WAIT_S=120
@@ -2311,11 +2422,11 @@ _mac_ct_local_network_gate() {
   local dir kc body="" rc t0
   dir="$(_mac_ct_node_dir)" || error "Apple container: cannot tell where the node's kubeconfig is (above)."
   kc="${dir}/k3s.yaml"
-  # The helper by the name macOS's dialog gives it, so nobody denies a name they don't know.
-  info_note "macOS may ask whether \"${TB_MAC_CT_LAN_HELPER}\" can find" \
-    "devices on your local network. Select Allow to continue."
+  # The helper by the name macOS's dialog shows, so nobody denies a name they don't know.
+  info_note "macOS may ask whether \"${TB_MAC_CT_LAN_DIALOG}\" can find devices on your" \
+    "local network. It is Apple's ${TB_MAC_CT_LAN_HELPER}. Select Allow to continue."
   echo ""
-  log "Local Network: macOS may ask whether \"${TB_MAC_CT_LAN_HELPER}\" can find devices on your local network. It is part of Apple's container runtime: it makes the cluster's API reachable from this Mac only, on 127.0.0.1:${TB_MAC_CT_NODE_API_PORT}${TRACEBLOC_MAC_CT_LOCAL_API:+, and the local API the dashboard asks, on 127.0.0.1:${TRACEBLOC_MAC_CT_LOCAL_API%% *}}. This waits up to $(( TB_MAC_CT_LAN_WAIT_S / 60 )) minutes for the answer."
+  log "Local Network: macOS may ask whether \"${TB_MAC_CT_LAN_DIALOG}\" can find devices on your local network. It is Apple's ${TB_MAC_CT_LAN_HELPER}, part of Apple's container runtime: it makes the cluster's API reachable from this Mac only, on 127.0.0.1:${TB_MAC_CT_NODE_API_PORT}${TRACEBLOC_MAC_CT_LOCAL_API:+, and the local API the dashboard asks, on 127.0.0.1:${TRACEBLOC_MAC_CT_LOCAL_API%% *}}. This waits up to $(( TB_MAC_CT_LAN_WAIT_S / 60 )) minutes for the answer."
   tb_live_quiet "Waiting for local network permission..."
   t0=$SECONDS
   while :; do
@@ -2336,7 +2447,7 @@ _mac_ct_local_network_gate() {
       # A refusal: nothing changes until the user allows it, so no "try again" footer.
       # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
       TB_EXIT_REFUSED=1
-      error "This Mac blocks the cluster's API: Local Network access is not allowed for \"${TB_MAC_CT_LAN_HELPER}\", the part of Apple's container runtime that makes the API reachable from this Mac. Allow it in ${TB_MAC_CT_LAN_SETTINGS}, then re-run this installer. Your secure environment keeps its data." ;;
+      error "This Mac blocks the cluster's API: Local Network access is not allowed for \"${TB_MAC_CT_LAN_DIALOG}\" (Apple's ${TB_MAC_CT_LAN_HELPER}), the part of Apple's container runtime that makes the API reachable from this Mac. Allow it in ${TB_MAC_CT_LAN_SETTINGS}, then re-run this installer. Your secure environment keeps its data." ;;
     *)
       error "The node is Ready, but its API on 127.0.0.1:6443 did not answer from this Mac within ${TB_MAC_CT_LAN_WAIT_S}s (the last try exited ${rc}${body:+ and said: ${body}}). It's safe to re-run this installer." ;;
   esac

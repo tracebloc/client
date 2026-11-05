@@ -79,7 +79,7 @@ verify_gpu() {
     sleep 5
   done
   if [[ "$_gpu_read" -eq 1 ]]; then
-    warn "The node advertises no GPU (${_gpu_res}: ${_gpu_count}) — GPU jobs will wait until it does."
+    warn "The node advertises no GPU (${_gpu_res}: ${_gpu_count}) — GPU trainings will wait until it does."
     if [[ "$GPU_VENDOR" == "nvidia" ]]; then
       hint "Enable persistence mode from boot (nvidia-persistenced, or 'sudo nvidia-smi -pm 1' before the cluster starts), reboot, and re-run the installer — or update to NVIDIA driver ${TB_NVIDIA_DRIVER_FLOOR} or later."
     else

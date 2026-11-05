@@ -745,13 +745,15 @@ _leftover_where() {
 # / CSI escape garbage (arrow keys, pastes survive `read -r`) and trimming
 # surrounding whitespace — so a paste or a spaces-then-Enter can't smuggle
 # control bytes into HOST_DATA_DIR or slip past a non-empty check. Mirrors the
-# provision.sh client-name handling (_strip_paste_garbage + trim).
+# provision.sh client-name handling (_strip_paste_garbage + trim). Returns 1 on a
+# failed read (EOF, no live input), with the variable empty: asking again can't help.
 _read_sanitized() {
-  local __prompt="$1" __var="$2" __in=""
-  read -r -p "$__prompt" __in <"$TRACEBLOC_TTY" || __in=""
+  local __prompt="$1" __var="$2" __in="" __rc=0
+  read -r -p "$__prompt" __in <"$TRACEBLOC_TTY" || { __in=""; __rc=1; }
   __in="$(_strip_paste_garbage "$__in")"
   __in="${__in#"${__in%%[![:space:]]*}"}"; __in="${__in%"${__in##*[![:space:]]}"}"
   printf -v "$__var" '%s' "$__in"
+  return "$__rc"
 }
 
 # Delete the detected leftover data dirs. Only ever removes paths UNDER the
@@ -923,21 +925,25 @@ guard_leftover_data() {
       [[ -z "$wipe" ]] || hint "  [w] wipe  — delete it and start fresh"
       [[ -n "$frozen" ]] || hint "  [n] new   — install into a different directory"
       hint "  [a] abort — stop and sort it out myself (default)"
-      local reply="" keys="r"
+      local reply="" keys="r" choice
       [[ -z "$wipe" ]] || keys="${keys}/w"
       [[ -n "$frozen" ]] || keys="${keys}/n"
-      _read_sanitized "  Choice [${keys}/a]: " reply
-      # Accept the word we SHOW: node-local relabels [r] to "keep", so r/reuse AND
-      # k/keep must both map to the reuse action or a user typing the shown "keep"
-      # would fall through to abort (Bugbot). Lowercase via tr (bash 3.2-safe — no
-      # ${x,,}) so any casing works.
-      local choice; choice=$(printf '%s' "$reply" | tr '[:upper:]' '[:lower:]')
-      case "$choice" in
-        r|reuse|k|keep) action=reuse ;;
-        w|wipe)         if [[ -n "$wipe" ]]; then action=wipe; else action=abort; fi ;;
-        n|new)          if [[ -n "$frozen" ]]; then action=abort; else action=newdir; fi ;;
-        *)              action=abort ;;
-      esac
+      # An answer that is none of the choices shown is asked again; Enter, and a
+      # failed read (EOF), take the default.
+      while [[ -z "$action" ]]; do
+        _read_sanitized "  Choice [${keys}/a]: " reply || reply=""
+        # Accept the word we SHOW: node-local relabels [r] to "keep", so r/reuse AND
+        # k/keep must both map to the reuse action. Lowercase via tr (bash 3.2-safe —
+        # no ${x,,}) so any casing works.
+        choice=$(printf '%s' "$reply" | tr '[:upper:]' '[:lower:]')
+        case "$choice" in
+          r|reuse|k|keep) action=reuse ;;
+          w|wipe)         [[ -z "$wipe" ]] || action=wipe ;;
+          n|new)          [[ -n "$frozen" ]] || action=newdir ;;
+          ""|a|abort)     action=abort ;;
+        esac
+        [[ -n "$action" ]] || tb_choice_refused "$reply" "${keys}/a" a
+      done
     else
       # Non-interactive with no explicit choice → fail safe. Describe --reuse-data
       # honestly per storage mode: under node-local it keeps the data on disk but
@@ -1003,7 +1009,10 @@ guard_leftover_data() {
       ;;
     newdir)
       local newdir=""
-      _tty_usable && _read_sanitized "  New data directory (absolute or under \$HOME): " newdir
+      while _tty_usable && _read_sanitized "  New data directory (absolute or under \$HOME): " newdir \
+            && [[ -z "$newdir" ]]; do
+        tb_refused "A directory is required." "Use a directory under \$HOME, as an absolute path or relative to it."
+      done
       [[ -n "$newdir" ]] || error "No new directory given — aborting."
       HOST_DATA_DIR="$newdir"
       # Re-resolve + re-validate the new path, then re-check it for leftovers too.

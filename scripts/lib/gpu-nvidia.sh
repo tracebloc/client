@@ -124,6 +124,24 @@ _nvidia_ubuntu_drivers_install() {
   tb_root ubuntu-drivers install "nvidia:${1}"
 }
 
+# _nvidia_reboot_asked -- asks whether to reboot now: true for y or yes. Enter, n or
+# no, no terminal (unattended, as TRACEBLOC_SKIP_REBOOT_PROMPT) and a failed read are
+# no; any other answer is asked again. It reads the terminal, never stdin: under
+# `curl … | bash` stdin is the (EOF) install pipe, and a bare `read` there would fail
+# under `set -e` right after a successful driver install.
+_nvidia_reboot_asked() {
+  local _choice="" _tty="${TRACEBLOC_TTY:-/dev/tty}"
+  [[ -r "$_tty" ]] || return 1
+  while read -r -p "  Reboot now? [y/N]: " _choice <"$_tty"; do
+    case "$(printf '%s' "$_choice" | tr '[:upper:]' '[:lower:]')" in
+      y|yes)   return 0 ;;
+      ""|n|no) return 1 ;;
+    esac
+    tb_choice_refused "$_choice" y/n n
+  done
+  return 1
+}
+
 # install_nvidia_drivers -- returns 0 when the driver is loaded or went in (then the
 # reboot flow), 1 when it did not (_nvidia_driver_not_installed). Its caller runs it as
 # an `if` condition, where `set -e` is off, so every install below is checked by hand.
@@ -267,14 +285,7 @@ install_nvidia_drivers() {
     if declare -F telemetry_rerun_handoff >/dev/null 2>&1; then telemetry_rerun_handoff; fi
     exit 2
   fi
-  # Read the terminal directly: the main install path is `curl … | bash`, where
-  # this shell's stdin is the (EOF) install pipe — a bare `read` there returns
-  # non-zero and, with `set -e` active in this code path, would ABORT the whole
-  # installer right after a successful driver install. No tty (unattended) => treat
-  # as "no reboot" (same as TRACEBLOC_SKIP_REBOOT_PROMPT).
-  local _choice=""
-  if [[ -r /dev/tty ]]; then read -r -p "  Reboot now? [y/N]: " _choice </dev/tty || _choice=""; fi
-  [[ "$_choice" =~ ^[Yy]$ ]] && tb_root reboot
+  if _nvidia_reboot_asked; then tb_root reboot; fi
   warn "Skipping reboot. GPU may not be available until you restart."
 }
 

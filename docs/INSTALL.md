@@ -61,6 +61,8 @@ The chart follows the **`global.imageRegistry`** convention: set it once and **e
 
 **Re-homing one third-party image under a different path.** The helper images (`alpine/*`, `busybox`, the ROCm device plugin), the log Collector and the egress gateway are pinned by digest, and a digest is applied only to the `repository:tag` it was resolved for. Overriding `<site>.repository` or `<site>.tag` therefore renders your `repository:tag` and NOTES warns that the chart pin was not applied; set your own `<site>.digest` to pin it. If your mirror serves the *same* bytes under another path (a proxy cache), keep the chart pin by declaring its new identity: `<site>.digestFor: "<your repository>:<tag>"` (see `client/MIGRATION.md`, 1.9.146).
 
+**A mirrored chart repository and the hourly auto-upgrade.** Each auto-upgrade tick installs a chart only after checking it against the Sigstore bundle its release attaches beside it (`<chart url>.bundle`), with the cosign image `list-images.sh` lists. So a chart repository you mirror (`autoUpgrade.repoUrl`) must serve each chart's bundle beside the chart, and your image mirror must carry that cosign image. A tick that finds no bundle, or a chart that does not verify, upgrades nothing and logs *This release isn't signed by tracebloc, so nothing was changed*.
+
 **1. A private/mirror registry your site *can* reach.**
 
 First mirror the images into it. List exactly what to copy (tags/digests stay authoritative across chart versions) with:

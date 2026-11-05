@@ -285,7 +285,7 @@ install_tracebloc_cli() {
   fi
 
   local installer
-  installer="$(mktemp)" || { warn "Couldn't install the tracebloc CLI (no temp dir) — your client is set up fine."; return 0; }
+  installer="$(mktemp)" || { warn "Couldn't install the tracebloc CLI (no temp dir) — your secure environment is set up fine."; return 0; }
 
   # 1) Download the released installer. A failure here is a download problem,
   #    distinct from an install problem below.
@@ -294,7 +294,7 @@ install_tracebloc_cli() {
   # later" failure below instead of hanging the CLI-install step (this call isn't
   # retry-wrapped, and a hang is not a failure the graceful fallback would catch).
   if ! curl_secure -fsSL --max-time 120 "$TRACEBLOC_CLI_INSTALL_URL" -o "$installer" 2>>"${LOG_FILE:-/dev/null}"; then
-    warn "Couldn't download the tracebloc CLI installer — your client is set up fine."
+    warn "Couldn't download the tracebloc CLI installer — your secure environment is set up fine."
     hint "Install it later:  curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh"
     rm -f "$installer"
     return 0
@@ -342,7 +342,7 @@ install_tracebloc_cli() {
     # (or a shell-correct PATH fix). Non-fatal — always returns 0.
     _verify_tracebloc_cli
   else
-    warn "Couldn't install the tracebloc CLI automatically — your client is set up fine."
+    warn "Couldn't install the tracebloc CLI automatically — your secure environment is set up fine."
     hint "Install it later:  curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh"
   fi
 

@@ -34,11 +34,103 @@
 #Requires -Version 5.1
 param([string]$CoreDir)
 
-# Byte-identical to install.ps1's helpers; a Pester test holds them so.
-function Info($m) { Write-Host "  " -NoNewline; Write-Host ([char]0x00B7) -ForegroundColor DarkGray -NoNewline; Write-Host " $m" -ForegroundColor DarkGray }
-function Ok($m)   { Write-Host "  " -NoNewline; Write-Host ([char]0x2714) -ForegroundColor Green    -NoNewline; Write-Host " $m" }
-function Warn($m) { Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow   -NoNewline; Write-Host "  $m" -ForegroundColor Yellow }
-function Err($m)  { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red      -NoNewline; Write-Host " $m" -ForegroundColor Red }
+# ── The output helpers: the same lines in install.ps1 and install-wsl.ps1 (a Pester
+#    test holds the two copies to each other). Glyphs are [char] codes: Windows
+#    PowerShell 5.1 reads a file without a byte-order mark as Latin-1. ──
+$Dot = [string][char]0x00B7
+$InstallCommand = 'irm https://tracebloc.io/i.ps1 | iex'
+# The run's log, which install.ps1 creates (New-HostLog) and its child inherits.
+$script:LOG_FILE = $env:TRACEBLOC_HOST_LOG
+$script:LiveLine = ''
+# A person's console, not a pipe or a file; and one that animates, with colour on.
+function Test-HostTerminal { try { return (-not [Console]::IsOutputRedirected) } catch { return $false } }
+function Test-HostAnimate { return ((Test-HostTerminal) -and -not $env:NO_COLOR -and $env:TERM -ne 'dumb') }
+# Show-Live MSG: "· MSG" while a wait runs, on a console that animates; the next line
+# printed takes its place. Elsewhere nothing, as the outcome's own line says it, unless
+# -Keep: a wait long enough to look frozen prints its line once.
+function Show-Live {
+  param([string]$m, [switch]$Keep)
+  Close-Live
+  if (-not (Test-HostAnimate)) { if ($Keep) { Info $m }; return }
+  $script:LiveLine = "  $Dot $m"
+  Write-Host $script:LiveLine -ForegroundColor DarkGray -NoNewline
+}
+function Close-Live {
+  if (-not $script:LiveLine) { return }
+  Write-Host ("`r" + (' ' * $script:LiveLine.Length) + "`r") -NoNewline
+  $script:LiveLine = ''
+}
+function Info($m) { Close-Live; Write-Host "  " -NoNewline; Write-Host ([char]0x00B7) -ForegroundColor DarkGray -NoNewline; Write-Host " $m" -ForegroundColor DarkGray }
+function Ok($m)   { Close-Live; Write-Host "  " -NoNewline; Write-Host ([char]0x2714) -ForegroundColor Green    -NoNewline; Write-Host " $m" }
+function Warn($m) { Close-Live; Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow   -NoNewline; Write-Host "  $m" -ForegroundColor Yellow }
+function Err($m)  { Close-Live; Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red      -NoNewline; Write-Host " $m" -ForegroundColor Red }
+function Log($m)  { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -Encoding UTF8 -ErrorAction SilentlyContinue } }
+# A line only a machine reads: to the log, and to a console that is not a person's.
+function Write-MachineLine($m) { Log $m; if (-not (Test-HostTerminal)) { Write-Host "  $m" } }
+function Write-Rule { Write-Host ('  ' + ([string][char]0x2500) * 45) -ForegroundColor DarkGray }
+# A section: its heading and the blank line under it, and the two blank lines it ends with.
+function Write-Section($t) { Close-Live; Write-Host "  $t"; Write-Host "" }
+function Write-SectionEnd { Close-Live; Write-Host ""; Write-Host "" }
+function Get-HostLogDir { return (Join-Path $env:USERPROFILE '.tracebloc') }
+function Format-HostLogPath {
+  $leaf = Split-Path -Leaf $script:LOG_FILE
+  if ($script:LOG_FILE -ceq (Join-Path (Get-HostLogDir) $leaf)) { return "~\.tracebloc\$leaf" }
+  return $script:LOG_FILE
+}
+
+# Stop-Setup: ends the run with what a person reads. -What is the ✖ line, -Next what to
+# do, -Command the command under it (the install command unless given; none when '').
+# The message, -Reason, is the whole of it, which the log and a machine read.
+function Stop-Setup {
+  param([Parameter(Mandatory)][string]$Reason, [string]$What, [string]$Next, [AllowEmptyString()][string]$Command)
+  $e = New-Object System.Management.Automation.RuntimeException $Reason
+  if ($What) { $e.Data['TbWhat'] = $What }
+  if ($Next) { $e.Data['TbNext'] = $Next }
+  if ($PSBoundParameters.ContainsKey('Command')) { $e.Data['TbCommand'] = $Command }
+  throw $e
+}
+
+# Write-SetupEnd: the block a run that stops ends with, between two rules: the head,
+# what to do with its command under it, and where the log is.
+function Write-SetupEnd {
+  param([string]$Head = "Setup didn't finish", [string]$Next = "It's safe to run the installer again:",
+        [AllowEmptyString()][string]$Command = $InstallCommand, [char]$Glyph = [char]0x2716,
+        [ConsoleColor]$Color = 'Red', [switch]$NoLog)
+  Write-SectionEnd
+  Write-Rule
+  Write-Host ""
+  Write-Host "  " -NoNewline; Write-Host $Glyph -ForegroundColor $Color -NoNewline; Write-Host " $Head"
+  Write-Host ""
+  foreach ($l in ($Next -split "`n")) { Write-Host "  $l" }
+  if ($Command) { Write-Host "    $Command" -ForegroundColor Cyan }
+  if (-not $NoLog -and $script:LOG_FILE -and (Test-Path -LiteralPath $script:LOG_FILE)) {
+    Write-Host ""
+    Write-Host "  Log: $(Format-HostLogPath)"
+  }
+  Write-Host ""
+  Write-Rule
+}
+
+# Write-SetupStopped ERROR: the end of a run a throw stopped: the reason to the log,
+# the ✖ line, then the block. A throw that is no Stop-Setup has its reason as the line.
+function Write-SetupStopped {
+  param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+  $reason = "$ErrorRecord"
+  $data = $ErrorRecord.Exception.Data
+  Write-MachineLine "Installation stopped: $reason"
+  $what = if ($data.Contains('TbWhat')) { [string]$data['TbWhat'] } else { $reason }
+  $end = @{}
+  if ($data.Contains('TbNext')) { $end.Next = [string]$data['TbNext'] }
+  if ($data.Contains('TbCommand')) { $end.Command = [string]$data['TbCommand'] }
+  Err $what
+  Write-SetupEnd @end
+}
+# ── End of the output helpers. ──
+
+# The end of a run Windows needs a restart for: not a failure, so ⚠ and no log.
+function Write-RestartNeeded {
+  Write-SetupEnd -Glyph ([char]0x26A0) -Color Yellow -Head 'Restart Windows to finish turning on WSL' -Next 'Then run the installer again; it continues from here:' -NoLog
+}
 
 # Byte-identical to install.ps1's; a Pester test holds them so.
 function Get-Sha256 {
@@ -486,14 +578,14 @@ function Confirm-WslReady {
   $w = Get-WslReadiness -MinVersion $MinVersion
   if ($w.State -eq 'ready') {
     Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
-    Ok "WSL $($w.Version) is ready ($MinVersion or newer)."
+    Ok "WSL $($w.Version) ready"
     return 'ready'
   }
   $enableArgs = if ($w.State -eq 'old') { $WslUpdateArgs } else { $WslInstallArgs }
   $cmd = 'wsl ' + ($enableArgs -join ' ')
   if ($w.State -eq 'blocked') {
     Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
-    throw "Your organisation's device policy blocks WSL (wsl.exe) on this computer, so tracebloc cannot set up its Linux environment here. Ask your IT team to allow wsl.exe for your account, and to run this once in an administrator PowerShell: $cmd"
+    Stop-Setup -What "Your organisation's policy blocks WSL on this machine" -Next 'Ask your IT team to allow WSL and run this once as an administrator, then run the installer again:' -Command $cmd -Reason "Your organisation's device policy blocks WSL (wsl.exe) on this computer, so tracebloc cannot set up its Linux environment here. Ask your IT team to allow wsl.exe for your account, and to run this once in an administrator PowerShell: $cmd"
   }
 
   # A second run: did the restart the last run asked for happen?
@@ -505,7 +597,8 @@ function Confirm-WslReady {
     # An unreadable boot time counts as a restart, so the limit below still ends
     # the loop; never counting it would ask for restarts forever.
     if ($null -ne $boot -and $boot -le $marker.Written) {
-      Warn "Windows still needs the restart that finishes turning on WSL. $restartWords"
+      Log "Windows still needs the restart that finishes turning on WSL. $restartWords"
+      Write-RestartNeeded
       return 'restart'
     }
     $restarts = $marker.Restarts + 1
@@ -518,7 +611,7 @@ function Confirm-WslReady {
       $restarts = 0
     } elseif ($restarts -ge $MaxRestarts) {
       Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
-      throw "WSL is still not ready after $restarts restart(s): $($w.Why). $itLead $cmd"
+      Stop-Setup -What "WSL still isn't ready after restarting Windows" -Next 'Ask an administrator to run this once, then run the installer again:' -Command $cmd -Reason "WSL is still not ready after $restarts restart(s): $($w.Why). $itLead $cmd"
     }
   }
 
@@ -526,38 +619,42 @@ function Confirm-WslReady {
   # not ready until Windows has restarted. Stopped here, before anything is imported.
   if ($w.State -eq 'pending') {
     Write-WslResumeMarker -Path $MarkerPath -Restarts $restarts -EnableRan $enableRan
-    Warn "Windows needs a restart to finish turning on WSL. $restartWords"
+    Log "Windows needs a restart to finish turning on WSL. $restartWords"
+    Write-RestartNeeded
     return 'restart'
   }
 
   $elevated = Test-BootstrapElevated
   if (-not $elevated) {
     if (-not ((Test-BootstrapUserIsAdmin) -and (Test-BootstrapCanPrompt))) {
-      throw "This computer needs WSL $MinVersion or newer, and only an administrator can turn it on ($($w.Why)). $itLead $cmd -- then run this installer again as yourself."
+      Stop-Setup -What "Turning on WSL needs administrator rights" -Next 'Ask an administrator to run this once, then run the installer again:' -Command $cmd -Reason "This computer needs WSL $MinVersion or newer, and only an administrator can turn it on ($($w.Why)). $itLead $cmd -- then run this installer again as yourself."
     }
-    Info "Turning on WSL needs administrator rights once. Windows will ask you to allow it."
+    Log "Turning on WSL needs administrator rights once. Windows will ask you to allow it."
+    Info 'Windows will ask whether Windows Subsystem for Linux may'
+    Write-Host '    make changes. Select Yes to continue.' -ForegroundColor DarkGray
   }
   $r = Invoke-WslEnable -ArgumentList $enableArgs -Elevate:(-not $elevated)
   if ($r.State -eq 'declined') {
-    throw "The administrator step that turns on WSL did not start ($($r.Detail)). Run this installer again and allow the Windows prompt, or ask your IT team to run this once in an administrator PowerShell: $cmd"
+    Stop-Setup -What "Windows didn't get permission to turn on WSL" -Next 'Run the installer again, and select Yes when Windows asks:' -Reason "The administrator step that turns on WSL did not start ($($r.Detail)). Run this installer again and allow the Windows prompt, or ask your IT team to run this once in an administrator PowerShell: $cmd"
   }
   if ($r.State -eq 'timeout') {
-    throw "The administrator step that turns on WSL did not finish within $([int]($WslEnableTimeoutSec / 60)) minutes. $itLead $cmd"
+    Stop-Setup -What "Turning on WSL didn't finish" -Next 'Ask an administrator to run this once, then run the installer again:' -Command $cmd -Reason "The administrator step that turns on WSL did not finish within $([int]($WslEnableTimeoutSec / 60)) minutes. $itLead $cmd"
   }
   if ($WslEnableOkCodes -notcontains $r.ExitCode) {
-    throw "Turning on WSL failed: $cmd exited $($r.ExitCode). $itLead $cmd"
+    Stop-Setup -What "Turning on WSL failed" -Next 'Ask an administrator to run this once, then run the installer again:' -Command $cmd -Reason "Turning on WSL failed: $cmd exited $($r.ExitCode). $itLead $cmd"
   }
 
   if ($WslEnableRestartCodes -notcontains $r.ExitCode) {
     $w = Get-WslReadiness -MinVersion $MinVersion
     if ($w.State -eq 'ready') {
       Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
-      Ok "WSL $($w.Version) is ready ($MinVersion or newer)."
+      Ok "WSL $($w.Version) ready"
       return 'ready'
     }
   }
   Write-WslResumeMarker -Path $MarkerPath -Restarts $restarts -EnableRan $true
-  Warn "Windows needs a restart to finish turning on WSL. $restartWords"
+  Log "Windows needs a restart to finish turning on WSL. $restartWords"
+  Write-RestartNeeded
   return 'restart'
 }
 
@@ -578,7 +675,7 @@ function Assert-WslNetworkingNat {
   try {
     $text = [System.IO.File]::ReadAllText($Path)
   } catch {
-    throw "The installer could not read your WSL settings file $Path ($($_.Exception.Message)), so it cannot tell whether WSL uses NAT networking, which the tracebloc WSL distro needs. Make sure your account can read the file, then run the install again. The installer does not change it."
+    Stop-Setup -What "Couldn't read your WSL settings in ~\.wslconfig" -Next 'Make sure your account can read that file, then run the installer again:' -Reason "The installer could not read your WSL settings file $Path ($($_.Exception.Message)), so it cannot tell whether WSL uses NAT networking, which the tracebloc WSL distro needs. Make sure your account can read the file, then run the install again. The installer does not change it."
   }
   $section = ''
   foreach ($raw in ($text -split "`r?`n")) {
@@ -590,7 +687,7 @@ function Assert-WslNetworkingNat {
     if ($line.Substring(0, $eq).Trim() -ine 'networkingMode') { continue }
     $value = $line.Substring($eq + 1).Trim().Trim('"')
     if ($value -ine 'nat') {
-      throw "Your WSL settings file $Path sets networkingMode=$value in its [wsl2] section. The tracebloc WSL distro needs WSL's NAT networking: with $value its cluster cannot download what it needs or start. This setting applies to all your WSL distros, so the installer does not change it. Set networkingMode=nat there, or remove the line, then run wsl --shutdown (it stops every running WSL distro) and run the install again."
+      Stop-Setup -What "WSL uses $value networking $Dot tracebloc needs NAT" -Next 'Set networkingMode=nat in ~\.wslconfig, run wsl --shutdown (it stops every WSL distro), then run the installer again:' -Reason "Your WSL settings file $Path sets networkingMode=$value in its [wsl2] section. The tracebloc WSL distro needs WSL's NAT networking: with $value its cluster cannot download what it needs or start. This setting applies to all your WSL distros, so the installer does not change it. Set networkingMode=nat there, or remove the line, then run wsl --shutdown (it stops every running WSL distro) and run the install again."
     }
   }
 }
@@ -672,14 +769,21 @@ function Get-GhcrPullToken {
   return $null
 }
 
-# Receive-WslDistroImage's clock, one step: a liveness dot every $Clock.TickSeconds,
-# and the stall bound. $false when under $Clock.StallBytes arrived in the last
-# $Clock.StallSeconds (curl's --speed-limit 1024 --speed-time 60, the Mac kernel
-# fetch's bound). A slow download that is still moving is never stopped.
+# Receive-WslDistroImage's clock, one step: under the live line Show-Live drew
+# ($Clock.Live), the progress after it, redrawn once a second (Write-WslDownloadTail);
+# elsewhere a liveness dot every $Clock.TickSeconds. Then the stall bound: $false when
+# under $Clock.StallBytes arrived in the last $Clock.StallSeconds (curl's
+# --speed-limit 1024 --speed-time 60, the Mac kernel fetch's bound). A slow download
+# that is still moving is never stopped.
 function Test-WslDownloadMoving {
   param([hashtable]$Clock)
   $now = Get-Date
-  if (($now - $Clock.LastDot).TotalSeconds -ge $Clock.TickSeconds) {
+  if ($Clock.Live) {
+    if (($now - $Clock.LastDot).TotalSeconds -ge 1) {
+      Write-WslDownloadTail -Clock $Clock -Now $now
+      $Clock.LastDot = $now
+    }
+  } elseif (($now - $Clock.LastDot).TotalSeconds -ge $Clock.TickSeconds) {
     if (-not $Clock.Dotted) { Write-Host -NoNewline "  " }
     Write-Host -NoNewline "." -ForegroundColor DarkGray
     $Clock.Dotted = $true
@@ -691,6 +795,65 @@ function Test-WslDownloadMoving {
     $Clock.WindowBytes = $Clock.Have
   }
   return $true
+}
+
+# What the WSL distro image's download brought in, as the core's live line shows it
+# (common.sh, _tb_dl_tail): "  1m 05s · 63% · 8.4 MB/s". SECONDS spent; BYTES of
+# TOTAL, the share rounded down (BYTES alone when TOTAL is 0); RATE bytes a second,
+# none when $null. 1 MB = 1024 KB.
+function Format-DownloadProgress {
+  param([long]$Seconds, [long]$Bytes, [long]$Total, $Rate)
+  $dot = [string][char]0x00B7
+  $time = Format-DownloadTime $Seconds
+  if ($Total -gt 0) { $what = "$([math]::Min(100, [math]::Floor($Bytes * 100.0 / $Total)))%" } else { $what = Format-DownloadBytes $Bytes }
+  $text = "  $time $dot $what"
+  if ($null -ne $Rate) { $text += " $dot $(Format-DownloadRate ([long]$Rate))" }
+  return $text
+}
+# "12s", "1m 05s" (_tb_elapsed).
+function Format-DownloadTime([long]$Seconds) {
+  if ($Seconds -lt 60) { return "${Seconds}s" }
+  return ('{0}m {1:00}s' -f [math]::Floor($Seconds / 60), ($Seconds % 60))
+}
+# "64 bytes", "640 KB", "312 MB", "1.2 GB", rounded down (_tb_dl_bytes).
+function Format-DownloadBytes([long]$Bytes) {
+  if ($Bytes -lt 1KB) { return "$Bytes bytes" }
+  if ($Bytes -lt 1MB) { return "$([math]::Floor($Bytes / 1KB)) KB" }
+  if ($Bytes -lt 1GB) { return "$([math]::Floor($Bytes / 1MB)) MB" }
+  $t = [math]::Floor($Bytes * 10.0 / 1GB)
+  return "$([math]::Floor($t / 10)).$($t % 10) GB"
+}
+# "640 KB/s", or MB/s to the nearest tenth, "8.4 MB/s" (_tb_dl_rate).
+function Format-DownloadRate([long]$Rate) {
+  $k = [math]::Floor(($Rate + 512) / 1KB)
+  if ($k -lt 1024) { return "$k KB/s" }
+  $t = [math]::Floor(($Rate * 10 + 524288) / 1MB)
+  return "$([math]::Floor($t / 10)).$($t % 10) MB/s"
+}
+
+# Draw the clock's progress after what the line holds, over the last one: back over
+# it, the new text, and spaces over what is left of a longer one. The speed is the
+# average over the last 5 seconds, from the second sample on.
+function Write-WslDownloadTail {
+  param([hashtable]$Clock, [datetime]$Now)
+  $t = ($Now - $Clock.Start).TotalSeconds
+  [void]$Clock.Ring.Add(@($t, $Clock.Have))
+  while ($Clock.Ring.Count -gt 2 -and ($t - $Clock.Ring[0][0]) -gt 5) { $Clock.Ring.RemoveAt(0) }
+  $rate = $null
+  $span = $t - $Clock.Ring[0][0]
+  if ($span -gt 0) { $rate = [long][math]::Floor(($Clock.Have - $Clock.Ring[0][1]) / $span) }
+  $text = Format-DownloadProgress -Seconds ([long][math]::Floor($t)) -Bytes $Clock.Have -Total $Clock.Total -Rate $rate
+  $pad = [math]::Max(0, $Clock.Tail.Length - $text.Length)
+  Write-Host -NoNewline (("`b" * $Clock.Tail.Length) + $text + (' ' * $pad) + ("`b" * $pad)) -ForegroundColor DarkGray
+  $Clock.Tail = $text
+}
+# Take the progress off the line again, so the next line is printed where it began.
+function Clear-WslDownloadTail {
+  param([hashtable]$Clock)
+  if (-not $Clock.Tail) { return }
+  $n = $Clock.Tail.Length
+  Write-Host -NoNewline (("`b" * $n) + (' ' * $n) + ("`b" * $n))
+  $Clock.Tail = ''
 }
 
 # Wait for TASK, an HTTP answer or a read, under the clock. $false when the
@@ -754,6 +917,7 @@ function Receive-WslDistroImage {
   $clock = @{
     Have = [long]0; WindowStart = $now; WindowBytes = [long]0; LastDot = $now; Dotted = $false
     StallSeconds = $StallSeconds; StallBytes = $StallBytes; TickSeconds = $TickSeconds
+    Live = [bool]$script:LiveLine; Start = $now; Total = $MaxBytes; Ring = [Collections.ArrayList]::new(); Tail = ''
   }
   $outcome = 'failed'
   $why = ''
@@ -824,6 +988,11 @@ function Receive-WslDistroImage {
     if ($answer) { try { $answer.Close() } catch { } }
   }
   if ($clock.Dotted) { Write-Host "" }
+  Clear-WslDownloadTail -Clock $clock
+  if ($clock.Live -and $outcome -eq 'finished') {
+    $spent = [long][math]::Floor(((Get-Date) - $clock.Start).TotalSeconds)
+    Log "Downloaded the WSL distro image: $(Format-DownloadBytes $clock.Have) in $(Format-DownloadTime $spent)"
+  }
   if ($outcome -eq 'finished' -or $outcome -eq 'past the pin') { return $true }
   if ($outcome -eq 'stalled') {
     Err "The WSL distro image download stalled (under $StallBytes bytes in ${StallSeconds}s) -- giving up: $Url"
@@ -982,11 +1151,11 @@ function Get-WslDistroDiskCap {
   $drive = Get-WslDiskDrive -Path $Path
   $free = Get-WslDiskFreeSpace -Path $Path
   if ($null -eq $free) {
-    throw "Disk: could not read how much space is free on $drive, so the WSL distro's disk cannot be sized. Check that the drive is there and readable, then re-run."
+    Stop-Setup -What "Couldn't read how much disk space is free on $drive" -Reason "Disk: could not read how much space is free on $drive, so the WSL distro's disk cannot be sized. Check that the drive is there and readable, then re-run."
   }
   $cap = ConvertTo-WslDiskCapGb -Free $free -ReserveGb $ReserveGb
   if ($cap -lt $MinGb) {
-    throw "Disk: only $($cap + $ReserveGb) GB free on $drive - need >= $($ReserveGb + $MinGb) GB ($ReserveGb GB left to Windows, and at least $MinGb GB for tracebloc's WSL distro). Free up space or attach a larger disk, then re-run."
+    Stop-Setup -What "$($cap + $ReserveGb) GB free disk $Dot tracebloc needs $($ReserveGb + $MinGb) GB" -Next 'Free up disk space, then run the installer again:' -Reason "Disk: only $($cap + $ReserveGb) GB free on $drive - need >= $($ReserveGb + $MinGb) GB ($ReserveGb GB left to Windows, and at least $MinGb GB for tracebloc's WSL distro). Free up space or attach a larger disk, then re-run."
   }
   return $cap
 }
@@ -1170,7 +1339,7 @@ function Set-WslDistroDisk {
     if ((Test-WslDiskHeld -Said $said) -and $held.Running.Count) { $next = "Stop them, or run 'wsl --shutdown', which stops every WSL distro, then run the install again." }
     throw "$cmd failed (exit $($r.ExitCode)): $said The WSL distro's disk was not $($s.What), and an uncapped distro can fill this drive.$attached$limited $next"
   }
-  if ($sparse) { Ok "WSL distro disk: sparse, and capped at $CapGb GB" } else { Ok "WSL distro disk: capped at $CapGb GB" }
+  if ($sparse) { Log "WSL distro disk: sparse, and capped at $CapGb GB" } else { Log "WSL distro disk: capped at $CapGb GB" }
 }
 
 # The virtual size in bytes of the VHDX at PATH, read from the file's own metadata,
@@ -1251,13 +1420,13 @@ function Update-WslDistroDisk {
   }
   $want = ConvertTo-WslDiskCapGb -Free $hostFree -ReserveGb $ReserveGb
   if ($want -le $nowGb) {
-    Ok "WSL distro disk: kept at $nowGb GB (the host's free space now gives $want GB, and a cap is never shrunk)"
+    Log "WSL distro disk: kept at $nowGb GB (the host's free space now gives $want GB, and a cap is never shrunk)"
     return
   }
   $grow = @('--manage', $Distro, '--resize', "$($want)GB")
   $g = Invoke-WslProbe -FilePath $FilePath -ArgumentList $grow -TimeoutSec $WslDiskTimeoutSec
   if ($g.Started -and -not $g.TimedOut -and $g.ExitCode -eq 0) {
-    Ok "WSL distro disk: grown from $nowGb GB to $want GB"
+    Log "WSL distro disk: grown from $nowGb GB to $want GB"
     return
   }
   $why = "exit $($g.ExitCode): $(("$($g.Output) $($g.ErrorOutput)" -replace "`0", '' -replace '\s+', ' ').Trim())"
@@ -1301,11 +1470,13 @@ function Get-WslDistroImage {
   if (-not $token) {
     throw "ghcr.io gave no pull token for $Image ($($script:GhcrTokenFailure)). Check that this machine can reach ghcr.io, then re-run."
   }
-  Info "Downloading the WSL distro image $Version ($([math]::Round($Bytes / 1MB)) MB) from $Image..."
+  Log "Downloading the WSL distro image $Version ($([math]::Round($Bytes / 1MB)) MB) from $Image..."
+  Show-Live "Downloading the WSL distro ($([math]::Round($Bytes / 1MB)) MB)..."
   $fetched = Receive-WslDistroImage -Url "https://ghcr.io/v2/$repo/blobs/sha256:$Sha256" -Token $token -Dest $Dest -MaxBytes $Bytes
   if (-not $fetched) { Remove-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue }
   Confirm-WslDistroImage -Path $Dest -Sha256 $Sha256 -Bytes $Bytes
-  Ok "WSL distro image $Version verified against its pinned length and sha256 (the layer of $Image@$Digest)"
+  Log "WSL distro image $Version verified against its pinned length and sha256 (the layer of $Image@$Digest)"
+  Ok "WSL distro downloaded and verified $Dot $([math]::Round($Bytes / 1MB)) MB"
   return $Dest
 }
 
@@ -1370,8 +1541,10 @@ function Import-WslDistro {
     throw "wsl --list $($reg.Why), so whether the tracebloc WSL distro is already on this machine cannot be told. Nothing was downloaded, imported or removed. Run the install again; if it says this again, tell tracebloc support."
   }
   if ($reg.State -ceq 'registered') {
-    Info "The tracebloc WSL distro is already on this machine: it is kept, and nothing is imported."
+    Log "The tracebloc WSL distro is already on this machine: it is kept, and nothing is imported."
     Update-WslDistroDisk -Path $dir -FilePath $FilePath
+    Ok 'WSL distro installed already'
+
     return 'present'
   }
   $vhdx = Join-Path $dir 'ext4.vhdx'
@@ -1383,7 +1556,8 @@ function Import-WslDistro {
   try {
     $null = Get-WslDistroImage -Dest $rootfs
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    Info "Importing the tracebloc WSL distro into $dir..."
+    Log "Importing the tracebloc WSL distro into $dir..."
+    Show-Live 'Installing the WSL distro...'
     $import = @('--import', $WslDistroName, (ConvertTo-WindowsArgument $dir), (ConvertTo-WindowsArgument $rootfs), '--version', '2')
     $cmd = "wsl --import $WslDistroName"
     $imp = Invoke-WslProbe -FilePath $FilePath -ArgumentList $import -TimeoutSec $WslImportTimeoutSec
@@ -1400,13 +1574,14 @@ function Import-WslDistro {
   } finally {
     Remove-Item -LiteralPath $rootfs -Force -ErrorAction SilentlyContinue
   }
-  Ok "Imported the tracebloc WSL distro into $dir"
+  Log "Imported the tracebloc WSL distro into $dir"
   try {
     Set-WslDistroDisk -CapGb $cap -FilePath $FilePath
   } catch {
     Remove-WslDistro -FilePath $FilePath
     throw
   }
+  Ok "WSL distro installed $Dot disk capped at $cap GB"
   return 'imported'
 }
 
@@ -1542,7 +1717,7 @@ function Add-WslHostRootTrust {
   } finally {
     Remove-Item -LiteralPath $pem -Force -ErrorAction SilentlyContinue
   }
-  Ok "The tracebloc WSL distro trusts this computer's $($roots.Count) root certificates"
+  Log "The tracebloc WSL distro trusts this computer's $($roots.Count) root certificates"
   $running = Invoke-WslProbe -ArgumentList ($asRoot + @($DistroSystemctl, 'is-active', 'k3s')) -TimeoutSec $WslDistroStartTimeoutSec
   $state = ''
   if ($running.Started -and -not $running.TimedOut -and $running.Output) {
@@ -1556,7 +1731,7 @@ function Add-WslHostRootTrust {
   if (-not $restart.Started -or $restart.TimedOut -or $restart.ExitCode -ne 0) {
     throw "k3s in the tracebloc WSL distro did not restart ($(Format-WslProbeFailure $restart $WslK3sRestartTimeoutSec)), so its image pulls may not trust this computer's root certificates yet. Run this installer again; if it keeps failing, share this output with tracebloc support."
   }
-  Ok "Restarted k3s, so its image pulls trust them too"
+  Log "Restarted k3s, so its image pulls trust them too"
 }
 
 # =============================================================================
@@ -1658,7 +1833,7 @@ function Register-KeepaliveTask {
     Start-Sleep -Seconds 1
     $slept++
   }
-  Ok "The tracebloc WSL distro runs, and starts again at each sign-in."
+  Ok "WSL distro running $Dot starts at each sign-in"
 }
 
 # =============================================================================
@@ -1729,8 +1904,7 @@ $GPU_NOT_NVIDIA_VENDOR_RE   = ' (AMD|ATI|RADEON|ADVANCED MICRO DEVICES|INTEL|APP
 $GPU_NOT_NVIDIA_DISCRETE_RE = ' (AMD|ATI|RADEON|ADVANCED MICRO DEVICES|APPLE) '
 
 # The log line (no-op here: this script keeps no log file) and the dim hint line.
-function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -Encoding UTF8 -ErrorAction SilentlyContinue } }
-function Hint($m)          { Write-Host "  $m" -ForegroundColor DarkGray; Log $m }
+function Hint($m)          { Close-Live; Write-Host "  $m" -ForegroundColor DarkGray; Log $m }
 
 # A process exit code for a failure line, never blank.
 function Format-ExitCode {
@@ -1984,20 +2158,20 @@ function Find-Gpu {
     $nv = @($gpus | Where-Object { $_.Name -match "NVIDIA" })
     $amd = @($gpus | Where-Object { $_.Name -match "AMD|Radeon" })
     if ($nv.Count -gt 0) {
-      $script:GPU_VENDOR = "nvidia"; Ok "NVIDIA GPU detected: $($nv[0].Name)"
+      $script:GPU_VENDOR = "nvidia"; Ok "NVIDIA GPU found $Dot $($nv[0].Name)"
     } elseif ($amd.Count -gt 0) {
-      $script:GPU_VENDOR = "amd"; Ok "AMD GPU detected: $($amd[0].Name)"
+      $script:GPU_VENDOR = "amd"; Ok "AMD GPU found $Dot $($amd[0].Name)"
     }
     # A GPU that is not NVIDIA (AMD, or Intel -- the integrated one included) is a GPU this
     # machine cannot train on: named to the platform as not_nvidia, not "no GPU".
     $notNvidia = Get-GpuNotNvidiaName -Names @($gpus | ForEach-Object { [string]$_.Name })
     if ($notNvidia) { Set-GpuNotNvidia $notNvidia }
     if ($script:GPU_VENDOR -eq "none") {
-      if ($notNvidia) { Info "This machine's GPU ($notNvidia) is not an NVIDIA GPU. Your environment will run in CPU mode." }
-      else { Info "No GPU detected. Your environment will run in CPU mode." }
+      if ($notNvidia) { Info "$notNvidia is not an NVIDIA GPU $Dot training will use the CPU" }
+      else { Info "No GPU found $Dot training will use the CPU" }
     }
   } catch {
-    Info "No GPU detected. Your environment will run in CPU mode."
+    Info "No GPU found $Dot training will use the CPU"
     Log "GPU detection failed: $_"
   }
 
@@ -2255,11 +2429,11 @@ function Invoke-BoundedProcess {
 #  create` for a new credential (--reissue, provision.sh's repair) and the client
 #  run's line says so (TRACEBLOC_CREDENTIAL_REISSUED=1). A preset pair is never
 #  reissued: provision.sh's preset path returns before its repair. It also hands
-#  over the context kubectl pointed at before it, which the client run's line
-#  carries (TRACEBLOC_WSL_PREV_KUBE_CONTEXT): that run merges the kubeconfig again,
-#  after the cluster run made its own context current, and its summary says how to
-#  switch back. And where this machine runs, which the account
-#  steps put in `client create`'s environment, as provision.sh does.
+#  over tracebloc's kube context, which the account steps name to the host CLI: the
+#  merge leaves the kubeconfig's current context alone, and the host record that
+#  names it for the CLI is written only after the client run. And where this machine
+#  runs, which the account steps put in `client create`'s environment, as
+#  provision.sh does.
 #    TODO(S-W): measure that /dev/tty answers in the distro while stdin is a pipe.
 #    TODO(part 4): the refusal for another account's client names no removal
 #      command yet: `tracebloc delete` removes the distro path's client once
@@ -2419,17 +2593,15 @@ $TRACEBLOC_CLI_INSTALL_URL = "https://github.com/tracebloc/cli/releases/latest/d
 # The cluster run's handover (2c): the variable that names the file, the file's
 # name in its folder, the five lines the core writes (lib/common.sh's
 # tb_wsl_handover_write), the reason that asks for a new credential, and the flag
-# the client run gets then (provision.sh's). The second line is the context kubectl
-# pointed at before the cluster run, which the client run gets by the variable
-# k3s.sh's kubeconfig merge reads. The last three are where this
+# the client run gets then (provision.sh's). The second line is tracebloc's kube
+# context, which k3s.sh's kubeconfig merge added. The last three are where this
 # machine runs (provision.sh's _registration_machine_facts), by the names
 # provision.sh puts in its own `client create`'s environment, which the host's create
 # gets the same way. Pester holds each to the core's.
 $CoreHandoverVar = 'TRACEBLOC_WSL_HANDOVER'
 $CoreHandoverFile = 'handover.env'
 $CoreHandoverKey = 'INSTALL_STATE_REASON'
-$CoreHandoverPrevContextKey = 'TB_PREV_KUBE_CONTEXT'
-$CorePrevContextVar = 'TRACEBLOC_WSL_PREV_KUBE_CONTEXT'
+$CoreHandoverContextKey = 'TRACEBLOC_KUBE_CONTEXT'
 $CoreHandoverFactKeys = @('TRACEBLOC_MACHINE_KIND', 'TRACEBLOC_CLOUD_PROVIDER', 'TRACEBLOC_HOST_OS')
 $CredentialRejectedReason = 'credential-rejected'
 # The client run's handover: its file, in the same folder, and the one line the core
@@ -2514,12 +2686,13 @@ function New-CoreRunArguments {
     [string]$LogDir,
     [string]$Handover,
     [switch]$CredentialStdin,
-    [switch]$CredentialReissued,
-    [string]$PrevKubeContext
+    [switch]$CredentialReissued
   )
   $a = @('-d', $WslDistroName, '-u', 'root', '--exec', 'env',
     "TRACEBLOC_SUBSTRATE=$CoreSubstrate",
     "TRACEBLOC_WSL_PHASE=$Phase",
+    'TRACEBLOC_BANNER_SHOWN=1',
+    "TRACEBLOC_INSTALL_CMD=$InstallCommand",
     "KUBECONFIG=$Kubeconfig",
     "TRACEBLOC_LOG_DIR=$LogDir",
     "TRACEBLOC_WSL_GPU_VERDICT=$script:GPU_FLOOR_VERDICT",
@@ -2533,7 +2706,6 @@ function New-CoreRunArguments {
   if ($Handover) { $a += "$CoreHandoverVar=$Handover" }
   if ($CredentialStdin) { $a += 'TRACEBLOC_CREDENTIAL_STDIN=1' }
   if ($CredentialReissued) { $a += "$CredentialReissuedVar=1" }
-  if ($PrevKubeContext) { $a += "$CorePrevContextVar=$PrevKubeContext" }
   $a += @('bash', "$Core/install-k8s.sh")
   return $a
 }
@@ -2822,7 +2994,7 @@ function Clear-RetiredToolPath {
 # registers nothing (the preset pair): there, no CLI is a warning and $null.
 function Install-HostCli {
   param([int]$TimeoutSec = 600, [switch]$Optional)
-  Info "Installing the tracebloc CLI for this user..."
+  Show-Live 'Installing the tracebloc CLI...'
   $out = Join-Path ([System.IO.Path]::GetTempPath()) ("tracebloc-cli-install-" + [guid]::NewGuid().ToString('N') + ".log")
   $err = "$out.err"
   $why = $null
@@ -2846,7 +3018,7 @@ function Install-HostCli {
     # The installer's own last words, from whichever stream has some.
     foreach ($f in @($err, $out)) {
       $tail = @(Get-Content -LiteralPath $f -ErrorAction SilentlyContinue | Where-Object { "$_".Trim() } | Select-Object -Last 5)
-      if ($tail.Count) { foreach ($l in $tail) { Hint "$l".Trim() }; break }
+      if ($tail.Count) { foreach ($l in $tail) { Log "$l".Trim() }; break }
     }
   }
   Remove-Item -LiteralPath $out, $err -Force -ErrorAction SilentlyContinue
@@ -2856,7 +3028,7 @@ function Install-HostCli {
   if (-not $why) {
     $cli = Find-HostCli -PrefixOnly
     if ($cli) {
-      Ok "tracebloc CLI installed for this user."
+      Ok 'tracebloc CLI installed'
       return $cli
     }
     $why = "its installer finished, but tracebloc.exe is not where it installs"
@@ -2870,7 +3042,7 @@ function Install-HostCli {
     Warn "The tracebloc CLI could not be installed: $why. The credentials you supplied don't need it. To use tracebloc from this machine, install it later in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
     return $null
   }
-  throw "The tracebloc CLI could not be installed: $why. It is what registers this machine. Install it in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex  then run this installer again."
+  Stop-Setup -What "Couldn't install the tracebloc CLI" -Next 'Install it in a new PowerShell window, then run the installer again:' -Command "irm $TRACEBLOC_CLI_INSTALL_URL | iex" -Reason "The tracebloc CLI could not be installed: $why. It is what registers this machine. Install it in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex  then run this installer again."
 }
 
 # A typed value with the terminal's residue taken out: arrow keys, bracketed-paste
@@ -2905,36 +3077,52 @@ function ConvertTo-SanitizedInput {
   return (($s.ToCharArray() | Where-Object { [int]$_ -ge 32 -and [int]$_ -ne 127 }) -join "")
 }
 
-# The name the client is registered under: TRACEBLOC_CLIENT_NAME, else asked for
-# here, else a refusal that names the variable. Either one is sanitized first; an
-# answer that was only residue counts as no answer.
+# What a name may hold, said under every name Get-ClientName can't use: the CLI makes a
+# namespace of it as ConvertTo-ClientNameSlug does.
+$ClientNameRule = 'Use letters, digits and hyphens, up to 63 characters; spaces and other signs become hyphens.'
+
+# The name the client is registered under: TRACEBLOC_CLIENT_NAME, else asked for here.
+# Either one is sanitized first; an answer that was only residue counts as no answer.
+# A name it can't use is asked for again, with no cap (Ctrl-C stops): the run stops
+# only when nobody at this console can be asked (Stop-ClientNameUnasked).
 function Get-ClientName {
   $name = (ConvertTo-SanitizedInput -Value "$env:TRACEBLOC_CLIENT_NAME").Trim()
+  $why = $null
   if ($name) {
-    if (Test-AllDigitName $name) {
-      throw "A name needs at least one letter. Set TRACEBLOC_CLIENT_NAME to a name that has one, then run this installer again."
-    }
-    return $name
+    if (-not (Test-AllDigitName $name)) { return $name }
+    $why = "TRACEBLOC_CLIENT_NAME `"$name`" can't be used: a name needs at least one letter"
   }
-  if (-not (Test-BootstrapCanPrompt)) {
-    throw "A name for this machine is needed to register it, and nobody at this console can be asked. Set TRACEBLOC_CLIENT_NAME, then run this installer again."
-  }
+  if (-not (Test-BootstrapCanPrompt)) { Stop-ClientNameUnasked -Why $why }
   # provision.sh's `?` prompt, as `tracebloc delete` asks: Enter takes the default in
-  # brackets (Get-DefaultClientName); with none, an empty answer is asked again.
+  # brackets (Get-DefaultClientName).
   $default = Get-DefaultClientName
   $ask = '  ? Name your secure environment '
   if ($default) { $ask = "$ask[$default] " }
-  for ($i = 0; $i -lt 3; $i++) {
+  $setWhy = $why
+  Write-Host ""
+  while ($true) {
+    if ($why) { Err "$why."; Hint "  $ClientNameRule" }
     Write-Host $ask -NoNewline
-    $name = (ConvertTo-SanitizedInput -Value "$(Read-Host)").Trim()
-    if ($name -and (Test-AllDigitName $name)) {
-      Write-Host "  A name needs at least one letter."
-      continue
-    }
-    if ($name) { return $name }
-    if ($default) { return $default }
+    $typed = $null
+    try { $typed = Read-Host } catch { $typed = $null }
+    # No answer at all: this console can't be asked after all.
+    if ($null -eq $typed) { Stop-ClientNameUnasked -Why $setWhy }
+    $name = (ConvertTo-SanitizedInput -Value "$typed").Trim()
+    if (-not $name) { $name = $default }
+    if (-not $name) { $why = 'A name is required'; continue }
+    if (-not (Test-AllDigitName $name)) { return $name }
+    $why = "`"$name`" can't be used: a name needs at least one letter"
   }
-  throw "No name was given for this machine, so it was not registered. Run this installer again, or set TRACEBLOC_CLIENT_NAME."
+}
+
+# Get-ClientName's stop when nobody at this console can be asked, naming the setting
+# to fix. WHY is why TRACEBLOC_CLIENT_NAME can't be used; none when it is not set.
+function Stop-ClientNameUnasked {
+  param([string]$Why)
+  if ($Why) {
+    Stop-Setup -What $Why -Next 'Set TRACEBLOC_CLIENT_NAME to a name with a letter in it, then run the installer again:' -Reason "$Why. Set TRACEBLOC_CLIENT_NAME to a name that has one, then run this installer again."
+  }
+  Stop-Setup -What 'No name was set in TRACEBLOC_CLIENT_NAME' -Next "Run the installer in a PowerShell window, or set TRACEBLOC_CLIENT_NAME`nfor an unattended install." -Command '' -Reason "A name for this machine is needed to register it, and nobody at this console can be asked. Set TRACEBLOC_CLIENT_NAME, then run this installer again."
 }
 
 # This computer's name, the machine name a new client gets when none is given.
@@ -3051,7 +3239,7 @@ function Get-CoreCliFloor {
     if ($_ -match '^: "\$\{TB_CLI_MIN_VERSION:=([0-9]+(\.[0-9]+)*)\}"') { $Matches[1] }
   })
   if ($found.Count -ne 1 -or -not (ConvertTo-FloorVersion $found[0])) {
-    throw "This installer can't read the tracebloc CLI's minimum version from $assess, so it can't check the CLI. Run the installer again from its release."
+    Stop-Setup -What "Couldn't read the tracebloc CLI's minimum version" -Reason "This installer can't read the tracebloc CLI's minimum version from $assess, so it can't check the CLI. Run the installer again from its release."
   }
   return $found[0]
 }
@@ -3075,20 +3263,20 @@ function Assert-HostCliFloor {
   if ($ver -notmatch '^\d+(\.\d+)*$') { return }
   $have = ConvertTo-FloorVersion $ver
   if (-not $have -or $have -ge (ConvertTo-FloorVersion $floor)) { return }
-  throw "The tracebloc CLI on this machine (v$ver, $Cli) is older than v$floor, the oldest version tracebloc accepts, and it could not be updated. Install it in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex  then run this installer again."
+  Stop-Setup -What "This tracebloc CLI is too old (v$ver) $Dot tracebloc needs v$floor" -Next 'Update it in a new PowerShell window, then run the installer again:' -Command "irm $TRACEBLOC_CLI_INSTALL_URL | iex" -Reason "The tracebloc CLI on this machine (v$ver, $Cli) is older than v$floor, the oldest version tracebloc accepts, and it could not be updated. Install it in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex  then run this installer again."
 }
 
 # What `client create` would do here (`--plan`, which changes nothing): the CLI's
-# own reads of the account and of the client running in the cluster the host
-# kubeconfig makes current. Action is adopt, reconnect, mint, refuse (a client of
+# own reads of the account and of the client running in the cluster KUBECONTEXT
+# names (Get-HostKubeContextArgs). Action is adopt, reconnect, mint, refuse (a client of
 # another account runs here) or unknown, with the Namespace and Name. It is asked
-# with the --credential-file the create gets, so it answers as the create will; an
-# answer that can't be read is unknown, and Why says what the CLI did instead.
+# with the --credential-file and context the create gets, so it answers as the create
+# will; an answer that can't be read is unknown, and Why says what the CLI did instead.
 # Bash parity: provision.sh's _create_plan, which logs the CLI's stderr; here it
 # is said.
 function Get-HostCreatePlan {
-  param([string]$Cli, [string]$CredentialFile)
-  $probe = Invoke-HostCliProbe -Cli $Cli -ArgumentList @('client', 'create', '--plan', '--credential-file', $CredentialFile)
+  param([string]$Cli, [string]$CredentialFile, [string]$KubeContext)
+  $probe = Invoke-HostCliProbe -Cli $Cli -ArgumentList (@('client', 'create', '--plan', '--credential-file', $CredentialFile) + (Get-HostKubeContextArgs $KubeContext))
   $said = ''
   if ($probe.ErrorText) { $said = ": $($probe.ErrorText)" }
   $unknown = [pscustomobject]@{ Action = 'unknown'; Namespace = ''; Name = ''; Why = '' }
@@ -3116,25 +3304,35 @@ function Get-HostCreatePlan {
 }
 
 # What the cluster run handed over, on its five lines: Reason, which may be empty
-# (the gate did not assess); PrevContext, the context kubectl pointed at before that
-# run, empty when it pointed at no other one; and Facts, where this machine runs, by
-# the names the CLI reads, each empty when the core could not read it. PATH is the
-# file as Windows names it. A file that is not there, or that holds anything but
-# those five lines in that order, stops the install.
+# (the gate did not assess); KubeContext, tracebloc's kube context, which that run
+# added to the kubeconfig; and Facts, where this machine runs, by the names the CLI
+# reads, each empty when the core could not read it. PATH is the file as Windows names
+# it. A file that is not there, that holds anything but those five lines in that
+# order, or that names no context, stops the install.
 function Read-CoreHandover {
   param([string]$Path)
   $lines = @()
   if (Test-Path -LiteralPath $Path -PathType Leaf) { $lines = @(Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue) }
-  $keys = @($CoreHandoverKey, $CoreHandoverPrevContextKey) + $CoreHandoverFactKeys
+  $keys = @($CoreHandoverKey, $CoreHandoverContextKey) + $CoreHandoverFactKeys
   $ok = $lines.Count -eq $keys.Count
   for ($i = 0; $ok -and $i -lt $keys.Count; $i++) { $ok = ([string]$lines[$i]).StartsWith("$($keys[$i])=", [StringComparison]::Ordinal) }
+  if ($ok) { $ok = ([string]$lines[1]).Length -gt ($CoreHandoverContextKey.Length + 1) }
   if (-not $ok) {
     throw "The cluster setup in the tracebloc WSL distro ended without saying what it found, so this machine was not registered. Run this installer again; if it keeps failing, share this output with tracebloc support."
   }
   $values = @(for ($i = 0; $i -lt $keys.Count; $i++) { ([string]$lines[$i]).Substring($keys[$i].Length + 1) })
   $facts = [ordered]@{}
   for ($i = 0; $i -lt $CoreHandoverFactKeys.Count; $i++) { $facts[$CoreHandoverFactKeys[$i]] = $values[2 + $i] }
-  return [pscustomobject]@{ Reason = $values[0]; PrevContext = $values[1]; Facts = $facts }
+  return [pscustomobject]@{ Reason = $values[0]; KubeContext = $values[1]; Facts = $facts }
+}
+
+# The host CLI's words naming tracebloc's kube context CONTEXT, or none when it is ''.
+# Until the host record names that context for the CLI, a command that reads the
+# cluster without them would read the kubeconfig's current context: the user's.
+function Get-HostKubeContextArgs {
+  param([string]$Context)
+  if ($Context) { return @('--context', $Context) }
+  return @()
 }
 
 # The client state the client run handed over, or '' when its file is not there or
@@ -3242,13 +3440,13 @@ function Invoke-HostCliNoInput {
 # in front of the credential bytes, which the client run's [byte[]] -Stdin cannot
 # take.
 function Get-HostClientCredential {
-  param([string]$Cli, [switch]$Reissue, [System.Collections.IDictionary]$Facts)
+  param([string]$Cli, [switch]$Reissue, [System.Collections.IDictionary]$Facts, [string]$KubeContext)
   $dir = Join-Path (Join-Path $env:LOCALAPPDATA 'tracebloc') ('credential-' + [guid]::NewGuid().ToString('N'))
   New-PrivateDirectory -Path $dir
   try {
     Invoke-HostCliShown -Cli $Cli -ArgumentList @('login')
     if ($LASTEXITCODE -ne 0) {
-      throw "Signing in with the tracebloc CLI did not finish (it exited $LASTEXITCODE), so this machine was not registered. Run this installer again to sign in."
+      Stop-Setup -What "Signing in didn't finish" -Next 'Run the installer again to sign in:' -Reason "Signing in with the tracebloc CLI did not finish (it exited $LASTEXITCODE), so this machine was not registered. Run this installer again to sign in."
     }
     $h = Invoke-HostCliProbe -Cli $Cli -ArgumentList @('client', 'create', '--help')
     if ($h.TimedOut) {
@@ -3258,38 +3456,34 @@ function Get-HostClientCredential {
     }
     $help = $h.Lines -join "`n"
     if ($help -notmatch '--plan') {
-      throw "This tracebloc CLI is too old to register this machine from the installer. Update it in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex  then run this installer again."
+      Stop-Setup -What 'This tracebloc CLI is too old to register this machine' -Next 'Update it in a new PowerShell window, then run the installer again:' -Command "irm $TRACEBLOC_CLI_INSTALL_URL | iex" -Reason "This tracebloc CLI is too old to register this machine from the installer. Update it in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex  then run this installer again."
     }
 
     $file = Join-Path $dir 'client-credential.env'
-    $plan = Get-HostCreatePlan -Cli $Cli -CredentialFile $file
+    $plan = Get-HostCreatePlan -Cli $Cli -CredentialFile $file -KubeContext $KubeContext
     if ($plan.Action -eq 'refuse') {
-      Write-Host ""
-      Warn "This machine already runs a tracebloc client that isn't in the account you just signed in as."
-      Hint "tracebloc runs one client per machine. Registering this machine now would make a"
-      Hint "second client and strand it (it could never install here). Pick one:"
-      Hint "  - Repair / update it     -> sign in as the account that owns it, then run this installer again"
-      Hint "  - Switch to this account -> remove the current client from this machine first"
-      Hint "  - Run both               -> install on a separate machine"
-      Write-Host ""
-      throw "Refusing to register a second client on this machine. See the options above."
+      Log "This machine already runs a secure environment that isn't in the account you just signed in as."
+      Log "tracebloc runs one secure environment per machine. Registering this machine now would make a"
+      Log "second secure environment and strand it (it could never install here). Pick one:"
+      Log "  - Repair / update it     -> sign in as the account that owns it, then run this installer again"
+      Log "  - Switch to this account -> delete the current secure environment from this machine first"
+      Log "  - Run both               -> install on a separate machine"
+      Stop-Setup -What "This machine's secure environment is in another account" -Next 'Sign in with the account it is in, or delete it with tracebloc delete, then run the installer again:' -Reason "Refusing to register a second secure environment on this machine. See the options above."
     }
     if ($plan.Action -notin @('adopt', 'reconnect', 'mint')) {
-      Write-Host ""
-      Warn "Couldn't determine whether a tracebloc client is already installed here."
-      if ($plan.Why) { Hint "tracebloc client create --plan $($plan.Why.TrimEnd('.'))." }
-      Hint "tracebloc runs one client per machine. Registering a new client now could strand"
-      Hint "a second one if an existing client just couldn't be seen - usually the cluster in"
-      Hint "the tracebloc WSL distro, or tracebloc itself, is briefly unreachable."
-      Write-Host ""
-      throw "Refusing to register this machine without verifying what's already on it. Run this installer again."
+      Log "Couldn't determine whether a secure environment is already installed here."
+      if ($plan.Why) { Log "tracebloc client create --plan $($plan.Why.TrimEnd('.'))." }
+      Log "tracebloc runs one secure environment per machine. Registering a new secure environment now could strand"
+      Log "a second one if an existing secure environment just couldn't be seen - usually the cluster in"
+      Log "the tracebloc WSL distro, or tracebloc itself, is briefly unreachable."
+      Stop-Setup -What "Couldn't tell whether this machine runs a secure environment already" -Reason "Refusing to register this machine without verifying what's already on it. Run this installer again."
     }
     $name = ''
     if ($plan.Action -ne 'mint' -and $plan.Namespace) {
       if ($plan.Action -eq 'adopt') {
-        Info "Found your secure environment '$($plan.Name)' - it's already registered for this machine."
+        Info "Your secure environment '$($plan.Name)' is already registered for this machine."
       } else {
-        Info "Found your secure environment '$($plan.Name)' - reconnecting it to this machine's new cluster."
+        Info "Reconnecting your secure environment '$($plan.Name)' to this machine's new cluster."
       }
       # The name only satisfies the required --name: a reuse keeps the registered one.
       $name = (ConvertTo-SanitizedInput -Value "$env:TRACEBLOC_CLIENT_NAME").Trim()
@@ -3302,12 +3496,13 @@ function Get-HostClientCredential {
     $create = @('client', 'create', '--yes', '--name', $name, '--credential-file', $file)
     if ($Reissue) {
       if ($help -notmatch '--reissue') {
-        throw "This tracebloc CLI can't issue a new credential to a running client yet. Update it in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex  then run this installer again."
+        Stop-Setup -What 'This tracebloc CLI is too old to register this machine' -Next 'Update it in a new PowerShell window, then run the installer again:' -Command "irm $TRACEBLOC_CLI_INSTALL_URL | iex" -Reason "This tracebloc CLI can't issue a new credential to a running secure environment yet. Update it in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex  then run this installer again."
       }
       $create += '--reissue'
     }
     $location = "$env:TRACEBLOC_CLIENT_LOCATION".Trim()
     if ($location) { $create += @('--location', $location) }
+    $create += Get-HostKubeContextArgs $KubeContext
     # Where this machine runs, as the cluster run read it (FACTS), and what it is
     # called (Get-MachineLabels), in the CLI's environment for the create only, as
     # provision.sh hands them to its own; a CLI that predates the names ignores them.
@@ -3326,10 +3521,10 @@ function Get-HostClientCredential {
       foreach ($k in @($savedFacts.Keys)) { Set-ProcessEnv -Name $k -Value $savedFacts[$k] }
     }
     if ($LASTEXITCODE -ne 0) {
-      throw "The tracebloc CLI could not register this machine (client create exited $LASTEXITCODE). Its own message is above."
+      Stop-Setup -What "Couldn't register this machine" -Reason "The tracebloc CLI could not register this machine (client create exited $LASTEXITCODE). Its own message is above."
     }
     if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or (Get-Item -LiteralPath $file).Length -eq 0) {
-      throw "The tracebloc CLI reported this machine registered but wrote no credential, so the client cannot be installed. Run this installer again."
+      Stop-Setup -What "Couldn't register this machine" -Reason "The tracebloc CLI reported this machine registered but wrote no credential, so the secure environment cannot be installed. Run this installer again."
     }
     return ,[System.IO.File]::ReadAllBytes($file)
   } finally {
@@ -3337,18 +3532,81 @@ function Get-HostClientCredential {
   }
 }
 
+# The backend a Client ID belongs to, read from the verified installer tree, so it is
+# the one the distro's install asks: TRACEBLOC_ENV, else CLIENT_ENV, reduced by
+# lib/common.sh's tb_client_env and named by lib/install-client-helm.sh's _backend_url,
+# each matched case for case as bash matches. $null when either table can't be read or
+# the address is not HTTPS: the pair is then left to the distro's check.
+function Get-HostBackendUrl {
+  param([string]$CoreDir)
+  try {
+    $common = [IO.File]::ReadAllText((Join-Path $CoreDir 'lib/common.sh'))
+    $helm = [IO.File]::ReadAllText((Join-Path $CoreDir 'lib/install-client-helm.sh'))
+  } catch { return $null }
+  $envFn = [regex]::Match($common, '(?ms)^tb_client_env\(\) \{\r?\n.*?^\}').Value
+  $urlFn = [regex]::Match($helm, '(?ms)^_backend_url\(\) \{\r?\n.*?^\}').Value
+  $aliases = [regex]::Matches($envFn, "(?m)^    ([a-z]+)\) +printf '([a-z]+)' +;;")
+  $stages = [regex]::Matches($urlFn, "(?m)^    ([a-z]+)\) +printf '([^']*)' +;;")
+  $otherwise = [regex]::Matches($urlFn, "(?m)^    \*\) +printf '([^']*)' +;;")
+  if ($aliases.Count -eq 0 -or $stages.Count -eq 0 -or $otherwise.Count -ne 1) { return $null }
+  $raw = "$env:TRACEBLOC_ENV"
+  if (-not $raw) { $raw = "$env:CLIENT_ENV" }
+  $stage = $raw
+  foreach ($m in $aliases) { if ($m.Groups[1].Value -ceq $raw) { $stage = $m.Groups[2].Value } }
+  $url = $otherwise[0].Groups[1].Value
+  foreach ($m in $stages) { if ($m.Groups[1].Value -ceq $stage) { $url = $m.Groups[2].Value } }
+  if (-not $url.StartsWith('https://', [StringComparison]::Ordinal)) { return $null }
+  return $url
+}
+
+# Whether a Client ID and password are a pair, asked as lib/install-client-helm.sh's
+# verify_credentials asks it (POST api-token-auth/): valid (200), invalid (400),
+# inactive (401), else unverified -- no answer, a throttle, a server error. HTTPS with
+# the runtime's own certificate checks and a bounded wait. The password goes in the
+# request body alone: never in the URL, a line said or logged, or a refusal.
+$HostCredentialCheckTimeoutSec = 30
+function Test-HostPresetCredential {
+  param([string]$ClientId, [string]$Password, [string]$CoreDir)
+  $backend = Get-HostBackendUrl -CoreDir $CoreDir
+  if (-not $backend) { return 'unverified' }
+  $ProgressPreference = 'SilentlyContinue'
+  $proxyArgs = @{}
+  if ($env:HTTPS_PROXY) { $proxyArgs['Proxy'] = $env:HTTPS_PROXY }
+  $code = 0
+  try {
+    $answer = Invoke-WebRequest -Uri "${backend}api-token-auth/" -Method Post -Body @{ username = $ClientId; password = $Password } -UseBasicParsing -TimeoutSec $HostCredentialCheckTimeoutSec -ErrorAction Stop @proxyArgs
+    $code = [int]$answer.StatusCode
+  } catch {
+    # PS 5.1 (WebException) and 7 (HttpResponseException) both carry the
+    # response's StatusCode; a network error carries no response at all.
+    try { $code = [int]$_.Exception.Response.StatusCode } catch { $code = 0 }
+  }
+  switch ($code) {
+    200     { return 'valid' }
+    400     { return 'invalid' }
+    401     { return 'inactive' }
+    default { return 'unverified' }
+  }
+}
+
 # provision.sh's _provision_prompt_preset_password, in its words (a Pester case reads
 # them from it): a client ID with no password asks for it, hidden, at a console that
-# can answer. The answer is kept here, never in $env:, so no child process inherits it.
+# can answer, and checks the pair before anything is written (Test-HostPresetCredential).
+# An empty answer is asked again, and a rejected pair both, the Client ID defaulting to
+# the last one, with no cap (Ctrl-C stops). A check that got no answer keeps the password:
+# the distro's install checks it again. The password is kept here, never in $env:, so no
+# child process inherits it.
 $script:HostPresetPassword = $null
 function Read-HostPresetPassword {
+  param([string]$CoreDir)
   $id = "$env:TRACEBLOC_CLIENT_ID"
   if (-not $id -or "$env:TRACEBLOC_CLIENT_PASSWORD" -or -not (Test-BootstrapCanPrompt)) { return }
-  Info "Installing the client with ID $id."
-  Hint "Enter the client password shown when it was created (typing is hidden)."
-  for ($try = 1; $try -le 3; $try++) {
+  $hint = 'Enter the password shown when that Client ID was created (typing is hidden).'
+  Info "Installing your secure environment with Client ID $id."
+  Hint $hint
+  while ($true) {
     $secret = $null
-    try { $secret = Read-Host '  Client password' -AsSecureString } catch { $secret = $null }
+    try { $secret = Read-Host '  Password' -AsSecureString } catch { $secret = $null }
     # No answer at all: asking again won't help.
     if ($null -eq $secret) { break }
     # NetworkCredential reads a SecureString on every platform; Marshal's PtrToStringAuto
@@ -3356,11 +3614,24 @@ function Read-HostPresetPassword {
     $typed = ConvertTo-SanitizedInput -Value ([System.Net.NetworkCredential]::new('', $secret).Password)
     $secret.Dispose()
     if (-not $typed) {
-      Warn "The client password cannot be empty."
+      Err 'A password is required.'
+      Hint $hint
       continue
     }
-    $script:HostPresetPassword = $typed
-    return
+    $status = Test-HostPresetCredential -ClientId $id -Password $typed -CoreDir $CoreDir
+    if ($status -eq 'inactive') { throw 'This tracebloc account is not active yet. Check your email for the activation link, then re-run.' }
+    if ($status -ne 'invalid') {
+      Set-ProcessEnv -Name 'TRACEBLOC_CLIENT_ID' -Value $id
+      $script:HostPresetPassword = $typed
+      return
+    }
+    $typed = $null
+    Err "Couldn't connect $([char]0x2014) your Client ID or password was rejected."
+    $answer = $null
+    try { $answer = Read-Host "  Client ID [$id]" } catch { $answer = $null }
+    if ($null -eq $answer) { break }
+    $answer = (ConvertTo-SanitizedInput -Value "$answer").Trim()
+    if ($answer) { $id = $answer }
   }
   throw (Format-PresetPasswordRefusal -ClientId $id)
 }
@@ -3368,7 +3639,7 @@ function Read-HostPresetPassword {
 # provision.sh's refusal of a client ID with no password it could take.
 function Format-PresetPasswordRefusal {
   param([string]$ClientId)
-  return "No valid password for client ID $ClientId. Copy it from the page where the client was created, or set TRACEBLOC_CLIENT_PASSWORD, then re-run."
+  return "No valid password for Client ID $ClientId. Copy it from the page where the Client ID was created, or set TRACEBLOC_CLIENT_PASSWORD, then re-run."
 }
 
 # The credentials the operator supplied (provision.sh's preset: TRACEBLOC_CLIENT_ID
@@ -3386,11 +3657,11 @@ function Get-HostPresetCredential {
   if ($set.Count -eq 1) {
     if ($set[0] -eq 'TRACEBLOC_CLIENT_ID') { throw (Format-PresetPasswordRefusal -ClientId $pair.TRACEBLOC_CLIENT_ID) }
     $unset = @($pair.Keys | Where-Object { -not $pair[$_] })[0]
-    throw "$($set[0]) is set but $unset is not. Set both to install with your client's credentials, or neither to sign in in the browser."
+    throw "$($set[0]) is set but $unset is not. Set both to install with your secure environment's credentials, or neither to sign in in the browser."
   }
   $text = ''
   foreach ($k in $pair.Keys) {
-    if ($pair[$k] -match "[`r`n]") { throw "$k has a line break in it, so it can't be your client's credential. Set it again without one." }
+    if ($pair[$k] -match "[`r`n]") { throw "$k has a line break in it, so it can't be your secure environment's credential. Set it again without one." }
     $text += "$k=$($pair[$k])`n"
   }
   return ,[System.Text.Encoding]::UTF8.GetBytes($text)
@@ -3422,7 +3693,7 @@ function Invoke-WslCore {
     if ($cli) { Assert-HostCliFloor -Cli $cli -CoreDir $CoreDir }
     $core = ConvertTo-DistroPath -Path $CoreDir
     $kubeconfig = ConvertTo-DistroPath -Path (Get-HostKubeconfigTarget)
-    $logHost = Join-Path $env:USERPROFILE '.tracebloc'
+    $logHost = Get-HostLogDir
     if (-not (Test-Path -LiteralPath $logHost)) { New-Item -ItemType Directory -Path $logHost -Force | Out-Null }
     $logDir = ConvertTo-DistroPath -Path $logHost
     # The host GPU check (section 4), before the first run: both runs carry its answer,
@@ -3437,26 +3708,32 @@ function Invoke-WslCore {
     New-PrivateDirectory -Path $handDir
     try {
       $handover = (ConvertTo-DistroPath -Path $handDir) + '/' + $CoreHandoverFile
-      Info "Setting up the cluster in the tracebloc WSL distro..."
+      Log "Setting up the cluster in the tracebloc WSL distro..."
+      Write-SectionEnd
       $rc = Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseCluster -Core $core -Kubeconfig $kubeconfig -LogDir $logDir -Handover $handover)
       if ($rc -ne 0) { return $rc }
       $handed = Read-CoreHandover -Path (Join-Path $handDir $CoreHandoverFile)
+      Write-SectionEnd
 
       if ($null -ne $credential) {
         # As provision.sh's preset path, which returns before its credential-rejected
         # repair: a supplied pair is never reissued.
         $reissue = $false
-        Info "Using the credentials you supplied - skipping browser sign-in."
+        Info "Using the Client ID you set, skipping browser sign-in."
       } else {
         $reissue = $handed.Reason -ceq $CredentialRejectedReason
-        Info "Registering this machine with tracebloc..."
-        $credential = Get-HostClientCredential -Cli $cli -Reissue:$reissue -Facts $handed.Facts
+        Log "Registering this machine with tracebloc..."
+        Write-Host '  Sign in to connect this machine to tracebloc.'
+        Write-Host ""
+        $credential = Get-HostClientCredential -Cli $cli -Reissue:$reissue -Facts $handed.Facts -KubeContext $handed.KubeContext
         # Signed in to the account that owns this client: see Invoke-HostExample.
         $script:HostSignedInCli = $cli
+        $script:HostKubeContext = $handed.KubeContext
       }
-      Info "Installing tracebloc in the tracebloc WSL distro..."
+      Log "Installing tracebloc in the tracebloc WSL distro..."
+      Write-SectionEnd
       $clientHandover = (ConvertTo-DistroPath -Path $handDir) + '/' + $CoreClientHandoverFile
-      $rc = Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseClient -Core $core -Kubeconfig $kubeconfig -LogDir $logDir -Handover $clientHandover -CredentialStdin -CredentialReissued:$reissue -PrevKubeContext $handed.PrevContext) -Stdin $credential
+      $rc = Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseClient -Core $core -Kubeconfig $kubeconfig -LogDir $logDir -Handover $clientHandover -CredentialStdin -CredentialReissued:$reissue) -Stdin $credential
       # The client run exits 0 still starting too: see Invoke-HostExample.
       $script:HostClientState = Read-CoreClientState -Path (Join-Path $handDir $CoreClientHandoverFile)
       return $rc
@@ -3480,11 +3757,12 @@ function Get-ExampleOptOut {
 }
 
 # After a connected install, `tracebloc data ingest --example` on CLI, the host CLI this
-# run signed in ($null: none did, and nothing runs). ClientState is what the client run
-# handed over; anything but connected runs nothing. Never throws. The bash twin is
-# lib/install-cli.sh's setup_example_use_case, which the distro's runs skip.
+# run signed in ($null: none did, and nothing runs), on tracebloc's KUBECONTEXT
+# (Get-HostKubeContextArgs). ClientState is what the client run handed over; anything
+# but connected runs nothing. Never throws. The bash twin is lib/install-cli.sh's
+# setup_example_use_case, which the distro's runs skip.
 function Invoke-HostExample {
-  param([string]$Cli, [string]$ClientState)
+  param([string]$Cli, [string]$ClientState, [string]$KubeContext)
   if (-not $Cli) {
     Log 'Example use case: not set up, as this run did not sign the tracebloc CLI in.'
     return
@@ -3510,16 +3788,24 @@ function Invoke-HostExample {
       Log "Example use case: not set up, as 'tracebloc data ingest --example --help' exited $(Format-ExitCode $probe.ExitCode)$late."
       return
     }
+    Write-SectionEnd
+    Write-Section 'Setting up your example use case'
+    Write-Host "  We'll ingest synthetic data and start a model"
+    Write-Host '  training so you can explore tracebloc.'
     Write-Host ""
-    Info "Setting up your example use case..."
     # With nobody at this console no Ctrl-C can come, so a run that does not end is
     # stopped: lib/install-cli.sh's setup_example_use_case.
     if (-not (Test-BootstrapCanPrompt)) { $deadline = Get-ReinstallTimeoutSeconds -Name 'TRACEBLOC_EXAMPLE_TIMEOUT' }
-    $rc = Invoke-HostCliNoInput -Cli $Cli -ArgumentList @('data', 'ingest', '--example') -TimeoutSec $deadline
+    $rc = Invoke-HostCliNoInput -Cli $Cli -ArgumentList (@('data', 'ingest', '--example') + (Get-HostKubeContextArgs $KubeContext)) -TimeoutSec $deadline
   } catch {
     $err = $_.Exception.Message
   }
-  if ($rc -eq 0) { return }
+  if ($rc -eq 0) {
+    Write-Host ""
+    Write-Host '  Your training results will appear on your'
+    Write-Host '  use case in the dashboard.'
+    return
+  }
   if ($rc -eq 130) {
     Info 'Stopped setting up the example use case.'
     return
@@ -3682,7 +3968,7 @@ function Get-KubeconfigContextsText {
   }
   $in = $false
   $keep = foreach ($line in ($Text -split "`n")) {
-    if ($line -match '^[^ \t#-]') { $in = ($line -match '^contexts[ \t]*:') }
+    if ($line -match '^[^ \t\r#-]') { $in = ($line -match '^contexts[ \t]*:') }
     if ($in) { $line }
   }
   return (@($keep) -join "`n")
@@ -3696,29 +3982,55 @@ function Test-KubeconfigContext {
   return ((Get-KubeconfigContextsText $Text) -match $named)
 }
 
-# The kubeconfig text less each item under contexts: named k3d-*, and a
-# current-context that names one. Block layout only, which kubectl and k3d write.
-function Remove-K3dContextText {
-  param([string]$Text)
+# The value VALUE of a kubeconfig key, as kubectl reads it: less a trailing comment
+# and the quotes around it.
+function ConvertFrom-KubeconfigValue {
+  param([string]$Value)
+  $v = ($Value -replace '[ \t]+#.*$', '').TrimEnd(" `t`r")
+  if ($v.Length -ge 2 -and ($v[0] -eq '"' -or $v[0] -eq "'") -and $v[-1] -eq $v[0]) { $v = $v.Substring(1, $v.Length - 2) }
+  return $v
+}
+
+# The kubeconfig text less the item under contexts: named CONTEXT, and a
+# current-context that names it; every other context is the user's and stays. An
+# item starts at a dash in its list's column, and its name is a key in the item's own
+# column: a list nested in a context (its extensions) neither ends it nor names it.
+# Block layout only, which kubectl and k3d write. reinstall.sh's twin:
+# _reinstall_drop_context.
+function Remove-KubeconfigContextText {
+  param([string]$Text, [string]$Context)
+  $named = {
+    param([string]$l)
+    if ($l -notmatch '^"?name"?[ \t]*:') { return $false }
+    return ((ConvertFrom-KubeconfigValue ($l -replace '^"?name"?[ \t]*:[ \t]*', '')) -ceq $Context)
+  }
   $out = New-Object System.Collections.ArrayList
   $buf = New-Object System.Collections.ArrayList
   $drop = $false
   $sec = ''
+  $col = -1; $kcol = -1
   foreach ($line in ($Text -split "`n")) {
-    if ($line -match '^[^ \t#-]') {
+    if ($line -match '^[^ \t\r#-]') {
       if (-not $drop) { foreach ($b in $buf) { [void]$out.Add($b) } }
-      $buf.Clear(); $drop = $false
-      $sec = ($line -replace '[ \t]*:.*$', '').Trim()
-      if ($line -match '^current-context[ \t]*:[ \t]*["'']?k3d-') { continue }
+      $buf.Clear(); $drop = $false; $col = -1
+      $sec = ($line -replace '[ \t]*:.*$', '').Replace('"', '').Trim()
+      if ($sec -eq 'current-context' -and (ConvertFrom-KubeconfigValue ($line -replace '^[^:]*:[ \t]*', '')) -ceq $Context) { continue }
       [void]$out.Add($line); continue
     }
     if ($sec -eq 'contexts') {
-      if ($line -match '^[ \t]*-([ \t]|\s*$)') {
+      $lead = $line.Length - $line.TrimStart(" `t").Length
+      $rest = $line.Substring($lead).TrimEnd("`r")
+      if ($rest -match '^-([ \t]|$)' -and ($col -lt 0 -or $lead -eq $col)) {
         if (-not $drop) { foreach ($b in $buf) { [void]$out.Add($b) } }
-        $buf.Clear(); $drop = $false
+        $buf.Clear(); $drop = $false; $col = $lead
+        $after = $rest -replace '^-[ \t]*', ''
+        $kcol = $lead + ($rest.Length - $after.Length)
+        if ($after -eq '' -or $after.StartsWith('#')) { $kcol = -1 }
+        elseif (& $named $after) { $drop = $true }
+      } elseif ($col -ge 0 -and $rest -ne '' -and -not $rest.StartsWith('#')) {
+        if ($kcol -lt 0) { $kcol = $lead }
+        if ($lead -eq $kcol -and (& $named $rest)) { $drop = $true }
       }
-      $l = $line -replace '^[ \t]*(-[ \t]+)?', ''
-      if ($l -match '^["'']?name["'']?[ \t]*:[ \t]*["'']?k3d-') { $drop = $true }
       [void]$buf.Add($line); continue
     }
     [void]$out.Add($line)
@@ -3728,9 +4040,10 @@ function Remove-K3dContextText {
 }
 
 # With Docker absent, a k3d install's cluster is out of this run's reach: remove its
-# k3d-* contexts from each kubeconfig, move the install record aside, say so in one
-# line; STATE, the retired core's state file, goes aside too. $true when done;
-# $false when a file cannot be changed, which leaves the refusal to stand.
+# context ($RetiredInstalls) from each kubeconfig, and no other, move the install
+# record aside, say so in two lines; STATE, the retired core's state file, goes aside
+# too. $true when done; $false when a file cannot be changed, which leaves the
+# refusal to stand.
 function Clear-RetiredK3dInstall {
   param([string]$Record, [string]$State, [string[]]$Kubeconfigs)
   # A failure puts every file back as it was, so the refusal's "Nothing was changed" holds.
@@ -3740,32 +4053,35 @@ function Clear-RetiredK3dInstall {
     foreach ($m in $moved) { try { Move-Item -LiteralPath $m[1] -Destination $m[0] -ErrorAction Stop } catch { $null = $_ } }
     foreach ($s in $saved) { try { [IO.File]::WriteAllText($s[0], $s[1]) } catch { $null = $_ } }
   }
+  $context = $RetiredInstalls['k3d'].Context
   foreach ($kc in $Kubeconfigs) {
     if (-not (Test-Path -LiteralPath $kc)) { continue }
     try {
       $text = [IO.File]::ReadAllText($kc)
-      $new = Remove-K3dContextText $text
+      $new = Remove-KubeconfigContextText -Text $text -Context $context
       if ($new -ne $text) {
         [void]$saved.Add(@($kc, $text))
         [IO.File]::WriteAllText($kc, $new)
       }
     } catch { & $undo; return $false }
   }
-  $cluster = $RetiredInstalls['k3d'].Context -replace '^k3d-', ''
-  $said = "Docker is not available on this machine, so its old k3d secure environment '$cluster' is left as it is: this installer deleted the k3d-* contexts from your kubeconfig"
+  $cluster = $context -replace '^k3d-', ''
+  $done = "Deleted its kubectl context $context"; $aside = $null
   $stamp = '.k3d-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ', [Globalization.CultureInfo]::InvariantCulture)
   if (Test-Path -LiteralPath $Record) {
     $aside = $Record + $stamp
     try { Move-Item -LiteralPath $Record -Destination $aside -ErrorAction Stop } catch { & $undo; return $false }
     [void]$moved.Add(@($Record, $aside))
-    $said += " and moved $Record to $aside"
+    $done += " and moved its install record to $aside"
   }
   # Left here, the state file would be read as that install on the next run, which
   # would then refuse the machine and name 'tracebloc delete' as the way out.
   if ($State -and (Test-Path -LiteralPath $State)) {
     try { Move-Item -LiteralPath $State -Destination ($State + $stamp) -ErrorAction Stop } catch { & $undo; return $false }
+    $done += $(if ($aside) { ' and its ' } else { ' and moved its ' }) + (Split-Path -Leaf $State) + " to $State$stamp"
   }
-  Write-Host "$said. It stays listed on tracebloc as Offline."
+  Info "Docker isn't available, so the old secure environment '$cluster' stays as it is. It shows as Offline on tracebloc."
+  Info "$done."
   return $true
 }
 
@@ -3798,14 +4114,14 @@ function Assert-NoRetiredInstall {
     try { $rec = Get-Content -Raw -LiteralPath $record -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop } catch { $rec = $null }
     $sub = if ($rec) { [string]$rec.substrate } else { '' }
     if (-not $sub) {
-      throw "This machine has a tracebloc install record, $record, that this installer cannot read, so it cannot tell whether a secure environment on $RetiredInstallNames is still set up here, and the tracebloc WSL distro is never set up beside one. Fix or delete that file if no such secure environment is left, then re-run. Nothing was changed on this machine."
+      Stop-Setup -What "Couldn't read this machine's install record" -Next "Fix or delete $record, then run the installer again:" -Reason "This machine has a tracebloc install record, $record, that this installer cannot read, so it cannot tell whether a secure environment on $RetiredInstallNames is still set up here, and the tracebloc WSL distro is never set up beside one. Fix or delete that file if no such secure environment is left, then re-run. Nothing was changed on this machine."
     }
     if ($RetiredInstalls.Contains($sub)) {
-      throw "This machine has a secure environment on $($RetiredInstalls[$sub].Name) (its install record $record says so), and this installer no longer sets one up or moves one. Nothing was changed on this machine. $move"
+      Stop-Setup -What "This machine runs a secure environment on $($RetiredInstalls[$sub].Name)" -Next 'To move it to WSL, delete it, then run the installer again:' -Command 'tracebloc delete' -Reason "This machine has a secure environment on $($RetiredInstalls[$sub].Name) (its install record $record says so), and this installer no longer sets one up or moves one. Nothing was changed on this machine. $move"
     }
   }
   if (Test-Path -LiteralPath $state) {
-    throw "This machine has a secure environment on $RetiredInstallNames ($state, which only its installer wrote, is here), and this installer no longer sets one up or moves one. Nothing was changed on this machine. If that secure environment is already gone, delete $state and re-run. $move"
+    Stop-Setup -What "This machine runs a secure environment on $RetiredInstallNames" -Next 'To move it to WSL, delete it, then run the installer again:' -Command 'tracebloc delete' -Reason "This machine has a secure environment on $RetiredInstallNames ($state, which only its installer wrote, is here), and this installer no longer sets one up or moves one. Nothing was changed on this machine. If that secure environment is already gone, delete $state and re-run. $move"
   }
   foreach ($kc in $kubeconfigs) {
     $text = $null
@@ -3813,7 +4129,7 @@ function Assert-NoRetiredInstall {
     if (-not $text) { continue }
     foreach ($r in $RetiredInstalls.Values) {
       if (Test-KubeconfigContext $text $r.Context) {
-        throw "This machine has a secure environment on $($r.Name) (the kubeconfig $kc has its context, $($r.Context)), and this installer no longer sets one up or moves one. Nothing was changed on this machine. If that secure environment is already gone, delete the $($r.Context) entries from $kc and re-run. $move"
+        Stop-Setup -What "This machine runs a secure environment on $($r.Name)" -Next 'To move it to WSL, delete it, then run the installer again:' -Command 'tracebloc delete' -Reason "This machine has a secure environment on $($r.Name) (the kubeconfig $kc has its context, $($r.Context)), and this installer no longer sets one up or moves one. Nothing was changed on this machine. If that secure environment is already gone, delete the $($r.Context) entries from $kc and re-run. $move"
       }
     }
   }
@@ -3822,10 +4138,10 @@ function Assert-NoRetiredInstall {
     $cluster = $r.Context -replace '^k3d-', ''
     $found = Get-RetiredClusterContainer $cluster
     if ($null -eq $found) {
-      throw "k3d is installed on this machine, and Docker did not answer whether it has the containers of the cluster $cluster, so this installer cannot tell whether a secure environment on $($r.Name) is still set up here, and the tracebloc WSL distro is never set up beside one. Start Docker Desktop, then re-run. Nothing was changed on this machine."
+      Stop-Setup -What "Docker didn't answer whether a secure environment on $($r.Name) is still here" -Next 'Start Docker Desktop, then run the installer again:' -Reason "k3d is installed on this machine, and Docker did not answer whether it has the containers of the cluster $cluster, so this installer cannot tell whether a secure environment on $($r.Name) is still set up here, and the tracebloc WSL distro is never set up beside one. Start Docker Desktop, then re-run. Nothing was changed on this machine."
     }
     if ($found) {
-      throw "This machine has a secure environment on $($r.Name) (Docker has the containers of its cluster $cluster, $found), and this installer no longer sets one up or moves one. Nothing was changed on this machine. $move"
+      Stop-Setup -What "This machine runs a secure environment on $($r.Name)" -Next 'To move it to WSL, delete it, then run the installer again:' -Command 'tracebloc delete' -Reason "This machine has a secure environment on $($r.Name) (Docker has the containers of its cluster $cluster, $found), and this installer no longer sets one up or moves one. Nothing was changed on this machine. $move"
     }
   }
 }
@@ -3992,18 +4308,19 @@ function Write-WslInstallLeft {
     $how += ", then Unregister-ScheduledTask -TaskName $KeepaliveTaskName -Confirm:`$false"
   }
   if ($Recorded) { $how = 'tracebloc delete' }
-  Hint "Left on this machine: $what. Run this installer again to finish (it reuses them), or remove them with: $how"
+  Log "Left on this machine: $what. Run this installer again to finish (it reuses them), or remove them with: $how"
 }
 
 function Invoke-WslInstall {
   param([string]$CoreDir)
+  Write-Section 'Preparing Windows'
   if ((Get-BootstrapUserSid) -eq $LocalSystemSid) {
-    throw "This installer is running as the Windows SYSTEM account, which WSL does not support. tracebloc runs in the signed-in user's own WSL distro, so run the install command as that user. A deployment tool (Intune, Configuration Manager) has to run it in the user's context, not as SYSTEM."
+    Stop-Setup -What "WSL doesn't run as the Windows SYSTEM account" -Next 'Run the installer as the person who signs in to this machine:' -Reason "This installer is running as the Windows SYSTEM account, which WSL does not support. tracebloc runs in the signed-in user's own WSL distro, so run the install command as that user. A deployment tool (Intune, Configuration Manager) has to run it in the user's context, not as SYSTEM."
   }
   Confirm-CoreDir -CoreDir $CoreDir
-  # A client ID with no password: its password is asked for at this console, before
-  # anything is written (section 5).
-  Read-HostPresetPassword
+  # A client ID with no password: its password is asked for at this console, and the
+  # pair checked, before anything is written (section 5).
+  Read-HostPresetPassword -CoreDir $CoreDir
   # The operator's preset pair (section 5): half a pair, or a value with a line
   # break, is refused before anything is written.
   Assert-HostPresetCredential
@@ -4031,6 +4348,7 @@ function Invoke-WslInstall {
   # Invoke-WslCore sets these once its account steps signed the host CLI in, and
   # once the client run handed over the client's state.
   $script:HostSignedInCli = $null
+  $script:HostKubeContext = ''
   $script:HostClientState = $null
   try {
     # Its first start, and every sign-in's (section 3).
@@ -4056,7 +4374,7 @@ function Invoke-WslInstall {
   }
   # The client run exits 0 connected or still starting. Last, after the record: a
   # Ctrl-C stops this script, as anywhere in it, and then costs only the example.
-  Invoke-HostExample -Cli $script:HostSignedInCli -ClientState $script:HostClientState
+  Invoke-HostExample -Cli $script:HostSignedInCli -ClientState $script:HostClientState -KubeContext $script:HostKubeContext
   return 0
 }
 
@@ -4064,14 +4382,19 @@ function Invoke-WslInstall {
 #  Main. $env:TRACEBLOC_PESTER lets the test suite dot-source this file to load the
 #  functions without running them. A child process: `exit` here closes no window.
 # =============================================================================
+# One run of this script, its exit code included: the main block's body, a function
+# so the copy catalog's Windows scenarios run it as a person does.
+function Invoke-WslMain {
+  param([string]$CoreDir)
+  try {
+    return (Invoke-WslInstall -CoreDir $CoreDir)
+  } catch {
+    Write-SetupStopped $_
+    return 1
+  }
+}
+
 if (-not $env:TRACEBLOC_PESTER) {
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-  try {
-    exit (Invoke-WslInstall -CoreDir $CoreDir)
-  } catch {
-    Write-Host ""
-    Err "Installation stopped: $_"
-    Write-Host "  It's safe to re-run this installer. If it keeps failing, share the output above with tracebloc support." -ForegroundColor DarkGray
-    exit 1
-  }
+  exit (Invoke-WslMain -CoreDir $CoreDir)
 }

@@ -34,6 +34,83 @@ _redact_file() {
   rm -f "${f}.bak" 2>/dev/null
 }
 
+# The Helm values a support bundle shows. The values a release stores,
+# and the installer's values.yaml, hold clientPassword and the chart's other secrets, and
+# a line-wise redaction misses any key it does not name and any value spread over lines.
+# So the bundle never takes them whole: _diag_values_view shows a value only under these
+# paths (dotted, a path and everything under it), the ones support reads: the machine's
+# environment, sizing and GPU words, storage, the runner, images, the network and the
+# feature switches. Even under them, a key named like a secret (_diag_values_secret_key),
+# and anything under it, stays hidden, and a key holding a dot never matches a path.
+# Every other key is listed with its value replaced, so support still sees which keys
+# are set. A key added to the chart is hidden until it is named here.
+# scripts/tests/diagnose.bats plants a value in every key of client/values.yaml and fails
+# on any value outside this list, and on any name here that reads as a secret.
+TB_DIAG_VALUES_KEEP="env.TRACEBLOC_ENV env.CLIENT_ENV
+  env.RESOURCE_LIMITS env.RESOURCE_REQUESTS env.RESOURCE_PROVENANCE
+  env.GPU_LIMITS env.GPU_REQUESTS env.GPU_UNSUPPORTED_CODE env.GPU_UNSUPPORTED_NAME
+  env.GPU_UNSUPPORTED_REASON env.RUNTIME_CLASS_NAME env.SINGLE_NODE env.DEVICE_TYPE
+  env.TRACEBLOC_CLOUD_PROVIDER env.TRACEBLOC_HOST_CPU_NAME env.TRACEBLOC_HOST_OS
+  env.TRACEBLOC_MACHINE_KIND
+  global.imageRegistry dockerRegistry.server dockerRegistry.create
+  gpu appleGpuRunner hostPath jobData storageClass pvc singleNode clusterScope namespace
+  resources localApi selinux images networkPolicy.enabled egressProxy.enabled
+  telemetryCollector.enabled autoUpgrade.enabled perExperimentDbCreds trainingResume
+  perIngestionTablesByEnv trainingResumeEnabledByEnv perExperimentDbCredsByEnv
+  narrowEdgeuserByEnv dropEdgeuserByEnv serviceDbAccountsByEnv ingestRunTokenByEnv
+  bootstrapDbReparentByEnv rotateMysqlRootByEnv selfRotateMysqlRootByEnv"
+# A key named like a secret, as diagnose.bats reads one (case-insensitive, an awk ERE).
+TB_DIAG_SECRET_KEY_RE='pass(word|wd)?|secret|credential|api[_-]?key|private[_-]?key|token$|auth$'
+TB_DIAG_VALUE_HIDDEN="[not collected]"
+
+# _diag_values_view -- the Helm values YAML on STDIN as the bundle shows it: each line under
+# a TB_DIAG_VALUES_KEEP path as it is; any other key with its value replaced by
+# TB_DIAG_VALUE_HIDDEN, a list item the same, a multi-line value's further lines dropped;
+# comments and anything it cannot read as a key, a list item or a value's continuation
+# dropped. Reads to EOF.
+_diag_values_view() {
+  # One line: BSD awk refuses a -v value that holds a newline.
+  awk -v keep="${TB_DIAG_VALUES_KEEP//$'\n'/ }" -v hid="$TB_DIAG_VALUE_HIDDEN" -v sre="$TB_DIAG_SECRET_KEY_RE" '
+    BEGIN { nk = split(keep, K, /[[:space:]]+/); depth = 0; cont = -1 }
+    function kept(p,   i) {
+      for (i = 1; i <= depth; i++) if (B[i]) return 0
+      for (i = 1; i <= nk; i++) {
+        if (K[i] == "") continue
+        if (p == K[i] || index(p, K[i] ".") == 1) return 1
+      }
+      return 0
+    }
+    function path(   i, p) { p = ""; for (i = 1; i <= depth; i++) p = p (p == "" ? "" : ".") N[i]; return p }
+    /^[[:space:]]*$/ { next }
+    /^[[:space:]]*#/ { next }
+    /^(---|\.\.\.)[[:space:]]*$/ { next }
+    {
+      match($0, /^ */); ind = RLENGTH; body = substr($0, ind + 1)
+      # A further line of the value above: shown only where that value is.
+      if (cont >= 0 && ind > cont) { if (contok) print; next }
+      cont = -1
+      while (depth > 0 && I[depth] >= ind) depth--
+      if (body ~ /^-([[:space:]]|$)/) {
+        p = path()
+        if (kept(p)) { print; cont = ind; contok = 1 }
+        else { print substr($0, 1, ind) "- " hid; cont = ind; contok = 0 }
+        next
+      }
+      if (body !~ /^("[^"]*"|'"'"'[^'"'"']*'"'"'|[A-Za-z0-9_.\/-]+)[[:space:]]*:([[:space:]]|$)/) next
+      key = body; sub(/[[:space:]]*:([[:space:]].*)?$/, "", key); gsub(/^["'"'"']|["'"'"']$/, "", key)
+      rest = body; sub(/^("[^"]*"|'"'"'[^'"'"']*'"'"'|[^:]+)[[:space:]]*:[[:space:]]*/, "", rest)
+      depth++; N[depth] = key; I[depth] = ind
+      # Never kept: a key named like a secret, and a key holding a dot, which would
+      # otherwise read as the prefix of a kept path.
+      B[depth] = (tolower(key) ~ sre || index(key, ".") > 0)
+      p = path()
+      if (rest == "" || rest ~ /^#/) { print substr($0, 1, ind) key ":"; next }
+      if (kept(p)) { print; cont = ind; contok = 1; next }
+      print substr($0, 1, ind) key ": " hid; cont = ind; contok = 0
+    }
+  '
+}
+
 # Redact every regular file under a directory.
 _redact_tree() {
   local f
@@ -68,7 +145,7 @@ _drop_termination_messages() {   # NS POD
 run_diagnose() {
   set +e   # every step is best-effort — never abort the bundle mid-collection
 
-  local ts base outdir d ns cn
+  local ts base outdir d ns cn ctx
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null)"; [[ -z "$ts" ]] && ts="bundle"
   base="${HOST_DATA_DIR:-$HOME/.tracebloc}"; mkdir -p "$base" 2>/dev/null
   cn="${CLUSTER_NAME:-tracebloc}"
@@ -83,6 +160,15 @@ run_diagnose() {
   # and --diagnose is exactly the "API may be wedged" path, where an unbounded
   # call would freeze the bundle this function exists to produce.
   local kt="--request-timeout=5s"
+  # tracebloc's cluster, by the context its install record names, as the CLI finds it:
+  # the install adds that context and leaves the user's current one alone. With none
+  # recorded, the current context is read.
+  ctx="$(_tb_record_prior kube_context "$(cat "$(tb_record_path)" 2>/dev/null)")"
+  ctx="${ctx#\"}"; ctx="${ctx%\"}"; [[ "$ctx" != null ]] || ctx=""
+  if [[ -n "$ctx" && -z "${TB_KUBE_CONTEXT_PIN:-}" ]] && declare -F _native_k3s_pin_context >/dev/null 2>&1; then
+    _native_k3s_pin_context "$ctx" \
+      || { rm -rf "$outdir"; echo "  diagnose: cannot write the temporary file that names tracebloc's kube context" >&2; return 1; }
+  fi
   ns="${TB_NAMESPACE:-}"
   if [[ -z "$ns" ]] && has kubectl; then
     ns="$(kubectl get pods -A $kt 2>/dev/null | awk '/-jobs-manager/{print $1; exit}')"
@@ -91,7 +177,7 @@ run_diagnose() {
 
   # Surface the client version first — the #1 thing support needs to know.
   local cver; cver="$(_chart_version "$ns")"
-  info "tracebloc client version: ${cver:-unknown}   (namespace: $ns)"
+  info "secure environment version: ${cver:-unknown}   (namespace: $ns)"
   info "Collecting diagnostics — this is safe; credentials are redacted before the file is written."
 
   # RFC 0001 host audit — read-only capability/privilege probe + install tier.
@@ -168,8 +254,8 @@ run_diagnose() {
       done <<<"$_wl_rows"
     else
       {
-        echo "## client workload logs NOT collected"
-        echo "Could not list the client's workload Deployments in namespace '$ns' by release label"
+        echo "## secure environment workload logs NOT collected"
+        echo "Could not list the secure environment's workload Deployments in namespace '$ns' by release label"
         echo "(app.kubernetes.io/instance=$ns). Deployments carrying that label:"
         kubectl get deployment -n "$ns" -l "app.kubernetes.io/instance=$ns" $kt 2>&1
       } > "$d/logs/workloads-unresolved.txt" 2>&1
@@ -200,11 +286,16 @@ run_diagnose() {
   if has helm && { ! has kubectl || kubectl cluster-info --request-timeout=5s >/dev/null 2>&1; }; then
     # NOTE: deliberately NOT collecting `helm get manifest` — it renders the
     # Secret objects with base64-encoded credentials (CLIENT_PASSWORD,
-    # .dockerconfigjson), which the text redaction can't see. `helm get values`
-    # (input values, redacted) + the kubectl output already cover triage.
+    # .dockerconfigjson), which the text redaction can't see. The stored values
+    # hold the same secrets: they reach the bundle only through _diag_values_view,
+    # straight from helm's pipe, with helm's stderr dropped.
+    local hrc
     {
       echo "## helm list -A";          helm list -A 2>&1
-      echo; echo "## helm get values $ns"; helm get values "$ns" -n "$ns" 2>&1
+      echo; echo "## helm get values $ns (values outside TB_DIAG_VALUES_KEEP: ${TB_DIAG_VALUE_HIDDEN})"
+      hrc=0
+      ( set -o pipefail; helm get values "$ns" -n "$ns" 2>/dev/null </dev/null | _diag_values_view ) || hrc=$?
+      [[ "$hrc" -eq 0 ]] || echo "(helm exit $hrc)"
     } > "$d/04-helm.txt" 2>&1
   elif has helm; then
     echo "## helm skipped — API unreachable (bounded cluster-info probe failed)" > "$d/04-helm.txt" 2>&1
@@ -212,7 +303,11 @@ run_diagnose() {
 
   # ── install artifacts (copied, redacted afterwards) ──
   cp "$base"/install-*.log "$d/" 2>/dev/null
-  [[ -f "$base/values.yaml" ]] && cp "$base/values.yaml" "$d/values.yaml" 2>/dev/null
+  # The installer's values file holds clientPassword: shown the way the stored values are.
+  if [[ -f "$base/values.yaml" ]]; then
+    { echo "# ${base}/values.yaml (values outside TB_DIAG_VALUES_KEEP: ${TB_DIAG_VALUE_HIDDEN})"
+      _diag_values_view < "$base/values.yaml"; } > "$d/values.yaml" 2>/dev/null
+  fi
 
   # ── proxy / env ──
   {
@@ -229,6 +324,7 @@ run_diagnose() {
   local bundle="$base/tracebloc-diagnose-$ts.tgz"
   tar -czf "$bundle" -C "$outdir" "tracebloc-diagnose-$ts" 2>/dev/null
   rm -rf "$outdir" 2>/dev/null
+  tb_scratch_reap
 
   echo ""
   if [[ -f "$bundle" ]]; then

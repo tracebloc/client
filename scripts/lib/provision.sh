@@ -89,14 +89,28 @@ _host_machine_name() {
 
 # _name_slug NAME -- NAME as `client create` makes a namespace of it (the CLI's
 # slug.Slugify), for ASCII: lowercase, every run of other
-# characters one "-", none at either end, 63 at most. A name with letters outside
+# characters one "-", none at either end, _NAME_MAX at most. A name with letters outside
 # ASCII loses them here; the CLI transliterates them.
+_NAME_MAX=63
 _name_slug() {
   local s
   s="$(printf '%s' "${1:-}" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -c 'a-z0-9' '-' | LC_ALL=C tr -s '-')"
   s="${s#-}"; s="${s%-}"
-  s="${s:0:63}"; s="${s%-}"
+  s="${s:0:$_NAME_MAX}"; s="${s%-}"
   printf '%s' "$s"
+}
+
+# _name_rule -- what a name may be, as _name_slug makes its namespace: the line under
+# a refused name.
+_name_rule() {
+  printf 'Use letters, digits and hyphens, up to %s characters; spaces and other signs become hyphens.' "$_NAME_MAX"
+}
+
+# _name_refused WHY -- a name that can't be used, on the terminal the name prompt is on:
+# WHY on the ✖ line, then _name_rule. The prompt asks again.
+_name_refused() {
+  log "Answer refused: $1"
+  { _tb_refused_lines "$1" "$(_name_rule)" >/dev/tty; } 2>/dev/null || true
 }
 
 # _name_all_digits NAME -- true when NAME's slug is only digits. Its namespace would be
@@ -187,51 +201,51 @@ _run_device_login() {
   fi
 }
 
-# SIGN_IN_ATTEMPTS: how many times the device sign-in may run — the initial
-# attempt plus ONE in-place retry. Declared once and used as the loop bound AND
-# the "is there a next attempt?" test below, so the two can't drift into
-# disagreeing about how many tries there are.
+# SIGN_IN_ATTEMPTS: how many times the device sign-in runs with no one to press
+# Enter (_device_sign_in): the first attempt and one fresh code. Used as the loop's
+# bound and its "is there a next attempt?" test, so the two can't disagree.
 : "${SIGN_IN_ATTEMPTS:=2}"
 
-# _device_sign_in: sign in, with ONE in-place retry for a fresh code.
+# The tracebloc CLI's exit for Ctrl-C (cli-dev internal/cli/exitcodes.go,
+# exitInterrupted), the shell's 128 + SIGINT.
+_CLI_EXIT_INTERRUPTED=130
+
+# _device_sign_in: sign in; a sign-in that didn't complete is offered again.
 #
 # The device code has a hard ten-minute deadline and the human approving it is
-# reading a phone — a lapsed code is an ordinary outcome, not an exceptional one.
-# It used to cost a full installer re-run: everything already done (the
-# prerequisites, the cluster) was thrown away over a missed prompt. This mirrors
-# the name prompt's retry loop further down, for the same reason — an interactive
-# step that can fail for a benign reason must not abort a long install.
-#
-# Exactly one retry:
-#   • a second failure is evidence of something other than a missed code, and a
-#     retry loop there would just hide it behind a prompt nobody can satisfy;
-#   • at a terminal on this machine the fresh code waits for Enter, so its ten
-#     minutes start when the person is back; a FAILED read (rc != 0 = EOF / no
-#     live input) can't be fixed by re-prompting, so it stops;
-#   • with no terminal, or over ssh (tb_over_ssh), the run may be a script or
-#     unattended and nobody may press Enter, so the fresh code comes at once: the
-#     CLI prints its link to the terminal and the install log, where the person
-#     driving the run reads it.
+# reading a phone, so a lapsed or refused code is an ordinary outcome, never the
+# end of a long install. It is offered again only when the CLI ended without
+# asking: one that asked for a new code itself leaves only signed in or on Ctrl-C,
+# and Ctrl-C (_CLI_EXIT_INTERRUPTED) stops the run, as install-k8s.sh's INT trap does.
+#   • at a terminal on this machine each failure waits for Enter, so the fresh
+#     code's ten minutes start when the person is back, with no cap: Ctrl-C stops.
+#     A FAILED read (rc != 0 = EOF / no live input) can't be fixed by asking again,
+#     so it stops;
+#   • with no terminal, or over ssh (tb_over_ssh), the run may be driven and nobody
+#     may press Enter, so one fresh code comes at once, SIGN_IN_ATTEMPTS in all: the
+#     CLI prints its link to the terminal and the install log.
 # Every way out falls through to the same fatal error, whose advice is the ONLY
 # next step printed — the CLI's own is suppressed above.
 _device_sign_in() {
-  local attempt
-  for (( attempt = 1; attempt <= SIGN_IN_ATTEMPTS; attempt++ )); do
-    _run_device_login && return 0
-    [[ "$attempt" -lt "$SIGN_IN_ATTEMPTS" ]] || break
+  local attempt=0 rc
+  while :; do
+    attempt=$((attempt + 1))
+    rc=0; _run_device_login || rc=$?
+    [[ "$rc" -ne 0 ]] || return 0
+    [[ "$rc" -ne "$_CLI_EXIT_INTERRUPTED" ]] || exit 130
     # The CLI's own ✖ line above says what went wrong; machines and the log read the rest.
     tb_machine_lines echo ""
     tb_machine_lines warn "Sign-in didn't complete — the code lapsed or wasn't approved."
-    if ! _prompt_tty || tb_over_ssh; then
-      tb_machine_lines hint "Nothing is lost: a fresh code follows, and the install carries on from here."
+    if _prompt_tty && ! tb_over_ssh; then
+      tb_machine_lines hint "Nothing is lost: the install is paused right here, not restarted."
+      # The WRITE is guarded (|| true) so a test without a real /dev/tty doesn't
+      # abort; the read comes from TRACEBLOC_TTY, like every other prompt here.
+      printf '\n  Press Enter to sign in again, or Ctrl-C to stop.' >/dev/tty 2>/dev/null || true
+      IFS= read -r _ <"$TRACEBLOC_TTY" || break
       continue
     fi
-    tb_machine_lines hint "Nothing is lost: the install is paused right here, not restarted."
-    # The prompt WRITE is guarded (|| true) so a test without a real /dev/tty
-    # doesn't abort; the read comes from TRACEBLOC_TTY, like every other prompt here.
-    # The CLI's own words for the same offer (cli-dev auth.go, signInInBrowser).
-    printf '\n  ? Press Enter for a new code, or Ctrl-C to stop: ' >/dev/tty 2>/dev/null || true
-    IFS= read -r _ <"$TRACEBLOC_TTY" || break
+    [[ "$attempt" -lt "$SIGN_IN_ATTEMPTS" ]] || break
+    tb_machine_lines hint "Nothing is lost: a fresh code follows, and the install carries on from here."
   done
   tb_fail_next "Run the installer again to sign in:"
   # The CLI's own ✖ line above says why; the end block says what to do.
@@ -273,7 +287,7 @@ _report_create_failure() {
   local out="$1" loc="$2" src="${3:-auto}" errmatches errline l
   echo ""
   if grep -qiE 'location.*not a valid choice' "$out" 2>/dev/null; then
-    warn "\"${loc:-that location}\" isn't a recognized carbon zone — the client wasn't created."
+    warn "\"${loc:-that location}\" isn't a recognized carbon zone — the secure environment wasn't created."
     # The rejected value came either from TRACEBLOC_CLIENT_LOCATION (an explicit
     # override the operator set) or from the silent timezone auto-derivation.
     # Blaming the timezone when the operator pinned the value reads as "the env
@@ -299,12 +313,12 @@ _report_create_failure() {
   errline="$(head -4 <<<"$errmatches")"
   # A person reads what tracebloc answered, under one ✖ line; machines the whole lines.
   if [[ -n "$errline" ]]; then
-    tb_machine_lines warn "The client couldn't be provisioned:"
+    tb_machine_lines warn "The secure environment couldn't be provisioned:"
     while IFS= read -r l; do [[ -z "$l" ]] || tb_machine_lines hint "$l"; done <<<"$errline"
     _tb_err_line "Couldn't register this machine" 2>&1
     while IFS= read -r l; do [[ -z "$l" ]] || echo "    ${l#Error: }"; done <<<"$errline"
   else
-    tb_machine_lines warn "The client couldn't be provisioned."
+    tb_machine_lines warn "The secure environment couldn't be provisioned."
     _tb_err_line "Couldn't register this machine" 2>&1
   fi
 }
@@ -366,18 +380,20 @@ _provision_wants_preset_password() {
   [[ -n "${TRACEBLOC_CLIENT_ID:-}" && -z "${TRACEBLOC_CLIENT_PASSWORD:-}" ]]
 }
 
-# Asks for the password (read -s from TRACEBLOC_TTY, up to 3 tries), checks it
-# with verify_credentials when that is loaded, and sets TRACEBLOC_CLIENT_PASSWORD
-# in this shell -- not exported, so no child process inherits it. A rejected
-# password is asked again; an inactive account, three failures, or a terminal
-# that gives no input (EOF) stop with the remedy. Never prints the password.
+# Asks for the password (read -s from TRACEBLOC_TTY), checks it with
+# verify_credentials when that is loaded, and sets TRACEBLOC_CLIENT_PASSWORD in this
+# shell -- not exported, so no child process inherits it. An empty or rejected answer
+# is asked again, with no cap (Ctrl-C stops); a rejection asks for the Client ID too,
+# Enter keeping it. An inactive account, or a terminal that gives no input (EOF),
+# stops with the remedy. Never prints the password.
 _provision_prompt_preset_password() {
-  local _pw="" _try _rc _status
-  info "Installing the client with ID ${TRACEBLOC_CLIENT_ID}."
-  hint "Enter the client password shown when it was created (typing is hidden)."
-  for _try in 1 2 3; do
+  local _pw="" _id _rc _status
+  local _hint="Enter the password shown when that Client ID was created (typing is hidden)."
+  info "Installing your secure environment with Client ID ${TRACEBLOC_CLIENT_ID}."
+  hint "$_hint"
+  while true; do
     _pw=""
-    printf '  Client password: ' >/dev/tty 2>/dev/null || true
+    printf '  Password: ' >/dev/tty 2>/dev/null || true
     _rc=0; IFS= read -r -s _pw <"$TRACEBLOC_TTY" || _rc=1
     printf '\n' >/dev/tty 2>/dev/null || true
     # The same cleaning the typed-credential path applies (_sanitize_credential),
@@ -385,7 +401,8 @@ _provision_prompt_preset_password() {
     _pw="$(_strip_paste_garbage "$_pw")"
     if [[ -z "$_pw" ]]; then
       [[ "$_rc" -ne 0 ]] && break    # EOF / no interactive input -- asking again won't help
-      warn "The client password cannot be empty."
+      _tb_err_line "A password is required." 2>&1
+      hint "$_hint"
       continue
     fi
     _status="unverified"
@@ -399,11 +416,17 @@ _provision_prompt_preset_password() {
       inactive)
         error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
       *)
-        warn "That password was rejected for client ID ${TRACEBLOC_CLIENT_ID}." ;;
+        _tb_err_line "Couldn't connect — your Client ID or password was rejected." 2>&1
+        _id=""
+        printf '  Client ID [%s]: ' "$TRACEBLOC_CLIENT_ID" >/dev/tty 2>/dev/null || true
+        IFS= read -r _id <"$TRACEBLOC_TTY" || break
+        _id="$(_strip_paste_garbage "$_id")"
+        _id="${_id#"${_id%%[![:space:]]*}"}"; _id="${_id%"${_id##*[![:space:]]}"}"
+        [[ -z "$_id" ]] || TRACEBLOC_CLIENT_ID="$_id" ;;
     esac
     _pw=""
   done
-  error "No valid password for client ID ${TRACEBLOC_CLIENT_ID}. Copy it from the page where the client was created, or set TRACEBLOC_CLIENT_PASSWORD, then re-run."
+  error "No valid password for Client ID ${TRACEBLOC_CLIENT_ID}. Copy it from the page where the Client ID was created, or set TRACEBLOC_CLIENT_PASSWORD, then re-run."
 }
 
 provision_client() {
@@ -427,7 +450,7 @@ provision_client() {
     _provision_prompt_preset_password
   fi
   if _provisioning_preset; then
-    info "Using the credentials you supplied — skipping browser sign-in."
+    info "Using the Client ID you set, skipping browser sign-in."
     return 0
   fi
 
@@ -445,8 +468,8 @@ provision_client() {
   # `tracebloc login`. Once the CLI release lands, the probe passes and the
   # one-step browser flow takes over automatically.
   if ! _cli_supports_provisioning; then
-    warn "This tracebloc CLI is too old to provision a client from the installer — falling back to manual sign-in."
-    hint "Connect an existing client below, or upgrade the CLI later for one-step browser sign-in:"
+    warn "This tracebloc CLI is too old to provision a secure environment from the installer — falling back to manual sign-in."
+    hint "Connect an existing secure environment below, or upgrade the CLI later for one-step browser sign-in:"
     hint "  curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh"
     return 0
   fi
@@ -487,12 +510,12 @@ provision_client() {
     # Same signal the Helm-step one-client guard keys on.
     if [[ "${INSTALLED_CLIENT_UNKNOWN:-0}" == 1 ]]; then
       echo ""
-      warn "Couldn't determine whether a tracebloc client is already installed here."
-      hint "tracebloc runs one client per machine. Registering a new client now could strand"
-      hint "a second one if an existing client just couldn't be seen — usually the cluster API"
+      warn "Couldn't determine whether a secure environment is already installed here."
+      hint "tracebloc runs one secure environment per machine. Registering a new one now could strand"
+      hint "a second one if an existing secure environment just couldn't be seen — usually the cluster API"
       hint "is briefly unreachable. Check it and re-run:"
-      hint "  kubectl cluster-info"
-      hint "  helm list -A"
+      hint "  $(tb_kubectl_shown) cluster-info"
+      hint "  $(tb_helm_shown) list -A"
       echo ""
       error "Refusing to provision without verifying what's already on this machine."
     fi
@@ -509,17 +532,10 @@ provision_client() {
       # `tracebloc`, defer to `client create` (adopts if it's yours, 409s if truly
       # cross-account) and the Helm-step one-client guard, which key on clientId.
       if [[ "$_own_rc" -eq 1 && "$INSTALLED_CLIENT_NS" != "tracebloc" ]]; then
-        echo ""
-        warn "This machine already runs a tracebloc client (namespace '${INSTALLED_CLIENT_NS}') that isn't in the account you just signed in as."
-        hint "tracebloc runs one client per machine. Provisioning now would register a"
-        hint "second client and strand it (it could never install here). Pick one:"
-        hint "  • Repair / update it     →  sign in as the account that owns it, or re-run with that client's credentials"
-        hint "  • Switch to this account →  release and remove the current client first:"
-        _release_client_hint "        "
-        hint "      then re-run this installer"
-        hint "  • Run both               →  install on a separate machine"
-        echo ""
-        error "Refusing to provision a second client on this machine. See the options above."
+        _refuse_foreign_client "This machine runs another account's secure environment" \
+          "To keep it, run the installer again and sign in as the account that owns it." \
+          "To use your account instead, sign in as the owner and delete it first:" \
+          "This machine already runs a secure environment (namespace '${INSTALLED_CLIENT_NS}') that isn't in the account you just signed in as. tracebloc runs one secure environment per machine, so this run does not register a second one, which could never install here."
       elif [[ "$_own_rc" -eq 1 ]]; then
         log "installed client is in the legacy 'tracebloc' namespace (not listed by its slug); deferring ownership to client create + the Helm one-client guard, which key on clientId"
       elif [[ "$_own_rc" -eq 0 ]]; then
@@ -551,6 +567,16 @@ provision_client() {
   # yields nothing, provision with NO location rather than asking. A pinned
   # TRACEBLOC_CLIENT_LOCATION still overrides for unattended installs.
   local client_name="${TRACEBLOC_CLIENT_NAME:-}" client_location="${TRACEBLOC_CLIENT_LOCATION:-}"
+  # The blank line before the first thing the name step says on the terminal.
+  local _name_lead=$'\n'
+  # A TRACEBLOC_CLIENT_NAME that can't be used is asked for on a terminal, as a typed
+  # one is below; with no terminal it stops the run further down.
+  client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
+  if [[ -z "$_reuse_ns" ]] && _name_all_digits "$client_name" && _prompt_tty; then
+    printf '%s' "$_name_lead" >/dev/tty 2>/dev/null || true; _name_lead=""
+    _name_refused "TRACEBLOC_CLIENT_NAME \"${client_name}\" can't be used: a name needs at least one letter."
+    client_name=""
+  fi
   if [[ -z "$client_name" && -n "$_reuse_ns" ]]; then
     # Reusing the client installed here: no prompt. The name only satisfies the
     # required --name; an adopt keeps the registered one.
@@ -574,11 +600,11 @@ provision_client() {
         case "$_plan_action" in
           adopt)
             client_name="$_plan_ns"; _reuse_ns="$_plan_ns"
-            info "Found your secure environment '${_plan_name:-$_plan_ns}' — it's already registered for this machine."
+            info "Your secure environment '${_plan_name:-$_plan_ns}' is already registered for this machine."
             ;;
           reconnect)
             client_name="$_plan_ns"; _reuse_ns="$_plan_ns"
-            info "Found your secure environment '${_plan_name:-$_plan_ns}' — reconnecting it to this machine's new cluster."
+            info "Reconnecting your secure environment '${_plan_name:-$_plan_ns}' to this machine's new cluster."
             ;;
         esac
       fi
@@ -590,19 +616,19 @@ provision_client() {
   if [[ -z "$client_name" ]] && _prompt_tty; then
     # Read the name from the terminal, the `?` prompt `tracebloc delete` asks with:
     # Enter takes the default in brackets (_client_name_default, this host's name).
-    # With no default, an empty line is asked again instead of accepted: a stray
+    # A name that can't be used is asked again under its ✖ line (_name_refused), with
+    # no cap: Ctrl-C stops. With no default an empty line is one of them: a stray
     # newline queued in the tty during the ~minute browser-approval wait above
-    # (type-ahead) would otherwise be read as an empty name and abort the install
-    # at the "name is required" error below (customer-reported 2026-07-09). A FAILED
+    # (type-ahead) must not end the install (customer-reported 2026-07-09). A FAILED
     # read (rc!=0 = EOF / no live input, e.g. a non-PTY ssh or IDE terminal) can't
-    # be fixed by re-prompting and takes no default, so stop and let that actionable
-    # error fire. The prompt WRITE is guarded (|| true) so a test without a real
+    # be fixed by asking again and takes no default, so stop and let the actionable
+    # error below fire. The prompt WRITE is guarded (|| true) so a test without a real
     # /dev/tty doesn't abort; reads use TRACEBLOC_TTY.
-    local _name_try _name_read_ok _name_default _name_ask="  ? Name your secure environment "
+    local _name_read_ok _name_default _name_ask="  ? Name your secure environment "
     _name_default="$(_client_name_default)"
     [[ -z "$_name_default" ]] || _name_ask="${_name_ask}[${_name_default}] "
-    for _name_try in 1 2 3; do
-      printf '\n%s' "$_name_ask" >/dev/tty 2>/dev/null || true
+    while :; do
+      printf '%s%s' "$_name_lead" "$_name_ask" >/dev/tty 2>/dev/null || true; _name_lead=""
       _name_read_ok=1; IFS= read -r client_name <"$TRACEBLOC_TTY" || _name_read_ok=0
       # Plain `read` (NOT `read -e`): setup_log_file has already redirected this
       # process's stdout+stderr through `exec > >(tee …) 2>&1`, and readline
@@ -615,16 +641,16 @@ provision_client() {
       # path uses.
       client_name="$(_strip_paste_garbage "$client_name")"
       client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
-      # An all-digit answer is asked again, as an empty one is below.
       if [[ -n "$client_name" ]] && _name_all_digits "$client_name"; then
+        _name_refused "\"${client_name}\" can't be used: a name needs at least one letter."
         client_name=""
-        if [[ "$_name_try" -lt 3 ]]; then printf '  A name needs at least one letter.\n' >/dev/tty 2>/dev/null || true; fi
-        continue
+        [[ "$_name_read_ok" == 1 ]] && continue
+        break
       fi
       [[ -n "$client_name" ]] && break       # captured a name (incl. a no-newline partial)
-      [[ "$_name_read_ok" == 0 ]] && break    # EOF / no interactive input — retrying won't help
+      [[ "$_name_read_ok" == 0 ]] && break    # EOF / no interactive input — asking again won't help
       if [[ -n "$_name_default" ]]; then client_name="$_name_default"; break; fi   # Enter: the default
-      if [[ "$_name_try" -lt 3 ]]; then printf '  A name is required.\n' >/dev/tty 2>/dev/null || true; fi
+      _name_refused "A name is required."
     done
   fi
   # Trim surrounding whitespace from the (possibly typed) values FIRST, so a
@@ -646,10 +672,11 @@ provision_client() {
     client_location="$(_detect_location_zone)"; client_location="${client_location%% *}"
   fi
 
-  # An all-digit name reaches here only from TRACEBLOC_CLIENT_NAME: the prompt asks again.
+  # An all-digit name reaches here only from TRACEBLOC_CLIENT_NAME with no terminal to
+  # ask on: on one, it is asked for above.
   if [[ -z "$_reuse_ns" ]] && _name_all_digits "$client_name"; then
     tb_fail_next "Set TRACEBLOC_CLIENT_NAME to a name with a letter in it, then run the installer again:"
-    error_said "A name needs at least one letter" "A name needs at least one letter: TRACEBLOC_CLIENT_NAME is '${client_name}', all digits, so its namespace would be a number, which the chart's labels render unquoted and Kubernetes refuses. Set TRACEBLOC_CLIENT_NAME to a name that has one, or unset it and re-run in a terminal to be prompted."
+    error_said "TRACEBLOC_CLIENT_NAME \"${client_name}\" can't be used: a name needs at least one letter." "A name needs at least one letter: TRACEBLOC_CLIENT_NAME is '${client_name}', all digits, so its namespace would be a number, which the chart's labels render unquoted and Kubernetes refuses. Set TRACEBLOC_CLIENT_NAME to a name that has one, or unset it and re-run in a terminal to be prompted."
   fi
   if [[ -z "$client_name" ]]; then
     if _prompt_tty; then
@@ -657,7 +684,7 @@ provision_client() {
     else
       tb_fail_next "Run the installer in a terminal, or set TRACEBLOC_CLIENT_NAME\nfor an unattended install." ""
     fi
-    error_said "No name was given" "A name for this client is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME (and optionally TRACEBLOC_CLIENT_LOCATION) for an unattended install."
+    error_said "No name was given" "A name for this secure environment is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME (and optionally TRACEBLOC_CLIENT_LOCATION) for an unattended install."
   fi
   _machine_labels "$_reuse_ns" "${_plan_action:-}"
   # --name is required; pass --location only when we have one (the CLI defaults it
@@ -677,7 +704,8 @@ provision_client() {
       # Stop before the create: without --reissue it adopts the
       # running client and hands back the credential tracebloc refuses, and the run
       # would end "installed" with the machine still offline.
-      error "This tracebloc CLI can't issue a new credential to a running client yet — update it and re-run the installer."
+      tb_fail_next "Update it, then run the installer again:" "curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh"
+      error_said "This tracebloc CLI is too old to register this machine" "This tracebloc CLI can't issue a new credential to a running secure environment yet — update it and re-run the installer."
     fi
   fi
   [[ -n "$client_location" ]] && _create_args+=(--location "$client_location")
@@ -702,7 +730,7 @@ provision_client() {
     rm -f "$cred_file"   # remove any partial the failed create may have written
     _report_create_failure "$_create_out" "$client_location" "$client_location_source"
     rm -f "$_create_out"
-    error_said "" "Couldn't provision the client. Re-run to retry — full log: ${LOG_FILE:-the install log}."
+    error_said "" "Couldn't provision the secure environment. Re-run to retry — full log: ${LOG_FILE:-the install log}."
   fi
   cat "$_create_out" >>"${LOG_FILE:-/dev/null}" 2>/dev/null || true
   _show_create_notices "$_create_out"

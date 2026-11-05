@@ -661,10 +661,10 @@ networkPolicy:
     enabled: true
     # Egress lockdown (SECURITY §8.2). When false, the
     # training NetworkPolicy DROPS the 0.0.0.0/0:443 rule, so training pods can
-    # reach only DNS, in-cluster MySQL, the requests-proxy, and the egress
-    # gateway. Shipped default is now FALSE — deny-by-default egress:
-    # new installs are locked down, external HTTPS goes through
-    # the gateway allowlist. Set true only to opt a fleet back out. The template
+    # reach only DNS, in-cluster MySQL and the egress gate (and the egress
+    # gateway while the pinned engine may still hold the client's token).
+    # Shipped default is now FALSE — deny-by-default egress. Set true only to
+    # opt a fleet back out: model code then reaches the internet. The template
     # nil-guards this key, so a `helm upgrade --reuse-values` from a release
     # predating it keeps the old behaviour (rule present).
     allowExternalHttps: false
@@ -800,9 +800,12 @@ sealCheck:
       digestFor: ""
 
 # -- Egress gateway (squid) — SECURITY §8.2.
-# In-cluster forward proxy that lets a locked-down training pod reach an FQDN
+# In-cluster forward proxy that lets a locked-down workload reach an FQDN
 # allowlist (backend) and nothing else. Labelled app=egress-proxy
 # so the training NetworkPolicy never selects it (it keeps its own egress).
+# Training pods reach it unless the edge pins a training engine that advertises
+# no-backend-token (tracebloc.trainingEngineHoldsToken); then their one way to
+# tracebloc is the egress gate.
 egressProxy:
   enabled: true
   # Route training-pod outbound HTTPS through the gateway (Step 1). Shipped
@@ -1009,18 +1012,15 @@ restrictedDns:
 
 # -- Edge telemetry Collector.
 # An OpenTelemetry Collector DaemonSet that reads Class A container stdout with a
-# `file_log` receiver and forwards it to the tracebloc backend's ingest endpoint.
+# `file_log` receiver and forwards only the contract events in it, one line each,
+# through the outbound gate to the tracebloc backend's ingest endpoint. Every
+# other line stays on the node.
 #
-# SHIPS DISABLED, and that is a deliberate safety decision rather than caution.
-# The exporter authenticates with a token this chart does not create: it is
-# written into a Secret by jobs-manager, which does not do so yet (tracked
-# separately). Enabling the Collector before that Secret exists would put a
-# DaemonSet on every customer node spooling to disk with nothing it can deliver —
-# filling toward the 1 GiB cap per node for no benefit, which is precisely the
-# "telemetry must never be the reason a node fills" risk D7 exists to bound.
-# Ships inert and is flipped per fleet once its prerequisite is in place — the
-# posture `egressProxy.routeWorkloads` had before the egress lockdown flipped it on by
-# default.
+# RUNS BY DEFAULT: with `enabled` unset, the chart runs it whenever the Class A
+# lists below are complete (see `enabled`). It needs no token of its own: it
+# sends with its service account's token, which the gate has the Kubernetes API
+# review, and the gate sends on with the client's login. Its disk queue is capped
+# at 1 GiB per node (D7), so telemetry is never the reason a node fills.
 #
 # CLASS A ONLY (D12), AND PERMANENTLY SO. The receiver is scoped to the
 # control-plane containers this chart owns; training and ingestion pods are
@@ -1467,66 +1467,66 @@ images:
   training:
     pinned: ""
     digestRegistry: "ghcr.io"
-    engineCommit: "575d2b99ff4c3ef40c68e4fdd2c9630e643114cc"
+    engineCommit: "87e9324a3d6b373a2194f868192dcca82f803c03"
     digests:
       causal_language_modeling:
-        cpu: "sha256:f76e5339cda151528acf34294fdefdd8202e37b4d4b478bdd0d3fc9512fd09b7"
-        gpu: "sha256:d3f4bd6b204aa179f9fc117a3e8bf90da878b62267207b0684c33c95429dbfb0"
+        cpu: "sha256:939c301af63c3177deab114aa4f85a59d0e0431a5586cdf5e6d2c5ecb89191c3"
+        gpu: "sha256:9ad6f2af2a1ffcb8c228e303d974175552b1aee1e34eef0d96d390ecef843451"
       embeddings:
-        cpu: "sha256:ab3403437bad9f4cdcc2f78b414fc9c707d3248b69943ccf64516770f5ce36e5"
-        gpu: "sha256:a2b5b23679beaf91396e549b1a38dc9b53131f2570c8b7509716666d3a2167b5"
+        cpu: "sha256:50ffa0cdbd69833a2fa06344e9279ebd5e61442a09527f1704633abb60f8e082"
+        gpu: "sha256:25a57a4086b1beeaf44b22864fb0ba7e26c129793a18186a9d0ba4b4abbf0ca1"
       image_classification:
-        cpu: "sha256:fb5e9d27e8534e24f09873d855ab591ffd458f7ff8b9c70396318425b8364364"
-        gpu: "sha256:4b15834654f8190af4ebb334e231a9ac77ce76567956f9872fb9a0e723762579"
+        cpu: "sha256:2b4b2cf42e1530ab2f1e3fdff91c4cf37d099f1132fccc84014b38d29a62d7e1"
+        gpu: "sha256:2c41f741709ee1832c68edbb374db2ed69b623f9442a586cc3e1cc6be15cd2ea"
       keypoint_detection:
-        cpu: "sha256:8357dcfc891dca47e5b1547e811e16d64de6c70e670a8fcea327a19766657cfb"
-        gpu: "sha256:4e6206d574203d9d6a57ca32f12889781f0fe4acf3f8fec08e061c1cc792d0b4"
+        cpu: "sha256:a9373d3710983d5934c4cb2c8db1e545f677fa22f323755f8987963ebf4c3fc2"
+        gpu: "sha256:287dfec63410ee27e2f8e5f31a383cc1a3b623bf607bed163b3085ec684df737"
       masked_language_modeling:
-        cpu: "sha256:b99fa1597476f1014d601fe9c34678f9bad6aa6e2390e2b38ac710b28157a8af"
-        gpu: "sha256:ccc2d3340e294118210249e2adb1caab4470ac0dea7dbd1dd9b9f7c6bdf4b57e"
+        cpu: "sha256:74565209d4403087fe2719ca900421c0a901beed299902af05d48c6da7ef642b"
+        gpu: "sha256:48fce809aa454fd365775e5267d235f9e377725729046d61a4e9efd1f1ae7ecf"
       object_detection:
-        cpu: "sha256:6f0342e9d743eb8157e4c1176754af63045fdaf9819b340e2e36e63afe837e48"
-        gpu: "sha256:7b9560fb512cc399f2c694014696f4042f810c6848a082c393a7a764a03322dc"
+        cpu: "sha256:31a405e89370a4691fe695852842e024914eb5042b486a0f214d885ba5072487"
+        gpu: "sha256:be2476e718809fdcce7f27b9522fdd4ae8810f0b610312421cbddb1bf2c6015c"
       semantic_segmentation:
-        cpu: "sha256:ee38e240e33f91ec07aaace68d65ce63a492e6a12bbfde14d572656fa6e633ac"
-        gpu: "sha256:38edb2c33a004b82ee33a7763a2cee1cf6691450735c982c14462ee0401da34f"
+        cpu: "sha256:fad843b1d5cfe6b5541b5e1a43cf0a7821caae7a3c81809b29c65b2f2731fb0d"
+        gpu: "sha256:ca039344fb7a6b369a4850cafd3c8a4c6fa736d065af894a5365cb6d68c74a3d"
       sentence_pair_classification:
-        cpu: "sha256:639b12608cd1fd918cc1ebd48a2da71bbfafdf8a2f195a6b0d9e399515d90f18"
-        gpu: "sha256:fcec7648d50140cae1dd71b8f3a1d535d76956f48bbe002eccd4c1e9074bb9d9"
+        cpu: "sha256:8f1b9dcba95b8b10d9f4a934ff263c55b5e9f5f017683d9735aa6371b287f6e6"
+        gpu: "sha256:5c795bbcefe7ca481e2a7c13d78e80543c7dc0136781aae0def6553bc22ef85d"
       seq2seq:
-        cpu: "sha256:7181125e5770644137b1d7d55c2b9a447924ce93cb2fbfeb2de725c0554c99d1"
-        gpu: "sha256:c1501dbcb98e6032e5f28701998f984d41a92bd5c787e2cf0bbee577b01c5a45"
+        cpu: "sha256:eacda46a64da949da6a872cce261b31ad005439ca9cce34e3a85911c8188ff7b"
+        gpu: "sha256:1ecdde42154a0066ea7cd68ced264aa6f81a23fd0d0e2acef3eec8394ed6b6c8"
       tabular_classification:
-        cpu: "sha256:240203aa836f4a49d5e50d6e5d29bfbdb1aea6a4f7c5da87532429a185692fe5"
-        gpu: "sha256:c7fe6f1e84ab3e37cbfe933e9574c4e672dbe67fa9eeb5211ae04c0e2edad833"
+        cpu: "sha256:218e1dd68b1ecdc9b4338f9583ec8abdeadbc6149984c57f3c94a61124ffae92"
+        gpu: "sha256:f80c579fd07a0bd79a0a0a678d07950fa4246a0913d2f0c87da19acbd4e9014b"
       tabular_regression:
-        cpu: "sha256:79f913f4b7e5967d6e4dc9ed8dee24d8e5a9ae6fa061c15294ef69b700eadf17"
-        gpu: "sha256:fd9e4cf85790f4e8b36ed57f23800628a2ff3173f7bb136a980c5fdc990d78bc"
+        cpu: "sha256:ccf6d7d4df6bbd537e0d985484f27e8d54b11fb6b0af62bdd56341f2cdb602c0"
+        gpu: "sha256:a9e9b2907aeb6b56cee141e6b8c5d6a01e7abecc5f2813ad6e83a5342031e087"
       text_classification:
-        cpu: "sha256:d97b5e7d8a805deaaf3399ea90da0278d1dd584ed5a8edf92fe5a2c4e6a5297d"
-        gpu: "sha256:e6b354f1c680b3228e69d6e976aadd521fc9dc2e8acb4be39f88d41fe82d8dba"
+        cpu: "sha256:3bf85d5670d974395bbc79f1705704f714cbe47b7e8ecb51413a0a82ad7762ee"
+        gpu: "sha256:3fec6567e4bdca182be32bd4506cba820bc992de2862bef452b6fb46cdc8cdb8"
       time_series_classification:
-        cpu: "sha256:6de23c427c6ddd1a1a46cd9275f94cb4120bb16c5e2055fab35ba4ad29e64ceb"
-        gpu: "sha256:477dc2b836096aaa8dd178eaddbd44e2931669abe3eb9d412e2033bb85236c3d"
+        cpu: "sha256:8326568fa24c4fd5319f71889d7efef9dbdb304e35b68b18170f4c6a6471a246"
+        gpu: "sha256:d7bd2bb6e3b2fca0790d5dbeb19f1ffac2c7dcd178def5db424315600aadb439"
       time_series_forecasting:
-        cpu: "sha256:ee1914c81a62b03aae5a88454d37eed26c0703f1891dcfd05ae90604ce449062"
-        gpu: "sha256:5ab5953fcc715dbd9a26ded62158be8658963ebf776e43e93f563430ff2ac14d"
+        cpu: "sha256:48349a373363b93dbd1b9e8ba2ea1dfe6ad200a9da7fb49698d33221cb7f5b1f"
+        gpu: "sha256:14b2df0bd80999d2798e1ce59f19299afd8384e34888d74fe00deeb645482db7"
       time_to_event_prediction:
-        cpu: "sha256:a02761b39f223e02914f2825bbce530729f3debb6e9cd246c7db3a5bdd8cd425"
-        gpu: "sha256:ef6688ade25c1415199e5a18e067ca4425fe1a01967e727f039c63537e9ccd4d"
+        cpu: "sha256:b9c7012b8b3c562d778a2973d3521383dacd491ee64a6570b26f0b8a101529c4"
+        gpu: "sha256:c3158887c8841283b094a13b2b57989136d0a069dfdce77d38beebf87ae0eb78"
       token_classification:
-        cpu: "sha256:ac114989f6e48df4580b012995af2894e021fb52827b399e53e88b64626263fe"
-        gpu: "sha256:3ce2778cd4b1c7bfe36f04cb2b93d706e01955721ea3fbf1b409fb7d0acb41cc"
-    capabilities: "ddp,loss-coupled:embeddings,loss-coupled:time_to_event_prediction,min-micro-batch:2,per_rank_split"
+        cpu: "sha256:0f25f1fe04aa0c4caf3423a256f4d707df1991e8e1fce934d4c1306dc255873f"
+        gpu: "sha256:84a583a25055d7aca4e59c8fbf7c2c5140a8a6fb471f1e2e6d16870d491592c6"
+    capabilities: "ddp,loss-coupled:embeddings,loss-coupled:time_to_event_prediction,min-micro-batch:2,no-backend-token,per_rank_split"
     parents:
       gpu:
         repository: "tracebloc/torch"
-        digest: "sha256:482093f25cb34648542bc2274ca20eb19f079af7e6658a74e5c71ddb476596b8"
+        digest: "sha256:882a0b26f3b9157cf35da476d2c3df47ac29369309543d7fb1f1007195381a9f"
         platforms:
           - "linux/amd64"
     macosBundle:
-      digest: "sha256:c4086ba8a3765b9a9f7ce301f13fbf925e1bb96d556198a5fdbf0ab5543ec171"
-      location: "ghcr.io/tracebloc/engine-macos-arm64@sha256:22c34755ae9326d6a5e60a3e567d225b531f5afd44f7de2b79a1076701c98dc2"
+      digest: "sha256:b173bf0a5aa7998b0b2f44d90047739e2e6b9b71369fa7eb734c1a8a34868fa8"
+      location: "ghcr.io/tracebloc/engine-macos-arm64@sha256:85d059117889882f180a156b8606c763046a9e2b30b54efd70907aac62103505"
   # The ingestor image is spawned by
   # jobs-manager at ingestion-submission time, not as a long-lived pod.
   # jobs-manager resolves ONE effective digest from the keys below and spawns
@@ -2368,6 +2368,12 @@ podTokenTtlSeconds: 604800
 # release). Mitigations that still apply:
 #   - repoUrl defaults to GitHub Pages over HTTPS (publish controlled by
 #     the tracebloc team via the gh-pages branch).
+#   - Every tick checks the chart it would install against the Sigstore bundle
+#     its release attaches beside it (`<chart url>.bundle`), signed by
+#     tracebloc's release workflow, and installs that checked file. A missing,
+#     wrong or unreadable signature stops the tick and keeps the running
+#     release. A chart repository you mirror must serve each chart's bundle
+#     beside it. See autoUpgrade.cosign.
 #   - Set autoUpgrade.enabled: false to opt out and run upgrades manually
 #     under your own approval gate.
 #
@@ -2435,12 +2441,13 @@ autoUpgrade:
   # every future tick "still active" and skipped, wedging auto-upgrade until a
   # human kills the pod. activeDeadlineSeconds is the backstop that fails the
   # Job instead. This is a FLOOR, not the final value: the template renders
-  # activeDeadlineSeconds as max(this, 2 x parsed `timeout` + 300s fetch/dry-run
-  # headroom) -- 2 x because `--atomic` waits up to `timeout` on the upgrade and
-  # again on its rollback; a wedge recovery's rollback runs in
+  # activeDeadlineSeconds as max(this, 2 x parsed `timeout` + 600s headroom for
+  # the repo fetch, the chart's signature check and the status reads, itemised
+  # in the template) -- 2 x because `--atomic` waits up to `timeout` on the
+  # upgrade and again on its rollback; a wedge recovery's rollback runs in
   # a tick of its own, never beside an upgrade -- so raising `timeout` lifts the
   # deadline too and neither a slow-but-healthy upgrade nor its rollback is
-  # killed mid-flight. At the 10m default that is 1500s. A `timeout` of 28m or
+  # killed mid-flight. At the 10m default that is 1800s. A `timeout` of 26m or
   # more makes the Job outlast the hourly schedule, and Forbid skips the tick
   # that falls inside it. Raise this only to give even more slack than the
   # timeout-derived value.
@@ -2495,6 +2502,28 @@ autoUpgrade:
     # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
     # default identity for the chart's own pin, your image for your own digest.
     digestFor: ""
+  # The chart's signature check before every upgrade runs this cosign build: an
+  # init container copies `/ko-app/cosign` out of the image into the tick's pod
+  # (the `-dev` build, because the plain one has no `cp`). The tag is the
+  # installer's cosign (install.sh COSIGN_VERSION) plus `-dev`;
+  # auto-upgrade-chart-verify.sh holds the two together. The pin and its
+  # re-homing work as autoUpgrade.image's above; a mirror must carry this image.
+  #
+  # Sigstore's trust keys ship with the chart (client/files/sigstore: the
+  # Fulcio root and intermediate, Rekor's and the CT log's public keys, copied
+  # from Sigstore's TUF repository), so the check needs no network beyond the
+  # chart and its bundle. The release proves these keys verify each chart it
+  # signs before it publishes it.
+  cosign:
+    image:
+      registry: "ghcr.io"
+      repository: sigstore/cosign/cosign
+      tag: "v2.4.1-dev"
+      pullPolicy: IfNotPresent
+      digest: "sha256:a1bb112f1758703aa1d222bf30b9655d04cf196c0b7feaf3479d1222c2283590"
+      # `<repository>:<tag>` the digest above was resolved for, as for
+      # autoUpgrade.image.
+      digestFor: ""
   # GUARANTEED QoS: requests == limits for BOTH cpu and memory.
   # this CronJob AND image-refresh were both exit-137 (SIGKILL) killed hourly on
   # a live edge, TOGETHER — the signature of a NODE-level OOM kill, not either
@@ -2516,10 +2545,11 @@ autoUpgrade:
   #  2. Pinning CPU too makes the pod GUARANTEED, whose oom_score_adj is -997.
   #     THAT is what genuinely moves it off the kernel OOM-killer's shortlist
   #     under pressure, regardless of node size. These two CronJobs (and
-  #     image-refresh) are the only chart pods one line from Guaranteed — zero
-  # initContainers, memory already equal, cpu the sole blocker. The earlier change pinned
-  #     jobs-manager's memory but could NOT reach Guaranteed there (it renders an
-  #     unresourced init container); here we can, so we do. auto-upgrade is the
+  #     image-refresh) are the only chart pods one line from Guaranteed: memory
+  #     already equal, cpu the sole blocker. jobs-manager could NOT reach
+  #     Guaranteed (it renders an unresourced init container); here the cosign
+  #     init container takes these same resources, so the pod is Guaranteed and
+  #     reserves no more than the helm container alone. auto-upgrade is the
   #     security-fix delivery path — worth the strongest protection.
   #
   # TRADEOFF (reservation vs throttle): Guaranteed reserves the full 500m/256Mi
@@ -2528,8 +2558,8 @@ autoUpgrade:
   # moved — only the requests rose to meet them. If a small edge cannot spare the
   # reservation the pod goes Pending/skipped rather than OOM-looping; `Forbid` +
   # startingDeadlineSeconds bound that. auto_upgrade_test.yaml pins cpu AND memory
-  # request==limit, which (no initContainers) is the in-manifest proxy for
-  # Guaranteed until a pod-qos-class checker asserts the class directly.
+  # request==limit on every container, init included, which is the in-manifest
+  # proxy for Guaranteed until a pod-qos-class checker asserts the class directly.
   resources:
     requests:
       cpu: "500m"

@@ -115,8 +115,8 @@ repository, not from the manifest, so each chart carries a signature of its own:
 bundles from the same keyless identity, attached to the release beside the chart.
 The release job signs each chart after it is packaged and checked, so the bundle
 covers the bytes the release serves, then verifies each bundle `--offline` and
-checks that a copy with one extra byte fails. The hourly auto-upgrade does not check
-the bundle yet; verify a chart yourself with the recipe in §6.
+checks that a copy with one extra byte fails. The installer and the hourly
+auto-upgrade both check it, as below; verify a chart yourself with the recipe in §6.
 
 **The installer checks the client chart before it changes anything.** At the end of
 step 1, on a host that already has curl (`verify_client_chart` in
@@ -149,6 +149,33 @@ tracebloc, so it wasn't installed*. The installer installs no ingestor chart.
 - **The first signed release.** The first signed client chart is 1.16.0. Releases cut
   before it carry no bundle, so an installer that checks refuses them: it needs the
   newest stable chart in the index to be one a signing release published.
+
+**The hourly auto-upgrade checks every chart before it upgrades.** Each tick that
+finds a newer client chart (`chart_check` in `client/templates/auto-upgrade-cronjob.yaml`)
+takes that version's URL from the index `helm repo update` just fetched, downloads
+the chart and the `<chart>.tgz.bundle` beside it, verifies the chart against the
+bundle with the identity in §6, and upgrades from that checked file. When the bundle
+is missing (a 404) or the chart does not verify, it upgrades nothing, keeps the
+running release and logs *This release isn't signed by tracebloc, so nothing was
+changed*; a download it cannot finish ends the tick the same way, logged as a
+download failure, and the next tick tries again.
+
+- **cosign.** The pinned build again, from its digest-pinned image
+  (`autoUpgrade.cosign.image`, `ghcr.io/sigstore/cosign/cosign`, the `-dev` build of
+  `COSIGN_VERSION`): an init container copies the binary into the tick's pod.
+  `list-images.sh` lists the image and `check-digest-drift.sh` watches its pin.
+- **The trust root ships with the chart.** The tick needs no Sigstore host: the chart
+  carries Sigstore's Fulcio root and intermediate and the Rekor and CT log public keys
+  (`client/files/sigstore`, copied from Sigstore's TUF repository), and cosign
+  verifies with them, `--offline`. The release proves those keys verify each client
+  chart it signs, with no TUF and no network, before it publishes it, so a chart
+  whose keys Sigstore has moved on from never reaches the index. If Sigstore rotates
+  one of these keys, releases stop at that check until the chart ships the new one,
+  and a client still on a chart without it refuses the next chart, keeps its release
+  and moves on only through the installer.
+- **Where the copies live.** The tick keeps its own copy of the signer identity;
+  `scripts/tests/auto-upgrade-chart-verify.sh` holds it, the cosign build and the
+  refusal's words to `install.sh` and golden `07-release-not-signed`.
 
 `scripts/tests/release-upload-scope.bats` refuses a release workflow that attaches
 a chart without its bundle, signs a chart before the last `helm package` or after

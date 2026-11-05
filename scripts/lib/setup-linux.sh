@@ -173,21 +173,23 @@ _set_tools_target() {
   fi
 }
 
+# _kubectl_url VERSION ARCH -- kubectl's download. The platform slug defaults to linux,
+# so Linux (and every bats fetch test that leaves OS_DL unset) is byte-identical; the
+# macOS path sets OS_DL=darwin so the SAME pinned/verified fetch honors the pins there too.
+_kubectl_url() { printf 'https://dl.k8s.io/release/%s/bin/%s/%s/kubectl' "$1" "${OS_DL:-linux}" "$2"; }
+
 _fetch_kubectl() {
-  local ver="$1" arch="$2"
-  # Download platform slug: defaults to linux, so Linux (and every bats fetch test
-  # that leaves OS_DL unset) is byte-identical; the macOS path sets OS_DL=darwin so
-  # the SAME pinned/verified fetch honors the pins there too.
-  local os="${OS_DL:-linux}"
+  local ver="$1" arch="$2" url
+  url="$(_kubectl_url "$ver" "$arch")"
   local tmpdir
   tmpdir="$(mktemp -d)"
   # A stall floor, not a hard --max-time: kubectl is a ~50 MB binary, and a hard
   # cap would fail a slow-but-healthy link. These flags are also how curl_secure
   # knows not to add its default deadline here (Bugbot).
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl" -o "${tmpdir}/kubectl"
+    "$url" -o "${tmpdir}/kubectl"
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl.sha256" -o "${tmpdir}/kubectl.sha256"
+    "${url}.sha256" -o "${tmpdir}/kubectl.sha256"
   # Catch a truncated/blocked transfer as a TRANSFER failure before the checksum
   # misreports it as tampering. kubectl is ~50 MB; 20 MB is a safe floor.
   _assert_download_size "${tmpdir}/kubectl" 20000000 "kubectl" "$tmpdir"
@@ -209,18 +211,15 @@ _fetch_kubectl() {
 # when it is that release, and fetched at VERSION otherwise; another kubectl elsewhere on
 # PATH is left alone, and TRACEBLOC_TOOLS_DIR comes first on this process's PATH.
 install_kubectl() {
-  local pin="${1:-}" have=""
+  local pin="${1:-}"
   if [[ -n "$pin" ]]; then
-    if [[ -x "$TRACEBLOC_TOOLS_DIR/kubectl" ]]; then
-      have="$(_bounded 30 "$TRACEBLOC_TOOLS_DIR/kubectl" version --client 2>/dev/null </dev/null | sed -n 's/^Client Version: //p')" || have=""
-    fi
-    if [[ "$have" != "$pin" ]]; then
+    if _kubectl_fetch_due "$pin"; then
       KUBE_VER="$pin"
       spin_cmd "Installing system tools…" _fetch_kubectl "$KUBE_VER" "$ARCH_DL"
       log "kubectl $KUBE_VER installed."
       tb_record_write binary kubectl "$TRACEBLOC_TOOLS_DIR/kubectl"
     fi
-  elif ! has kubectl; then
+  elif _kubectl_fetch_due; then
     # tail -1 + tr: retry's attempt notices go to STDOUT and, on a failed-then-
     # successful fetch, concatenate into the capture — polluting the version and
     # breaking the download URL. The endpoint body (the version) is the last line
@@ -238,6 +237,25 @@ install_kubectl() {
   # only if IT is the binary that failed (assert_tool_runs' -ef guard), so a broken
   # installer-placed kubectl self-heals on re-run while a pkg copy elsewhere is safe.
   assert_tool_runs --rm "$TRACEBLOC_TOOLS_DIR/kubectl" kubectl version --client
+}
+
+# _kubectl_fetch_due [VERSION] -- install_kubectl downloads kubectl: VERSION is not the
+# copy in TRACEBLOC_TOOLS_DIR, or, with no VERSION, no kubectl is on PATH.
+_kubectl_fetch_due() {
+  local have=""
+  [[ -n "${1:-}" ]] || { ! has kubectl; return; }
+  if [[ -x "$TRACEBLOC_TOOLS_DIR/kubectl" ]]; then
+    have="$(_bounded 30 "$TRACEBLOC_TOOLS_DIR/kubectl" version --client 2>/dev/null </dev/null | sed -n 's/^Client Version: //p')" || have=""
+  fi
+  [[ "$have" != "$1" ]]
+}
+
+# _kubectl_expect VERSION -- tell the live line about install_kubectl VERSION's
+# download before it starts (tb_live_expect), when there is one.
+_kubectl_expect() {
+  tb_live_watching || return 0
+  _kubectl_fetch_due "$1" || return 0
+  tb_live_expect "$(_kubectl_url "$1" "$ARCH_DL")"
 }
 
 # ── Helm ─────────────────────────────────────────────────────────────────────
@@ -314,6 +332,9 @@ _ensure_unpack_tools() {
   log "Dependencies installed: ${missing[*]}"  # set-u-safe: the empty-missing check above returns first
 }
 
+# _helm_url TAG ARCH -- the Helm release tarball's download.
+_helm_url() { printf 'https://get.helm.sh/helm-%s-%s-%s.tar.gz' "$1" "${OS_DL:-linux}" "$2"; }
+
 # _fetch_helm_release <tag> <arch> — download the Helm tarball for <tag> plus
 # its published .sha256sum from get.helm.sh, verify (FAIL-CLOSED), unpack, and
 # move the binary into TRACEBLOC_TOOLS_DIR. Runs under spin_cmd — no output of its own.
@@ -323,17 +344,18 @@ _ensure_unpack_tools() {
 # are unbounded. sha256sum (coreutils) is present everywhere we run, get.helm.sh
 # is Helm's official release CDN, and the pin keeps installs deterministic.
 _fetch_helm_release() {
-  local tag="$1" arch="$2" tarball tmpdir
+  local tag="$1" arch="$2" tarball tmpdir url
   local os="${OS_DL:-linux}"   # linux by default; darwin on the macOS path
-  tarball="helm-${tag}-${os}-${arch}.tar.gz"
+  url="$(_helm_url "$tag" "$arch")"
+  tarball="${url##*/}"
   tmpdir="$(mktemp -d)"
   # --connect-timeout + a stall floor (not --max-time: the tarball is ~17 MB and
   # a hard cap would break slow-but-healthy links) — a hung transfer under
   # spin_cmd would otherwise spin forever.
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    "https://get.helm.sh/${tarball}" -o "${tmpdir}/${tarball}"
+    "$url" -o "${tmpdir}/${tarball}"
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    "https://get.helm.sh/${tarball}.sha256sum" -o "${tmpdir}/${tarball}.sha256sum"
+    "${url}.sha256sum" -o "${tmpdir}/${tarball}.sha256sum"
   # The published file is "<sha256>  <tarball-name>" — pull the hash and verify the
   # tarball with the portable checker (sha256sum on Linux, shasum on macOS).
   local want
@@ -374,8 +396,24 @@ _ensure_helm_executable() {
   fi
 }
 
+# _helm_fetch_due -- install_helm downloads Helm: none is on PATH.
+_helm_fetch_due() { ! has helm; }
+
+# _helm_expect -- tell the live line about install_helm's download before it starts
+# (tb_live_expect), when there is one. HELM_VERSION=latest names its release only once
+# it is asked, so its size is unknown.
+_helm_expect() {
+  tb_live_watching || return 0
+  _helm_fetch_due || return 0
+  if [[ "${HELM_VERSION:-}" =~ ^v[0-9][A-Za-z0-9._-]*$ ]]; then
+    tb_live_expect "$(_helm_url "$HELM_VERSION" "$ARCH_DL")"
+  else
+    tb_live_expect ""
+  fi
+}
+
 install_helm() {
-  if ! has helm; then
+  if _helm_fetch_due; then
     # Pin the Helm release (HELM_VERSION, common.sh) and fetch the tarball
     # DIRECTLY from get.helm.sh, verified against its published .sha256sum —
     # get-helm-3 is gone (see _fetch_helm_release). HELM_VERSION=latest resolves

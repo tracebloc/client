@@ -206,8 +206,8 @@ spec:
 **What this still allows:**
 
 - DNS lookups to the chart's restricted resolver only, which answers cluster names and NXDOMAINs the rest (`restrictedDns.enabled`, on by default wherever the egress gateway routes trainings; see [DNS exfiltration](#dns-exfiltration-restricteddns) below). With it turned off, DNS lookups go to the cluster DNS — **and the cluster DNS forwards any name it does not own to the internet**, so a pod can leak data by encoding it into query names (`<chunk>.attacker.example`), with no TCP connection at all.
-- In-cluster egress to MySQL (3306), the outbound gate (8888, never its record port), and the egress gateway (3128)
-- Outbound HTTPS/443 to the public internet — **dropped by default as of 1.9.96 (`networkPolicy.training.allowExternalHttps: false`, deny-by-default).** Training pods reach external services only through the in-cluster egress gateway; set `allowExternalHttps: true` to opt a fleet back out (see §8.2).
+- In-cluster egress to MySQL (3306) and the outbound gate (8888, never its record port). Where the gate carries every message the training engine sends, a training pod holds no tracebloc credential and the gate is its one way to tracebloc. The egress gateway (3128) is reachable too only while the pinned training engine may still hold the client's token, and goes once the pinned engine advertises `no-backend-token`.
+- Outbound HTTPS/443 to the public internet — **dropped by default as of 1.9.96 (`networkPolicy.training.allowExternalHttps: false`, deny-by-default).** Set `allowExternalHttps: true` to opt a fleet back out (see §8.2).
 
 #### DNS exfiltration (`restrictedDns`)
 

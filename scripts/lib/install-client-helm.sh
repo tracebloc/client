@@ -969,7 +969,7 @@ _print_fit_refusal() {
   # reads one ✖ line and, in the end block, what to do about its cause.
   tb_machine_lines warn "$1"
   tb_machine_lines _print_fit_lines hint "$2"
-  tb_machine_lines hint "  The client needs ~$(( (_TB_CP_FOOTPRINT_MEM_BYTES + _rf_mem + _TB_ENVELOPE_FLOOR_MEM_BYTES) / 1024 / 1024 )) MiB and $(( _TB_CP_FOOTPRINT_CPU_MILLI + _rf_cpu + _TB_ENVELOPE_FLOOR_CPU_MILLI )) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
+  tb_machine_lines hint "  The secure environment needs ~$(( (_TB_CP_FOOTPRINT_MEM_BYTES + _rf_mem + _TB_ENVELOPE_FLOOR_MEM_BYTES) / 1024 / 1024 )) MiB and $(( _TB_CP_FOOTPRINT_CPU_MILLI + _rf_cpu + _TB_ENVELOPE_FLOOR_CPU_MILLI )) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
   case "${4:-}" in
     memory)
       # The figure preflight's memory gate names (_pf_machine_need_gb).
@@ -1155,7 +1155,7 @@ _fit_verdict() {
   # Does the ingestion Job fit beside this envelope as well?
   local ing_fits=0
   (( env_mem_b + need_mem_b + ing_mem_b <= alloc_mem_b && env_cpu_m + need_cpu_m + ing_cpu_m <= alloc_cpu_m )) && ing_fits=1
-  local ing_part="ingestion Job (a data upload) $(( ing_mem_b / mib )) MiB / ${ing_cpu_m} m"
+  local ing_part="ingestion Job (a data ingest) $(( ing_mem_b / mib )) MiB / ${ing_cpu_m} m"
 
   if (( mem_fits && cpu_fits && ing_fits )); then
     _TB_FIT_VERDICT="fits"
@@ -1384,7 +1384,7 @@ _precreate_fit_gate() {
   case "$_TB_PRECREATE_VERDICT" in
     refused)
       _print_fit_refusal \
-        "This machine cannot schedule a training run beside the platform, so the cluster is not created:" \
+        "This machine cannot schedule a training beside the platform, so the cluster is not created:" \
         "$_TB_PRECREATE_LINES" \
         "Refusing before creating the cluster, so there is no cluster to delete." \
         "$_TB_PRECREATE_CAUSE"
@@ -1597,8 +1597,8 @@ _restart_credential_consumers() {
   done <<<"$rows"
   if [[ "$failed" == 1 ]]; then
     warn "Couldn't restart every tracebloc service onto the new credential, so this machine stays offline until they restart. Re-running the installer won't redo it. Run:"
-    hint "  kubectl rollout restart deployment -n ${rel} -l app.kubernetes.io/instance=${rel}"
-    hint "  kubectl get daemonset -A -l app.kubernetes.io/instance=${rel}   # then: kubectl rollout restart daemonset/<name> -n <namespace>"
+    hint "  $(tb_kubectl_shown) rollout restart deployment -n ${rel} -l app.kubernetes.io/instance=${rel}"
+    hint "  $(tb_kubectl_shown) get daemonset -A -l app.kubernetes.io/instance=${rel}   # then: $(tb_kubectl_shown) rollout restart daemonset/<name> -n <namespace>"
     return 1
   fi
   log "restarted the services that authenticate, onto the new credential"
@@ -2353,7 +2353,7 @@ _tb_helm_lock() {
 # RC returns, for the caller's own helm failure.
 _tb_helm_lock_timed_out() {
   [[ "$1" -eq 75 && "${#_TB_HELM_LOCK[@]}" -eq 5 ]] || return 0
-  error "A tracebloc node restart or helm command on this Mac held ${_TB_HELM_LOCK[4]} for ${_TB_HELM_LOCK[3]} s, so this installer did not change the client. Re-run the installer once it has ended."
+  error "A tracebloc node restart or helm command on this Mac held ${_TB_HELM_LOCK[4]} for ${_TB_HELM_LOCK[3]} s, so this installer did not change the secure environment. Re-run the installer once it has ended."
 }
 
 # _tb_wait_auto_upgrade_job NS -- wait for the chart's own auto-upgrade Job in NS to end.
@@ -2537,7 +2537,7 @@ _recover_pending_helm_release() {
         return 0
       fi
       warn "This installer could not read '$_rel' again under the helm lock, so it cannot tell whether it is still interrupted, and left it as it is."
-      hint "Check it, then re-run:  helm -n $_ns status $_rel"
+      hint "Check it, then re-run:  $(tb_helm_shown) -n $_ns status $_rel"
       return 1
       ;;
     jobs-unread)
@@ -2557,8 +2557,8 @@ _recover_pending_helm_release() {
     no-target)
       warn "The history of '$_rel' names no deployed revision to roll back to — refusing an automatic rollback."
       hint "Inspect it and roll back by hand to a revision you trust:"
-      hint "  helm -n $_ns history $_rel"
-      hint "  helm -n $_ns rollback $_rel <revision> --wait"
+      hint "  $(tb_helm_shown) -n $_ns history $_rel"
+      hint "  $(tb_helm_shown) -n $_ns rollback $_rel <revision> --wait"
       return 1
       ;;
     refused)
@@ -2567,10 +2567,10 @@ _recover_pending_helm_release() {
       # client's stored credential — refuse on the reconcile path.
       # rollback is NOT a remedy for these states, so print the credential-safe
       # manual path instead.
-      warn "Clearing '$_rel' (status: $_vs) needs an uninstall, which would drop this client's write-only stored credential — refusing to auto-recover it here."
+      warn "Clearing '$_rel' (status: $_vs) needs an uninstall, which would drop this secure environment's write-only stored credential — refusing to auto-recover it here."
       hint "Recover by hand without losing the credential:"
-      hint "  helm -n $_ns get values $_rel   # save clientPassword first — it can't be re-fetched"
-      hint "  helm -n $_ns uninstall $_rel    # then re-run the installer"
+      hint "  $(tb_helm_shown) -n $_ns get values $_rel   # save clientPassword first — it can't be re-fetched"
+      hint "  $(tb_helm_shown) -n $_ns uninstall $_rel    # then re-run the installer"
       return 1
       ;;
     rollback-failed)
@@ -2861,8 +2861,13 @@ _values_collector_choice() {
 # stores none or there is no namespace or release (each read said "not found"). Exit 2,
 # printing nothing, when a read failed for any other reason: whether it stores a choice
 # cannot be told, and a failed read is never taken for a first install.
+# THE STORED VALUES HOLD SECRETS (clientPassword and the rest): helm's
+# output goes straight into the one-key reader in the same pipe and is never held in a
+# variable, and its stderr is dropped, so only the choice and helm's exit status are
+# ever seen, logged or traced. Whether a failed read means "no release" is asked of
+# `helm list -q`, which prints release names only (_helm_release_listed).
 _release_collector_choice() {
-  local rel="$1" ns="$2" vals out rc=0
+  local rel="$1" ns="$2" choice out rc=0
   [[ -n "$rel" && -n "$ns" ]] || return 0
   out="$(kubectl get namespace "$ns" --request-timeout=5s 2>&1)" || rc=$?
   if [[ "$rc" -ne 0 ]]; then
@@ -2870,16 +2875,34 @@ _release_collector_choice() {
     log "The log collector: whether namespace '$ns' exists cannot be told (kubectl exit $rc): ${out%%$'\n'*}"
     return 2
   fi
-  rc=0; vals="$(_bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm get values "$rel" -n "$ns" 2>&1)" || rc=$?
+  rc=0
+  choice="$(set -o pipefail
+            _bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm get values "$rel" -n "$ns" 2>/dev/null </dev/null \
+              | _values_collector_choice)" || rc=$?
   if [[ "$rc" -ne 0 ]]; then
-    case "$vals" in *"not found"*) log "The log collector: no release '$rel' in '$ns', so no stored choice."; return 0 ;; esac
-    log "The log collector: the stored values of release '$rel' in '$ns' cannot be read (helm exit $rc): ${vals%%$'\n'*}"
+    case "$(_helm_release_listed "$rel" "$ns")" in
+      no) log "The log collector: no release '$rel' in '$ns', so no stored choice."; return 0 ;;
+    esac
+    log "The log collector: the stored values of release '$rel' in '$ns' cannot be read (helm exit $rc)."
     return 2
   fi
-  case "$(_values_collector_choice <<<"$vals")" in
+  case "$choice" in
     true)  printf true ;;
     false) printf false ;;
   esac
+}
+
+# _helm_release_listed REL NS -- whether helm lists release REL in namespace NS, in
+# any state: `yes`, `no`, or `unknown` when helm cannot list. Reads release names only
+# (`helm list -q`), never a release's values. The states are named, as the one-client
+# guard names them (_detect_installed_client): Helm 3 lists only deployed by default,
+# and Helm 4 (the pinned v4.2.3) has no `-a`.
+_helm_release_listed() {
+  local rel="$1" ns="$2" names rc=0
+  names="$(_bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm list -n "$ns" -q \
+    --deployed --failed --pending --uninstalling --superseded --filter "^${rel}\$" 2>/dev/null </dev/null)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then printf unknown; return 0; fi
+  if awk -v r="$rel" '$1 == r { f = 1 } END { exit !f }' <<<"$names"; then printf yes; else printf no; fi
 }
 
 # _collector_set_args MODE REL NS -- telemetryCollector.enabled for this run's helm call,
@@ -3385,12 +3408,12 @@ _reconcile_adopted_client() {
     [[ -n "$_r" ]] && { _rel="$_r"; _ns="$_n"; break; }
   done < <(helm list -A --deployed --failed --pending --uninstalling 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
   if [[ -z "$_rel" ]]; then
-    warn "This client is already registered, but no live tracebloc release was found here to reconcile — continuing with a normal connect."
+    warn "This secure environment is already registered, but no live tracebloc release was found here to reconcile — continuing with a normal connect."
     return 1
   fi
 
   TB_NAMESPACE="$_ns"
-  info "This machine already runs a tracebloc client — reconciling '${_rel}' (namespace '${_ns}') in place."
+  info "This machine already runs a secure environment — reconciling '${_rel}' (namespace '${_ns}') in place."
 
   _ensure_helm_runnable
 
@@ -3519,7 +3542,7 @@ _reconcile_adopted_client() {
   if ! _recover_pending_helm_release "$_rel" "$_ns" no-destroy; then
     # For a refused pending-install/uninstalling wedge the helper already printed
     # the credential-safe manual path; add a generic pointer for the other cases.
-    hint "Confirm the release state, then re-run:  helm -n $_ns status $_rel"
+    hint "Confirm the release state, then re-run:  $(tb_helm_shown) -n $_ns status $_rel"
     error "Reconcile blocked by an interrupted previous helm operation. Check the log for details: ${LOG_FILE:-}"
   fi
 
@@ -3529,7 +3552,7 @@ _reconcile_adopted_client() {
   _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
   local _helm_rc=0
   _tb_helm_lock
-  spin_cmd_bounded "$(_tb_helm_deadline_s "$_helm_timeout_min")" "Reconciling the existing client…" \
+  spin_cmd_bounded "$(_tb_helm_deadline_s "$_helm_timeout_min")" "Reconciling the existing secure environment…" \
     ${_TB_HELM_LOCK[@]+"${_TB_HELM_LOCK[@]}"} helm "${_args[@]}" || _helm_rc=$?  # set-u-safe: assigned the upgrade verb at its declaration
   if [[ "$_helm_rc" -ne 0 ]]; then
     _tb_helm_lock_timed_out "$_helm_rc"
@@ -3538,15 +3561,15 @@ _reconcile_adopted_client() {
     # (_recover_pending_helm_release), but name the manual unwedge too — on exit
     # 1, not only the 124 timeout.
     hint "If a re-run reports 'another operation is in progress', unwedge the release first:"
-    hint "  helm -n $_ns rollback $_rel    (returns to the previous, working release)"
-    error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
+    hint "  $(tb_helm_shown) -n $_ns rollback $_rel    (returns to the previous, working release)"
+    error "Reconcile of the existing secure environment failed. Check the log for details: ${LOG_FILE:-}"
   fi
   # The release offboarding removes, by its own name: an adopted
   # release need not be named after its namespace. The record's namespace is
   # TB_NAMESPACE, set to this release's above.
   tb_record_write helm-release "$_rel" ""
 
-  kubectl config set-context --current --namespace "$_ns" >/dev/null 2>&1 || true
+  tb_kube_set_namespace "$_ns"
   return 0
 }
 
@@ -4087,7 +4110,7 @@ _native_k3s_release_storage() {
   [[ "$rc" -eq 0 ]] || error "${cant}. Check that 'helm --kube-context ${ctx} get values ${ns} -n ${ns}' answers, then re-run."
   out="$(_values_hostpath_storage <<<"$vals")"
   [[ "$out" != unreadable ]] \
-    || error "${cant}: its stored hostPath values are in a form this installer does not read. Check them with 'helm get values ${ns} -n ${ns}', then re-run."
+    || error "${cant}: its stored hostPath values are in a form this installer does not read. Check them with 'helm --kube-context ${ctx} get values ${ns} -n ${ns}', then re-run."
   while IFS= read -r line; do
     case "$line" in
       enabled=*)     enabled="${line#enabled=}" ;;
@@ -4468,7 +4491,7 @@ _adopt_orphaned_gpu_device_plugin() {
   if [[ $rc -ne 0 ]]; then
     case "$probe" in
       ""|*NotFound*|*"not found"*) return 0 ;;  # absent — nothing to adopt
-      *) warn "Could not check for a pre-existing GPU device plugin ${ds} (API error); skipping adoption. If a non-Helm ${ds} exists in ${ns}, remove it before install: kubectl delete daemonset ${ds} -n ${ns}"
+      *) warn "Could not check for a pre-existing GPU device plugin ${ds} (API error); skipping adoption. If a non-Helm ${ds} exists in ${ns}, remove it before install: $(tb_kubectl_shown) delete daemonset ${ds} -n ${ns}"
          return 0 ;;
     esac
   fi
@@ -4490,8 +4513,17 @@ _adopt_orphaned_gpu_device_plugin() {
   warn "Could not adopt ${ds} into the Helm release; removing the orphan so the chart can recreate it."
   kubectl delete daemonset "$ds" -n "$ns" --timeout=30s --ignore-not-found \
     >> "${LOG_FILE:-/dev/null}" 2>&1 \
-    || warn "Failed to remove orphaned ${ds}; if the install aborts with 'exists and cannot be imported', delete it manually: kubectl delete daemonset ${ds} -n ${ns}"
+    || warn "Failed to remove orphaned ${ds}; if the install aborts with 'exists and cannot be imported', delete it manually: $(tb_kubectl_shown) delete daemonset ${ds} -n ${ns}"
   return 0
+}
+
+# _refuse_other_client_id ID NS -- this machine runs the secure environment ID (in
+# namespace NS), and this run was given another Client ID (TB_CLIENT_ID).
+_refuse_other_client_id() {
+  _refuse_foreign_client "This machine runs another secure environment" \
+    "To keep it, run the installer again with its Client ID." \
+    "To use this Client ID instead, sign in as the account that owns it and delete it first:" \
+    "This machine already runs the secure environment '${1}' (namespace '${2}'), and the Client ID given is '${TB_CLIENT_ID:-}'. tracebloc runs one secure environment per machine: it shares this cluster and the machine's resources, and tracebloc counts each one as separate capacity, so this run does not replace it."
 }
 
 # The `localApi` block of the generated values: present only when the macOS node
@@ -4563,11 +4595,12 @@ install_client_helm() {
 
   if [[ "$_noninteractive_creds" == 0 && -f "$values_file" && "${TRACEBLOC_CLIENT_ADOPTED:-}" != 1 ]] && _tty_available; then
     hint "Previous configuration found."
+    local _answer
     while true; do
-      read -r -p "  Use previous settings as defaults? [Y/n]: " use_existing <"$TRACEBLOC_TTY" || _no_interactive_creds_die
-      use_existing="$(echo "${use_existing}" | tr '[:upper:]' '[:lower:]')"
+      read -r -p "  Use previous settings as defaults? [Y/n]: " _answer <"$TRACEBLOC_TTY" || _no_interactive_creds_die
+      use_existing="$(echo "${_answer}" | tr '[:upper:]' '[:lower:]')"
       [[ "$use_existing" == "y" || "$use_existing" == "yes" || "$use_existing" == "n" || "$use_existing" == "no" || -z "$use_existing" ]] && break
-      warn "Please enter y or n."
+      tb_choice_refused "$_answer" y/n y
     done
     if [[ "$use_existing" == "y" || "$use_existing" == "yes" || -z "$use_existing" ]]; then
       default_client_id=$(_extract_yaml_value "$values_file" "clientId")
@@ -4611,7 +4644,7 @@ install_client_helm() {
       valid)      tb_live_done "Credentials verified" ;;
       invalid)    error "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc. Check them against the credential file \`tracebloc client create\` wrote, or create a new pair ($(_credential_file_cmd)), load it ($(_credential_file_load_cmd)) and re-run." ;;
       inactive)   error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
-      unverified) tb_live_done; warn "Couldn't reach tracebloc to verify credentials right now — continuing (the client will stay offline if they are wrong)." ;;
+      unverified) tb_live_done; warn "Couldn't reach tracebloc to verify credentials right now — continuing (the secure environment will stay offline if they are wrong)." ;;
     esac
   else
 
@@ -4624,9 +4657,9 @@ install_client_helm() {
     _no_interactive_creds_die
   fi
 
-  prompt_header "Connect this machine to a tracebloc client."
-  hint "A client links your secure environment to the tracebloc"
-  hint "platform so other collaborators can submit models for evaluation."
+  prompt_header "Connect this machine with a Client ID."
+  hint "A Client ID links your secure environment to tracebloc"
+  hint "so peers can upload models for evaluation."
   echo ""
   hint "Already have one? Enter its credentials below — or set"
   hint "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD to skip this prompt."
@@ -4638,9 +4671,9 @@ install_client_helm() {
 
   # Collect + verify credentials. The entered Client ID / password are checked
   # against the backend (the same api-token-auth/ call jobs-manager makes)
-  # before we deploy, so a wrong credential is caught here — with a re-prompt —
-  # instead of surfacing later as a silently crash-looping pod.
-  local _cred_attempt=0 _cred_max=5 _cred_status
+  # before we deploy, so a wrong credential is caught here and asked for again, with
+  # no cap (Ctrl-C stops), instead of surfacing later as a silently crash-looping pod.
+  local _cred_status _cred_file_line="Use the one in the credential file \`tracebloc client create\` wrote."
   while true; do
     if [[ -n "$default_client_id" ]]; then
       read -r -p "  Client ID [${default_client_id}]: " TRACEBLOC_CLIENT_ID_INPUT <"$TRACEBLOC_TTY" || _no_interactive_creds_die
@@ -4649,7 +4682,7 @@ install_client_helm() {
       read -r -p "  Client ID: " TB_CLIENT_ID <"$TRACEBLOC_TTY" || _no_interactive_creds_die
     fi
     TB_CLIENT_ID=$(_sanitize_credential "$TB_CLIENT_ID")
-    if [[ -z "$TB_CLIENT_ID" ]]; then warn "Client ID cannot be empty."; continue; fi
+    if [[ -z "$TB_CLIENT_ID" ]]; then tb_refused "A Client ID is required." "$_cred_file_line"; continue; fi
 
     if [[ -n "$default_client_password" ]]; then
       read -r -s -p "  Client password [press Enter to keep existing]: " TRACEBLOC_CLIENT_PASSWORD_INPUT <"$TRACEBLOC_TTY" || _no_interactive_creds_die
@@ -4660,7 +4693,7 @@ install_client_helm() {
       echo ""
     fi
     TB_CLIENT_PASSWORD=$(_sanitize_credential "$TB_CLIENT_PASSWORD")
-    if [[ -z "$TB_CLIENT_PASSWORD" ]]; then warn "Client password cannot be empty."; continue; fi
+    if [[ -z "$TB_CLIENT_PASSWORD" ]]; then tb_refused "A password is required." "$_cred_file_line"; continue; fi
 
     tb_live "Verifying credentials..."
     _cred_status=$(verify_credentials "$TB_CLIENT_ID" "$TB_CLIENT_PASSWORD")
@@ -4670,21 +4703,17 @@ install_client_helm() {
         break ;;
       invalid)
         tb_live_done
-        warn "That Client ID / password was rejected by tracebloc — please re-enter."
-        hint "They are in the credential file \`tracebloc client create\` wrote" ;;
+        tb_refused "tracebloc didn't accept this Client ID and password." \
+          "Use the pair in the credential file \`tracebloc client create\` wrote." ;;
       inactive)
         error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
       unverified)
         tb_live_done
         warn "Couldn't reach tracebloc to verify your credentials right now — continuing."
-        hint "If they are wrong, your client will stay offline at $(_dashboard_url) after install."
+        hint "If they are wrong, your secure environment will stay offline at $(_dashboard_url) after install."
         break ;;
     esac
 
-    _cred_attempt=$((_cred_attempt + 1))
-    if [[ $_cred_attempt -ge $_cred_max ]]; then
-      error "Too many failed attempts. Check them against the credential file \`tracebloc client create\` wrote, or create a new pair ($(_credential_file_cmd)), and re-run."
-    fi
     # Force an active re-entry on retry (don't silently reuse a rejected default).
     default_client_id=""; default_client_password=""
   done
@@ -4707,29 +4736,17 @@ install_client_helm() {
   # rather than risk overwriting a client the guard simply couldn't see.
   if [[ "${INSTALLED_CLIENT_UNKNOWN:-0}" == 1 ]]; then
     echo ""
-    warn "Couldn't determine which tracebloc client (if any) is already installed here."
-    hint "tracebloc runs one client per machine, so the installer won't risk overwriting"
-    hint "an existing client it can't see — usually the cluster API is briefly unreachable."
+    warn "Couldn't determine which secure environment (if any) is already installed here."
+    hint "tracebloc runs one secure environment per machine, so the installer won't risk overwriting"
+    hint "an existing secure environment it can't see — usually the cluster API is briefly unreachable."
     hint "Check it and re-run:"
-    hint "  kubectl cluster-info"
-    hint "  helm list -A"
+    hint "  $(tb_kubectl_shown) cluster-info"
+    hint "  $(tb_helm_shown) list -A"
     echo ""
     error "Refusing to install without verifying what's already on this machine."
   fi
   if [[ -n "$existing_id" && "$existing_id" != "$TB_CLIENT_ID" ]]; then
-    echo ""
-    warn "This machine already runs the tracebloc client '${existing_id}' (namespace '${existing_ns}')."
-    hint "tracebloc runs one client per machine — it shares this cluster and host"
-    hint "resources, and the platform counts each client as separate capacity."
-    echo ""
-    hint "You entered a different Client ID ('${TB_CLIENT_ID}'). Pick one:"
-    hint "  • Repair / update '${existing_id}'  →  re-run with that same Client ID"
-    hint "  • Switch to '${TB_CLIENT_ID}'        →  release and remove the current client first:"
-    _release_client_hint "        "
-    hint "      then re-run this installer"
-    hint "  • Run both clients                   →  install on a separate machine"
-    echo ""
-    error "Refusing to replace the existing client. See the options above."
+    _refuse_other_client_id "$existing_id" "$existing_ns"
   fi
 
   # Same client, but already installed under a DIFFERENT namespace — e.g. a release
@@ -4741,7 +4758,7 @@ install_client_helm() {
   # an intentional namespace move is a delete-then-reinstall, not a silent fork.
   if [[ -n "$existing_id" && "$existing_id" == "$TB_CLIENT_ID" && -n "$existing_ns" && "$existing_ns" != "$TB_NAMESPACE" ]]; then
     log "Client '${existing_id}' already installed in namespace '${existing_ns}'; upgrading it in place instead of creating '${TB_NAMESPACE}'."
-    info "Updating the existing client (namespace '${existing_ns}')."
+    info "Updating the existing secure environment (namespace '${existing_ns}')."
     TB_NAMESPACE="$existing_ns"
   fi
 
@@ -4846,7 +4863,7 @@ install_client_helm() {
   case "$_TB_FIT_VERDICT" in
     refused)
       _print_fit_refusal \
-        "This machine cannot schedule a training run beside the platform, so no training envelope is written:" \
+        "This machine cannot schedule a training beside the platform, so no training envelope is written:" \
         "$_TB_FIT_LINES" \
         "Refusing to write a training envelope that cannot be scheduled on this machine." \
         "$_TB_FIT_CAUSE"
@@ -4886,17 +4903,17 @@ install_client_helm() {
   # captured with $(...) by _training_resources / _training_provenance, so a warn
   # emitted there would end up inside the value.
   if (( ${_TB_TRAINING_UNDERSIZED:-0} == 1 )); then
-    warn "This machine is below the size a training run wants: ${training_size} is all that is left after the platform's reservation."
-    hint "The client will install and run, but training jobs may be killed for memory. ~16 GB of RAM is the recommendation for training locally."
+    warn "This machine is below the size a training wants: ${training_size} is all that is left after the platform's reservation."
+    hint "The secure environment will install and run, but trainings may be killed for memory. ~16 GB of RAM is the recommendation for training locally."
   elif (( ${_TB_TRAINING_UNSCHEDULABLE:-0} == 1 )); then
-    warn "This machine is too small to host a training run at all; keeping the default ${training_size}."
-    hint "Training jobs will stay Pending until this edge has more memory — the client itself will still run, ingest and report."
+    warn "This machine is too small to host a training at all; keeping the default ${training_size}."
+    hint "Trainings will wait for room until this machine has more memory — the secure environment itself will still run, ingest and report."
   fi
   # The ingestion Job did not fit beside the size written (_fit_verdict): the run
   # was kept at no less than the floor, so an upload queues behind it.
   if (( ${_TB_FIT_INGEST_WAITS:-0} == 1 )); then
-    warn "A data upload started while a training run is using this machine waits until training ends."
-    hint "  An upload needs $(( _TB_ENVELOPE_INGESTION_MEM_BYTES / 1024 / 1024 )) MiB / ${_TB_ENVELOPE_INGESTION_CPU_MILLI} m free beside ${training_size}; upload between runs, or give this machine more CPU and memory."
+    warn "A data ingest started while a training is using this machine waits until the training ends."
+    hint "  An ingest needs $(( _TB_ENVELOPE_INGESTION_MEM_BYTES / 1024 / 1024 )) MiB / ${_TB_ENVELOPE_INGESTION_CPU_MILLI} m free beside ${training_size}; ingest between trainings, or give this machine more CPU and memory."
   fi
 
   # CREATE IT EMPTY AND 0600 *BEFORE* THE CREDENTIAL GOES IN.
@@ -5107,8 +5124,8 @@ EOF
   # Fail closed if recovery itself couldn't clear it.
   if ! _recover_pending_helm_release "$TB_NAMESPACE" "$TB_NAMESPACE"; then
     hint "Couldn't automatically clear the interrupted release. Recover it by hand, then re-run:"
-    hint "  first install:  helm -n $TB_NAMESPACE uninstall $TB_NAMESPACE    (removes only the half-installed release)"
-    hint "  upgrade:        helm -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
+    hint "  first install:  $(tb_helm_shown) -n $TB_NAMESPACE uninstall $TB_NAMESPACE    (removes only the half-installed release)"
+    hint "  upgrade:        $(tb_helm_shown) -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
     error "Client installation blocked by an interrupted previous helm operation. Check the log for details: ${LOG_FILE:-}"
   fi
 
@@ -5165,7 +5182,7 @@ EOF
   # The lock's prefix has a line of its own, so the call still starts its line, where
   # release-name-equals-namespace.sh reads the release's name from.
   _tb_helm_lock
-  spin_cmd_bounded "$(_tb_helm_deadline_s "$_helm_timeout_min")" "Installing the tracebloc client…" \
+  spin_cmd_bounded "$(_tb_helm_deadline_s "$_helm_timeout_min")" "Installing your secure environment…" \
     ${_TB_HELM_LOCK[@]+"${_TB_HELM_LOCK[@]}"} \
     helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
     --namespace "$TB_NAMESPACE" \
@@ -5180,18 +5197,16 @@ EOF
     # (_recover_pending_helm_release), but name the manual unwedge too — on exit
     # 1, not only the 124 timeout.
     hint "If a re-run reports 'another operation is in progress', unwedge the release first:"
-    hint "  first install:  helm -n $TB_NAMESPACE uninstall $TB_NAMESPACE    (removes only the half-installed release)"
-    hint "  upgrade:        helm -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
+    hint "  first install:  $(tb_helm_shown) -n $TB_NAMESPACE uninstall $TB_NAMESPACE    (removes only the half-installed release)"
+    hint "  upgrade:        $(tb_helm_shown) -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
     error "Client installation failed. Check the log for details: ${LOG_FILE:-}"
   fi
   # The release offboarding removes: named after its namespace on
   # this path, which is the record's namespace field.
   tb_record_write helm-release "$TB_NAMESPACE" ""
 
-  # Point the kubeconfig's current context at the client namespace, so kubectl and
-  # the tracebloc CLI default to it with no -n / --namespace flag. Best-effort:
-  # a failure here must not abort an otherwise-successful install.
-  kubectl config set-context --current --namespace "$TB_NAMESPACE" >/dev/null 2>&1 || true
+  # kubectl and the tracebloc CLI default to the client namespace, with no -n flag.
+  tb_kube_set_namespace "$TB_NAMESPACE"
 
   # A credential issued to a client that is already running here (the
   # credential-rejected repair), or any other new password written

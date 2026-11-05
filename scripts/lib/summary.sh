@@ -125,7 +125,7 @@ _client_ready_gate() {
       fi
     fi
   else
-    log "Could not list the client's workload Deployments in namespace ${ns} (release label app.kubernetes.io/instance=${ns}); treating the client as not Ready."
+    log "Could not list the secure environment's workload Deployments in namespace ${ns} (release label app.kubernetes.io/instance=${ns}); treating it as not Ready."
     all_ready=false
   fi
   tb_live_done
@@ -432,16 +432,16 @@ _mysql_incomplete_summary() {
   if [[ "$user_data" == none && -n "$kind" ]] && [[ "$verdict" == never-served || "$rev" == 1 ]]; then steps=1; fi
   if [[ -n "$steps" ]]; then
     echo -e "  MySQL never finished setting up this database, so it holds no data yet. Reset it, then re-run the installer:"
-    echo -e "    ${TB_CMD}kubectl -n ${ns} scale deploy/mysql-client --replicas=0${RESET}"
+    echo -e "    ${TB_CMD}$(tb_kubectl_shown) -n ${ns} scale deploy/mysql-client --replicas=0${RESET}"
     if [[ "$kind" == claim* ]]; then
-      echo -e "    ${TB_CMD}kubectl -n ${ns} delete pvc mysql-pvc${RESET}"
+      echo -e "    ${TB_CMD}$(tb_kubectl_shown) -n ${ns} delete pvc mysql-pvc${RESET}"
     else
       echo -e "    ${TB_CMD}sudo find '${kind#hostpath }' -mindepth 1 -delete${RESET}"
     fi
   else
     echo -e "  The installer doesn't reset it, because it may hold your data. Contact tracebloc support."
   fi
-  echo -e "  Logs:     ${TB_CMD}kubectl logs -n ${ns} deploy/mysql-client -c mysql-first-boot${RESET}"
+  echo -e "  Logs:     ${TB_CMD}$(tb_kubectl_shown) logs -n ${ns} deploy/mysql-client -c mysql-first-boot${RESET}"
 }
 
 # _crash_or_pull_summary NS -- the image_pull and crash outcomes, but for the one
@@ -452,7 +452,7 @@ _crash_or_pull_summary() {
   [[ "$TRACEBLOC_CLIENT_STATE" == "crash" ]] && reason="a container is restarting (crash loop)"
   echo -e "  ${TB_ERR}✖ Setup didn't finish — ${reason}.${RESET}" >&2
   echo ""
-  echo -e "  Inspect:  ${TB_CMD}kubectl get pods -n ${1}${RESET}"
+  echo -e "  Inspect:  ${TB_CMD}$(tb_kubectl_shown) get pods -n ${1}${RESET}"
   echo -e "  Logs:     ${DIM}~/.tracebloc/install-*.log${RESET}"
   echo -e "  ${DIM}Re-running this installer is safe.${RESET}"
 }
@@ -500,28 +500,8 @@ _summary_kubeconfig_lines() {
   local kc
   kc="$(_summary_kubeconfig_hint)"
   [[ -n "$kc" ]] || return 0
-  echo -e "  To point kubectl at tracebloc, run this in your shell (add it to your profile to keep it):"
+  echo -e "  To use kubectl here, run this in your shell (add it to your profile to keep it):"
   echo -e "    ${TB_CMD}export KUBECONFIG=${kc}${RESET}"
-}
-
-# The installer switched kubectl's current context to this cluster (it must: the
-# secure environment is registered against the current context), and a user who
-# also works on other clusters needs to hear that, with the way back, or their
-# next kubectl lands here. The kubeconfig merge sets
-# TB_PREV_KUBE_CONTEXT only when a DIFFERENT context was selected before, so a
-# fresh machine and a re-run print nothing.
-#
-# On native k3s with no KUBECONFIG, the user's kubectl is k3s's, which reads k3s.yaml
-# and never the merged file that holds the previous context, so a bare `use-context`
-# would not reach it; the command names that file (_summary_kubeconfig_hint).
-_kube_context_note() {
-  [[ -n "${TB_PREV_KUBE_CONTEXT:-}" ]] || return 0
-  local kc="" kcflag=""
-  kc="$(_summary_kubeconfig_hint)"
-  if [[ -n "$kc" ]]; then kcflag="--kubeconfig ${kc} "; fi
-  echo -e "  kubectl now points at ${TRACEBLOC_KUBE_CONTEXT:-${TB_KUBE_CONTEXT:-the tracebloc cluster}} (it pointed at ${TB_PREV_KUBE_CONTEXT} before). To switch back:"
-  echo -e "    ${TB_CMD}kubectl ${kcflag}config use-context ${TB_PREV_KUBE_CONTEXT}${RESET}"
-  echo ""
 }
 
 # Will `tracebloc` resolve in the user's shell? Rely SOLELY on TB_CLI_USABLE_NOW,
@@ -895,6 +875,10 @@ print_summary() {
     # _mac_ct_runner_gpu_ready); a job trains on the GPU only once its check passes.
     mode="Apple GPU once it passes tracebloc's GPU check, CPU until then (tracebloc resources shows which)"
     training="Apple GPU"
+  elif [[ "${TRACEBLOC_MAC_GPU_TRAINING_OFF:-}" == 1 ]]; then
+    # The runner is ready, but the chart sends it no GPU training (mac-container.sh
+    # _mac_ct_runner_gpu_ready, _mac_ct_runner_bundle_rendered): every training runs on the CPU.
+    training="CPU (GPU training on Macs is off for now)"
   fi
   local ns="${TB_NAMESPACE:-default}"
   local cver; cver="$(_chart_version "$ns")"
@@ -972,7 +956,6 @@ print_summary() {
       echo ""
       kc="$(_summary_kubeconfig_lines)"
       if [[ -n "$kc" ]]; then tb_machine_lines printf '%s\n\n' "$kc"; fi
-      _kube_context_note
       tb_rule
       # Where the logs and data are, and how it comes back after a restart: the log's.
       _summary_footer "$logdisp" "$ns" >>"${LOG_FILE:-/dev/null}" 2>&1
@@ -991,16 +974,16 @@ print_summary() {
         echo ""
         echo -e "  Your secure environment can't run trainings or ingest data until it finishes."
         echo -e "  If it finishes, your secure environment comes Online by itself. To see where it is:"
-        echo -e "    ${TB_CMD}kubectl logs -n ${ns} deploy/mysql-client -c mysql-first-boot${RESET}"
+        echo -e "    ${TB_CMD}$(tb_kubectl_shown) logs -n ${ns} deploy/mysql-client -c mysql-first-boot${RESET}"
         echo -e "  If it doesn't, save a support bundle and email it to support@tracebloc.io:"
         echo -e "    ${TB_CMD}tracebloc doctor --diagnose${RESET}"
       else
         echo -e "  ${TB_WARN}⚠${RESET}  Almost there — tracebloc is installed but still starting."
         echo ""
         echo -e "  Components are still downloading/starting (first run can take a few minutes)."
-        echo -e "  Check progress:   ${TB_CMD}kubectl get pods -n ${ns}${RESET}"
+        echo -e "  Check progress:   ${TB_CMD}$(tb_kubectl_shown) get pods -n ${ns}${RESET}"
         echo ""
-        echo -e "  Your client will show as ${BOLD}🟢 Online${RESET} at ${TB_LINK}$(_dashboard_url)${RESET}"
+        echo -e "  Your secure environment will show as ${BOLD}🟢 Online${RESET} at ${TB_LINK}$(_dashboard_url)${RESET}"
         echo -e "  once it finishes. ${DIM}Re-running this installer is safe.${RESET}"
       fi
       ;;
@@ -1032,7 +1015,7 @@ print_summary() {
       fi
       echo -e "    ${TB_CMD}TRACEBLOC_CA_BUNDLE=/path/to/corporate-ca.pem ${TB_INSTALL_CMD:-./install.sh}${RESET}"
       echo -e "  ${DIM}(CURL_CA_BUNDLE is also honored.) Ask your IT team for the bundle if unsure.${RESET}"
-      echo -e "  Inspect:  ${TB_CMD}kubectl get events -n ${ns} | grep -i x509${RESET}"
+      echo -e "  Inspect:  ${TB_CMD}$(tb_kubectl_shown) get events -n ${ns} | grep -i x509${RESET}"
       echo -e "  ${DIM}Re-running this installer is safe.${RESET}"
       ;;
     crash)
@@ -1056,9 +1039,6 @@ print_summary() {
     if [[ -n "$kc" ]]; then printf '\n%s\n' "$kc"; fi
   fi
   echo ""
-  # Every other outcome sends the user to kubectl too; the connected one says it
-  # above its footer, so the reboot note stays its last line.
-  if [[ "$TRACEBLOC_CLIENT_STATE" != "connected" ]]; then _kube_context_note; fi
 
   _log_advanced_info
 }
@@ -1103,9 +1083,9 @@ _log_advanced_info() {
   fi
   log ""
   log "Useful commands:"
-  log "  kubectl get nodes -o wide"
-  log "  kubectl get pods -A"
-  log "  kubectl get pods -n ${TB_NAMESPACE:-default}"
+  log "  $(tb_kubectl_shown) get nodes -o wide"
+  log "  $(tb_kubectl_shown) get pods -A"
+  log "  $(tb_kubectl_shown) get pods -n ${TB_NAMESPACE:-default}"
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; then
     local ct node
     ct="$(_mac_ct_install_root 2>/dev/null)/bin/container"; node="$(_mac_ct_node_name 2>/dev/null)"

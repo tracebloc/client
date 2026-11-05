@@ -7,8 +7,8 @@
     2. Allows DNS to the cluster's DNS service -- or, with restrictedDns.enabled,
        ONLY to the restricted resolver (restricted-dns-*.yaml), which does not
        forward arbitrary names to the internet.
-    3. Allows TCP/443 egress to addresses OUTSIDE the cluster CIDRs only —
-       blocking pod-to-pod, K8s API, jobs-manager pod IPs, etc.
+    3. Only where an operator opts back out (allowExternalHttps: true): TCP/443
+       egress to addresses OUTSIDE the cluster CIDRs. The shipped default drops it.
     4. Allows TCP/3306 egress to the in-namespace mysql-client pod.
        Training pods load their training dataset via
        core/utils/database.py::load_dataframe_from_sql_table; without this
@@ -16,6 +16,15 @@
        and the job CrashLoopBackOffs before the first batch.
        Scoped by podSelector (app=mysql-client) so it stays tight to the
        chart's own mysql pod and does not open the namespace generally.
+    5. Allows TCP/8888 egress to the egress gate, the pod's way to tracebloc.
+    6. Unless the edge pins an engine that starts without the client's token: the
+       egress-proxy (squid), whose allowlist is the tracebloc API.
+
+  A training pod runs model code. Where the edge pins an engine that starts
+  without the client's token and the gate carries every engine message, jobs-manager gives the pod no
+  tracebloc credential, and the gate, which checks every message against the
+  declaration, is its one way out. scripts/tests/training-pods-gate-only.sh holds
+  every profile to this.
 
   Selects pods by label tracebloc.io/workload=training. The jobs-manager
   injects this label when spawning each training Job (see client-runtime
@@ -91,10 +100,10 @@ spec:
            release predating the key) keeps the rule — old permissive behaviour — and
            an operator can still opt a fleet back out with an explicit `true`. */}}
     {{- if dig "allowExternalHttps" true .Values.networkPolicy.training }}
-    # 2. External HTTPS — everything NOT in the cluster's pod/service CIDRs.
-    #    Training pods reach the backend / Azure Service Bus / App Insights directly.
-    #    This blocks pod-to-pod, ClusterIPs, jobs-manager, K8s API. MySQL and the
-    #    in-cluster proxies are explicitly re-permitted by the rules below.
+    # 2. External HTTPS — everything NOT in the cluster's pod/service CIDRs, only
+    #    where an operator opted back out. Model code then reaches the internet.
+    #    It blocks pod-to-pod, ClusterIPs, jobs-manager, K8s API; MySQL and the gate
+    #    are re-permitted by the rules below.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -116,9 +125,9 @@ spec:
       ports:
         - port: 3306
           protocol: TCP
-    # 4. the egress gate — training pods POST epoch results / FLOPs to the
-    #    in-namespace gate on 8888, through its requests-proxy-service alias (so
-    #    they never hold Service Bus credentials). Rule 2 blocks this ClusterIP
+    # 4. the egress gate — training pods reach tracebloc only here, every result,
+    #    FLOPs record and API call, on 8888 through its requests-proxy-service
+    #    alias (so they hold no tracebloc credential). Rule 2 blocks this ClusterIP
     #    egress, so re-permit it explicitly, exactly like MySQL above. Without
     #    this rule every experiment CrashLoopBackOffs at the first epoch
     #    finalize with "requests-proxy-service:8888 ... Connection refused".
@@ -132,11 +141,11 @@ spec:
       ports:
         - port: 8888
           protocol: TCP
-    {{- if (default dict .Values.egressProxy).enabled }}
-    # 5. egress gateway — training pods reach the in-cluster squid egress gateway
-    #    (egress-proxy-service) for allowlisted external HTTPS, used once the
-    #    external-HTTPS rule (rule 2) is dropped. Re-permitted explicitly like MySQL /
-    #    the egress gate above (rule 2's `except` blocks ClusterIP egress).
+    {{- if and (default dict .Values.egressProxy).enabled (include "tracebloc.trainingEngineHoldsToken" .) }}
+    # 5. the egress gateway (squid), on every edge but one that pins an engine
+    #    advertising no-backend-token (tracebloc.trainingEngineHoldsToken): it
+    #    reaches tracebloc directly through egress-proxy-service for each row
+    #    the gate cannot carry. A floating edge keeps it: its engine is not known.
     - to:
         - podSelector:
             matchLabels:

@@ -206,6 +206,11 @@ curl_secure() {
   done
   local -a _bounds=(--connect-timeout "${TB_CURL_CONNECT_TIMEOUT:-30}")
   (( _stall_bounded )) || _bounds+=(--max-time "${TB_CURL_MAX_TIME:-300}")
+  # A download the live line shows (a terminal only): _tb_dl_curl, the same call.
+  if _tb_dl_watch "$@"; then
+    _tb_dl_curl "$_TB_DL_K" "${_bounds[@]}" "$@"  # set-u-safe: always carries --connect-timeout
+    return
+  fi
   # checker false positive: _bounds ALWAYS carries --connect-timeout (plus
   # --max-time unless the call stall-bounds itself) — flags inside a bash
   # array expansion are invisible to the grep. house-rules: ignore=curl-timeout
@@ -438,6 +443,23 @@ error_said() {
 }
 _tb_err_line() { echo -e "  ${TB_ERR}✖ $*${RESET}" >&2; }
 _TB_END_GAP=""
+
+# tb_refused WHY ACCEPTED -- an answer that can't be used, on stderr (where `read -p`
+# puts its prompt): the ✖ line says why, the next says what is accepted. The caller
+# asks again: a mistyped answer never ends the run.
+tb_refused() {
+  log "Answer refused: $1"
+  _tb_refused_lines "$1" "$2" >&2
+}
+_tb_refused_lines() { printf '  %s✖ %s%s\n    %s\n' "${TB_ERR:-}" "$1" "${RESET:-}" "$2"; }
+
+# tb_choice_refused ANSWER CHOICES DEFAULT -- tb_refused for a choice prompt. CHOICES is
+# as its brackets show them ("r/w/a" reads "r, w or a"), DEFAULT the one Enter takes.
+tb_choice_refused() {
+  local words="${2//\//, }"
+  [[ "$words" != *", "* ]] || words="${words%, *} or ${words##*, }"
+  tb_refused "\"$1\" isn't one of the choices." "Answer ${words}, or press Enter for $3."
+}
 # error MESSAGE — print and exit 1.
 #
 # It records itself first, and that is not decoration. `exit` fires NO ERR trap,
@@ -479,8 +501,9 @@ tb_rule()        { echo -e "  ${DIM}──────────────�
 #  The live line belongs to the process that started it (_TB_LIVE_LEVEL, its
 #  BASH_SUBSHELL, which bash 3.2 has): a subshell that inherits it, a $(…) above all,
 #  leaves its ticker and the screen alone, and its lines go where its output goes.
+#  Animating, it also shows what its downloads have brought in (_TB_DL_DIR, below).
 _TB_LIVE_MSG=""; _TB_LIVE_QUIET=""; _TB_LIVE_DETAIL=""; _TB_LIVE_PID=""; _TB_LIVE_T0=0
-_TB_LIVE_SHOWN=""; _TB_LIVE_LEVEL=0
+_TB_LIVE_SHOWN=""; _TB_LIVE_LEVEL=0; _TB_DL_DIR=""
 tb_live()       { _tb_live_begin "$1" ""; }
 tb_live_quiet() { _tb_live_begin "$1" 1; }
 _tb_live_begin() {
@@ -488,6 +511,7 @@ _tb_live_begin() {
   _TB_LIVE_MSG="$1"; _TB_LIVE_QUIET="$2"; _TB_LIVE_DETAIL=""; _TB_LIVE_T0=$SECONDS; _TB_LIVE_SHOWN=""
   _TB_LIVE_LEVEL="${BASH_SUBSHELL:-0}"
   if _tb_animate; then
+    tb_scratch_dir _TB_DL_DIR tracebloc-live || _TB_DL_DIR=""
     _tb_tty tput civis 2>/dev/null || true
     _tb_live_tick
   fi
@@ -511,9 +535,10 @@ tb_live_done() {
         _tb_tty printf '\r\033[K'
         _tb_tty tput cnorm 2>/dev/null || true
       fi
+      _tb_dl_drop
       [[ -n "${1:-}" || -n "$quiet" || -n "$shown" ]] || printf '  · %s\n' "$msg"
     fi
-    _TB_LIVE_MSG=""; _TB_LIVE_QUIET=""; _TB_LIVE_DETAIL=""; _TB_LIVE_SHOWN=""; _TB_LIVE_PID=""
+    _TB_LIVE_MSG=""; _TB_LIVE_QUIET=""; _TB_LIVE_DETAIL=""; _TB_LIVE_SHOWN=""; _TB_LIVE_PID=""; _TB_DL_DIR=""
   fi
   [[ -z "${1:-}" ]] || success "$1"
   return 0
@@ -531,7 +556,8 @@ tb_live_stop() {
     _tb_live_kill
     _tb_tty printf '\r\033[K'; _tb_tty tput cnorm 2>/dev/null || true
   fi
-  _TB_LIVE_MSG=""; _TB_LIVE_QUIET=""; _TB_LIVE_DETAIL=""; _TB_LIVE_SHOWN=""; _TB_LIVE_PID=""
+  if _tb_live_here; then _tb_dl_drop; fi
+  _TB_LIVE_MSG=""; _TB_LIVE_QUIET=""; _TB_LIVE_DETAIL=""; _TB_LIVE_SHOWN=""; _TB_LIVE_PID=""; _TB_DL_DIR=""
   return 0
 }
 # _tb_elapsed SECONDS -- "12s", "1m 05s".
@@ -546,18 +572,27 @@ _tb_elapsed() {
 # BASHPID; the $(…) child execs sh, so sh's parent is this process. Its own errors
 # are nobody's: no ERR trap, no errexit, and no stderr. _tb_live_kill stops it.
 _tb_live_tick() {
-  local msg="$_TB_LIVE_MSG" detail="$_TB_LIVE_DETAIL" t0="$_TB_LIVE_T0" parent=$$
+  local msg="$_TB_LIVE_MSG" detail="$_TB_LIVE_DETAIL" t0="$_TB_LIVE_T0" dl="${_TB_DL_DIR:-}" parent=$$
   if (( ${BASH_SUBSHELL:-0} > 0 )); then parent="$(exec sh -c 'echo "$PPID"')"; fi
   (
     trap - ERR; set +e
-    frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏'); i=0
+    frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏'); i=0; seen=""
+    _TB_DL_TAIL=""; _TB_DL_RING=""; _TB_DL_PREV=0
     while kill -0 "$parent" 2>/dev/null; do
-      _tb_tty printf "\r\033[K  ${CYAN}%s${RESET} %s${detail:+  %s}  ${DIM}%s${RESET}" "${frames[i]}" "$msg" ${detail:+"$detail"} "$(_tb_elapsed $(( SECONDS - t0 )))"
+      # The downloads are read once a second, the frame drawn every tick.
+      if [[ -n "$dl" && "$SECONDS" != "$seen" ]]; then seen=$SECONDS; _tb_dl_tick "$dl" "$SECONDS"; fi
+      _tb_tty _tb_live_frame "${frames[i]}" "$msg" "$detail" "$(_tb_elapsed $(( SECONDS - t0 )))${_TB_DL_TAIL}"
       i=$(( (i + 1) % 10 ))
       sleep 0.12
     done
   ) 2>/dev/null &
   _TB_LIVE_PID=$!
+}
+# _tb_live_frame GLYPH MSG DETAIL TIME -- one frame of the live line: the spinner's
+# GLYPH, MSG, DETAIL when there is one, then TIME (the time spent and what the
+# downloads brought in).
+_tb_live_frame() {
+  printf "\r\033[K  ${CYAN}%s${RESET} %s${3:+  %s}  ${DIM}%s${RESET}" "$1" "$2" ${3:+"$3"} "$4"
 }
 # SIGKILL, never TERM: until the ticker has reset the traps it inherited, a TERM runs
 # the installer's TERM and EXIT traps inside it (install_cleanup, mid-install), or is
@@ -588,36 +623,256 @@ _tb_live_resume() {
   _tb_live_tick
 }
 
-# The "release the secure environment that is already here" remedy, printed from ONE
-# place, for the sites that mean a FULL removal (switch account,
-# switch Client ID), not a keep-your-data recreate.
-#
-# Why the release comes first: the backend record is anchored to the cluster's
-# identity (the kube-system namespace UID), which dies with the cluster. Deleting
-# k3s by hand never calls the API, so the record would keep a cluster_id that will
-# never exist again and stay on the dashboard for good. `tracebloc delete` revokes
-# it server-side first (an API call, so it works on a broken cluster too), then
-# deletes it from this machine and, without --keep-data, wipes ~/.tracebloc, which
-# is what these sites promise.
-#
-# It acts on this machine's active secure environment with the SIGNED-IN account's
-# token, so it has to run as the account that owns it: the switch-account site has
-# just signed in as the OTHER one, hence the `tracebloc login` in front. The last
-# lines cover a machine where `tracebloc delete` can't run (it refuses with "no
-# active client" when the pointer is gone): revoke it on the dashboard, then, on
-# Linux, delete native k3s with its own uninstall script (k3s.sh,
-# TB_K3S_UNINSTALL_PATH). A Mac gets no manual step.
-#
-# $1 (optional): the indent to print the command lines at.
-_release_client_hint() {
-  local in="${1:-}"
-  hint "${in}tracebloc login  &&  tracebloc delete   (as the account that owns it: releases it on"
-  hint "${in}                                         its dashboard, then wipes it + its local data)"
-  hint "${in}(tracebloc delete refused, or you can't sign in as that account? revoke it on that"
-  if [[ "${OS:-}" == "Linux" && -n "${TB_K3S_UNINSTALL_PATH:-}" ]]; then
-    hint "${in} account's dashboard, then delete its k3s: sudo ${TB_K3S_UNINSTALL_PATH})"
+# ── What a live line's downloads brought in ─────────────────────────────────
+#  Animating, every download this installer's own curl makes while a live line runs
+#  (curl_secure with -o FILE) is watched: the bytes in FILE, and its size from the
+#  answer's headers (curl -D). Once a second the ticker adds them up and shows them
+#  after the time spent:
+#    ⠋ Installing system tools...  2m 19s · 63% · 8.4 MB/s     every size known
+#    ⠋ Installing system tools...  1m 05s · 17 MB · 4.2 MB/s    a size not known
+#  The share is shown only when the line was told every download it makes before the
+#  first byte (tb_live_expect) and every size is known: it is never estimated. The
+#  speed is the average over the last _TB_DL_WINDOW_S seconds, shown while a download
+#  runs. Plain, nothing is watched or shown, and the log gets nothing new; animating,
+#  it gets one line per download, its size and the time it took.
+#  One folder per line (_TB_DL_DIR, made by _tb_live_begin, removed when the line
+#  ends; a scratch folder, so every EXIT trap's tb_scratch_reap drops it on an abort),
+#  so a download in any subshell reaches the ticker. A download is K.* in it,
+#  K its URL made a file name (_tb_dl_key), so a retry starts the same download again:
+#    K.url  its URL           K.out   the file curl writes, while it runs
+#    K.hdr  curl's headers    K.done  the bytes it wrote, once it ended
+#    K.size its size, when the server said it or the download ended
+#    K.plan  the line was told this download (tb_live_expect): a failure keeps its K.url
+#  and `planned` marks a line that was told its downloads.
+_TB_DL_WINDOW_S=5
+_TB_DL_K=""
+
+# tb_live_watching -- the live line shows what downloads bring in (a terminal).
+tb_live_watching() { [[ -n "${_TB_DL_DIR:-}" && -d "$_TB_DL_DIR" ]]; }
+
+# tb_live_expect URL [CURL-ARG...] -- tell the live line, before its first download
+# starts, that it will download URL, and ask the server its size: one byte of it,
+# whose answer names the whole (Content-Range), with CURL-ARG (a pull token) as the
+# download sends them. --max-filesize stops a server that ignores the range after its
+# headers. A size it does not learn leaves the line its bytes. An empty URL is a
+# download whose address the line cannot name yet, so no share is shown. Nothing when
+# no live line is watching.
+tb_live_expect() {
+  local url="$1" k size=""
+  shift
+  tb_live_watching || return 0
+  : >"${_TB_DL_DIR}/planned" 2>/dev/null || return 0
+  if [[ -z "$url" ]]; then
+    printf 'unknown\n' >"${_TB_DL_DIR}/unknown.url" 2>/dev/null || true
+    return 0
+  fi
+  k="${_TB_DL_DIR}/$(_tb_dl_key "$url")"
+  printf '%s\n' "$url" >"${k}.url" 2>/dev/null || return 0
+  : >"${k}.plan" 2>/dev/null || true
+  # || true inside: a server that ignores the range ends curl at --max-filesize, after
+  # it printed the headers this reads.
+  size="$({ curl_secure -sSL --max-time 15 -r 0-0 --max-filesize 1 -o /dev/null -D - "$@" "$url" 2>/dev/null || true; } | _tb_dl_header_size)" || size=""
+  if [[ -n "$size" ]]; then
+    printf '%s\n' "$size" >"${k}.size" 2>/dev/null || true
   else
-    hint "${in} account's dashboard.)"
+    log "The live line could not learn the size of ${url}; it shows the bytes, not a share."
+  fi
+  return 0
+}
+
+# _tb_dl_key URL -- URL as a file name in the line's folder: no slash, at most 100 bytes.
+_tb_dl_key() {
+  local k="${1//[!A-Za-z0-9._-]/_}"
+  (( ${#k} <= 100 )) || k="${k:$(( ${#k} - 100 ))}"
+  printf '%s' "$k"
+}
+
+# _tb_dl_header_size -- the size a download's headers (on stdin, curl -D) give for the
+# whole file: the last answer's Content-Range total on a 206, its Content-Length on
+# any other 2xx. Nothing when they give none (a chunked answer, an error).
+_tb_dl_header_size() {
+  awk '{ l = tolower($0); sub(/\r$/, "", l) }
+    l ~ /^http\// { st = $2; len = ""; rng = "" }
+    l ~ /^content-length:/ { len = l; sub(/^content-length:[ \t]*/, "", len) }
+    l ~ /^content-range:/ { rng = l; sub(/^.*\//, "", rng) }
+    END {
+      if (st == "206") { if (rng ~ /^[0-9]+$/) print rng }
+      else if (st ~ /^2/ && len ~ /^[0-9]+$/) print len
+    }'
+}
+
+# _tb_dl_watch CURL-ARG... -- a download the live line shows: curl writes a file (-o),
+# a live line is watching, and the call keeps no headers of its own (-D). Starts its
+# entry (_TB_DL_K, the path without the suffix) over again, as a retry starts the file
+# over.
+_tb_dl_watch() {
+  local a prev="" out="" url="" k
+  _TB_DL_K=""
+  tb_live_watching || return 1
+  for a in "$@"; do
+    case "$prev" in -o|--output) out="$a" ;; esac
+    case "$a" in
+      -D|--dump-header) return 1 ;;
+      http://*|https://*) url="$a" ;;
+    esac
+    prev="$a"
+  done
+  [[ -n "$url" && -n "$out" && "$out" != /dev/null && "$out" != - ]] || return 1
+  [[ "$out" == /* ]] || out="${PWD}/${out}"
+  k="${_TB_DL_DIR}/$(_tb_dl_key "$url")"
+  # The file a failed attempt left is not this attempt's bytes: curl truncates it only
+  # when its first byte arrives, after the ticker reads K.out.
+  [[ ! -s "$out" ]] || : >"$out" 2>/dev/null || true
+  rm -f "${k}.done" 2>/dev/null || true
+  { : >"${k}.hdr" && printf '%s\n' "$url" >"${k}.url" && printf '%s\n' "$out" >"${k}.out"; } 2>/dev/null || return 1
+  _TB_DL_K="$k"
+}
+
+# _tb_dl_curl K CURL-ARG... -- curl_secure's call for a download the live line shows
+# (_tb_dl_watch): the same call, with its headers into K.hdr; then what it wrote.
+_tb_dl_curl() {
+  local k="$1" t0=$SECONDS rc=0
+  shift
+  # house-rules: ignore=curl-timeout -- curl_secure passes its bounds in.
+  curl --tlsv1.2 -D "${k}.hdr" "$@" || rc=$?
+  _tb_dl_end "$k" "$rc" "$t0"
+  return "$rc"
+}
+
+# _tb_dl_end K RC T0 -- the download K ended with curl's RC, started at T0 (SECONDS).
+# Done, its bytes are its size, and the log gets one line: its size and the time it
+# took. Failed, it is not running any more: a retry starts it again, or the run stops.
+_tb_dl_end() {
+  local k="$1" out="" b url=""
+  if [[ "$2" -eq 0 ]]; then
+    read -r out 2>/dev/null <"${k}.out" || true
+    read -r url 2>/dev/null <"${k}.url" || true
+    b="$(wc -c 2>/dev/null <"$out")" || b=0
+    b="${b//[!0-9]/}"
+    { printf '%s\n' "${b:-0}" >"${k}.size" && printf '%s\n' "${b:-0}" >"${k}.done"; } 2>/dev/null || true
+    log "Downloaded ${url##*/}: $(_tb_dl_bytes "${b:-0}") in $(_tb_elapsed $(( SECONDS - $3 )))"
+  else
+    rm -f "${k}.out" "${k}.hdr" 2>/dev/null || true
+    # A download nobody planned has no size to wait for: it leaves nothing for _tb_dl_sample.
+    [[ -e "${k}.plan" ]] || rm -f "${k}.url" 2>/dev/null || true
+  fi
+}
+
+# _tb_dl_drop -- the line's folder removed (its owner, when the line ends).
+_tb_dl_drop() {
+  [[ -z "${_TB_DL_DIR:-}" ]] || tb_scratch_rm "$_TB_DL_DIR"
+  _TB_DL_DIR=""
+}
+
+# _tb_dl_sample DIR -- the line's downloads added up, into _TB_DL_BYTES (bytes so far),
+# _TB_DL_TOTAL (their sizes), _TB_DL_KNOWN (1: the line was told its downloads, and
+# every size is known), _TB_DL_RUNNING (1: one is running) and _TB_DL_STARTED (1: one
+# started). A download nobody planned whose answer has not come yet counts nothing,
+# and misses nothing either; a planned one whose size was not learned keeps the share
+# unknown.
+_tb_dl_sample() {
+  local f k p b t
+  _TB_DL_BYTES=0; _TB_DL_TOTAL=0; _TB_DL_KNOWN=0; _TB_DL_RUNNING=0; _TB_DL_STARTED=0
+  [[ ! -e "$1/planned" ]] || _TB_DL_KNOWN=1
+  for f in "$1"/*.url; do
+    [[ -e "$f" ]] || continue
+    k="${f%.url}"; b=0; t=""
+    [[ ! -s "${k}.size" ]] || read -r t 2>/dev/null <"${k}.size" || true
+    if [[ -s "${k}.done" ]]; then
+      read -r b 2>/dev/null <"${k}.done" || true
+      _TB_DL_STARTED=1
+    elif [[ -s "${k}.out" ]]; then
+      _TB_DL_STARTED=1; _TB_DL_RUNNING=1
+      p=""; read -r p 2>/dev/null <"${k}.out" || true
+      b="$(wc -c 2>/dev/null <"$p")" || b=0
+      [[ -n "$t" || ! -s "${k}.hdr" ]] || t="$(_tb_dl_header_size <"${k}.hdr")"
+      [[ -n "$t" || -s "${k}.hdr" || -e "${k}.plan" ]] || t=0
+    fi
+    b="${b//[!0-9]/}"; t="${t//[!0-9]/}"
+    [[ -n "$t" ]] || _TB_DL_KNOWN=0
+    _TB_DL_BYTES=$(( _TB_DL_BYTES + ${b:-0} )); _TB_DL_TOTAL=$(( _TB_DL_TOTAL + ${t:-0} ))
+  done
+}
+
+# _tb_dl_tick DIR NOW -- the ticker's once-a-second read of the line's downloads at
+# NOW (SECONDS): _TB_DL_TAIL is what follows the time spent. _TB_DL_RING keeps the
+# samples of the last _TB_DL_WINDOW_S seconds ("SECONDS BYTES" pairs, oldest first)
+# for the speed; a count that went down (a retry starting over) starts them again.
+_tb_dl_tick() {
+  local now="$2" rate=""
+  _tb_dl_sample "$1"
+  _TB_DL_TAIL=""
+  if (( ! _TB_DL_STARTED )); then _TB_DL_RING=""; _TB_DL_PREV=0; return 0; fi
+  (( _TB_DL_BYTES >= _TB_DL_PREV )) || _TB_DL_RING=""
+  _TB_DL_PREV=$_TB_DL_BYTES
+  _TB_DL_RING="${_TB_DL_RING:+$_TB_DL_RING }${now} ${_TB_DL_BYTES}"
+  # shellcheck disable=SC2086  # the pairs split into words on purpose
+  set -- $_TB_DL_RING
+  while (( $# > 2 && now - $1 > _TB_DL_WINDOW_S )); do shift 2; done
+  _TB_DL_RING="$*"
+  if (( _TB_DL_RUNNING && now > $1 )); then rate=$(( (_TB_DL_BYTES - $2) / (now - $1) )); fi
+  _TB_DL_TAIL="$(_tb_dl_tail "$_TB_DL_BYTES" "$_TB_DL_TOTAL" "$_TB_DL_KNOWN" "$rate")"
+}
+
+# _tb_dl_tail BYTES TOTAL KNOWN [RATE] -- " · 63% · 8.4 MB/s": the share of TOTAL when
+# KNOWN is 1, else the bytes; then RATE (bytes a second), when given.
+_tb_dl_tail() {
+  local s
+  if [[ "$3" == 1 ]] && (( $2 > 0 )); then
+    s=$(( $1 * 100 / $2 )); (( s <= 100 )) || s=100
+    s="${s}%"
+  else
+    s="$(_tb_dl_bytes "$1")"
+  fi
+  printf ' · %s' "$s"
+  [[ -z "${4:-}" ]] || printf ' · %s' "$(_tb_dl_rate "$4")"
+}
+
+# _tb_dl_bytes BYTES -- "64 bytes", "640 KB", "312 MB", "1.2 GB", whole units rounded
+# down (1 MB = 1024 KB, as the installer's other sizes count).
+_tb_dl_bytes() {
+  local b="${1:-0}"
+  if (( b < 1024 )); then printf '%s bytes' "$b"
+  elif (( b < 1048576 )); then printf '%s KB' "$(( b / 1024 ))"
+  elif (( b < 1073741824 )); then printf '%s MB' "$(( b / 1048576 ))"
+  else printf '%s.%s GB' "$(( b / 1073741824 ))" "$(( b % 1073741824 * 10 / 1073741824 ))"
+  fi
+}
+# _tb_dl_rate BYTES -- BYTES a second: "640 KB/s", or MB/s to the nearest tenth, "8.4 MB/s".
+_tb_dl_rate() {
+  local r="${1:-0}" t
+  t=$(( (r + 512) / 1024 ))
+  if (( t < 1024 )); then printf '%s KB/s' "$t"; return; fi
+  t=$(( (r * 10 + 524288) / 1048576 ))
+  printf '%s.%s MB/s' "$(( t / 10 ))" "$(( t % 10 ))"
+}
+
+# _refuse_foreign_client HEAD KEEP INSTEAD WHY -- end the run on a machine that already
+# runs a secure environment this run must not replace (another account's, or another
+# Client ID's): HEAD on the ✖ line, then the end block's KEEP, INSTEAD and the delete
+# command. WHY and _release_client_fallback go to the log. One place for both sites.
+#
+# Why `tracebloc delete` and never a bare cluster delete: the backend record is
+# anchored to the cluster's identity (the kube-system namespace UID), which dies with
+# the cluster, so a delete that never calls the API strands the record on the
+# dashboard for good. `tracebloc delete` releases it server-side first, then deletes it
+# from this machine and, without --keep-data, wipes ~/.tracebloc: these sites mean a
+# full removal. It acts with the SIGNED-IN account's token, hence `tracebloc login`.
+_refuse_foreign_client() {
+  tb_fail_next "${2}\n${3}" "tracebloc login && tracebloc delete"
+  error_said "$1" "${4} $(_release_client_fallback)"
+}
+
+# _release_client_fallback -- how to delete it where `tracebloc delete` can't run (it
+# refuses with "no active client" when the pointer is gone, or nobody can sign in as
+# that account): on its dashboard, then, on Linux, native k3s's own uninstall script
+# (k3s.sh, TB_K3S_UNINSTALL_PATH). A Mac gets no manual step.
+_release_client_fallback() {
+  local how="If tracebloc delete refuses, or nobody can sign in as that account, delete it on that account's dashboard"
+  if [[ "${OS:-}" == "Linux" && -n "${TB_K3S_UNINSTALL_PATH:-}" ]]; then
+    printf '%s, then delete k3s: sudo %s' "$how" "$TB_K3S_UNINSTALL_PATH"
+  else
+    printf '%s.' "$how"
   fi
 }
 
@@ -1880,7 +2135,7 @@ tb_say_ignored_settings() {
   local n
   for n in $TB_IGNORED_SETTINGS; do
     if [[ -n "${!n:-}" ]]; then
-      warn "${n} is set, but this installer does not use it: $(tb_ignored_setting_reason "$n")."
+      warn "${n} is ignored: $(tb_ignored_setting_reason "$n")."
     fi
   done
 }
@@ -1891,7 +2146,7 @@ tb_say_ignored_settings() {
 tb_ignored_setting_reason() {
   case "$1" in
     TRACEBLOC_SERVERS|TRACEBLOC_AGENTS) printf '%s' "tracebloc runs on this one machine" ;;
-    TRACEBLOC_K3D_VERSION) printf '%s' "it no longer sets up k3d" ;;
+    TRACEBLOC_K3D_VERSION) printf '%s' "the installer no longer sets up k3d" ;;
     *) return 1 ;;
   esac
 }
@@ -2590,11 +2845,9 @@ tb_wsl_phase() {
 #   client, or empty when the gate did not assess (--force, or a stale bootstrap
 #   without assess.sh). On credential-rejected the host runs `client create --reissue`
 #   and puts TRACEBLOC_CREDENTIAL_REISSUED=1 on the client run's line;
-#   TB_PREV_KUBE_CONTEXT=<context>, the context kubectl pointed at before this run's
-#   kubeconfig merge made its own current (k3s.sh), or empty when it pointed at no
-#   other one. The client run merges again after this one, so only this run can tell;
-#   the host puts it on the client run's line (TRACEBLOC_WSL_PREV_KUBE_CONTEXT), and
-#   that run's summary says how to switch back;
+#   TRACEBLOC_KUBE_CONTEXT=<context>, tracebloc's kube context, which this run's
+#   kubeconfig merge added (k3s.sh). The merge leaves the current context alone, so
+#   the host names this one to its CLI until the host record does;
 #   TRACEBLOC_MACHINE_KIND=, TRACEBLOC_CLOUD_PROVIDER= and TRACEBLOC_HOST_OS=, where
 #   this machine runs (provision.sh's _registration_machine_facts, the facts the
 #   chart's heartbeat gets in this distro), each empty when it cannot be read. The
@@ -2607,11 +2860,11 @@ tb_wsl_handover_write() {
   [[ "$(tb_wsl_phase 2>/dev/null)" == "cluster" && -n "${TRACEBLOC_WSL_HANDOVER:-}" ]] || return 0
   _TB_REG_MACHINE_KIND=""; _TB_REG_CLOUD_PROVIDER=""; _TB_REG_HOST_OS=""
   if declare -F _registration_machine_facts >/dev/null 2>&1; then _registration_machine_facts; fi
-  { printf 'INSTALL_STATE_REASON=%s\nTB_PREV_KUBE_CONTEXT=%s\nTRACEBLOC_MACHINE_KIND=%s\nTRACEBLOC_CLOUD_PROVIDER=%s\nTRACEBLOC_HOST_OS=%s\n' \
-      "${INSTALL_STATE_REASON:-}" "${TB_PREV_KUBE_CONTEXT:-}" \
+  { printf 'INSTALL_STATE_REASON=%s\nTRACEBLOC_KUBE_CONTEXT=%s\nTRACEBLOC_MACHINE_KIND=%s\nTRACEBLOC_CLOUD_PROVIDER=%s\nTRACEBLOC_HOST_OS=%s\n' \
+      "${INSTALL_STATE_REASON:-}" "$(_tb_kube_context)" \
       "${_TB_REG_MACHINE_KIND//[$'\r\n']/}" "${_TB_REG_CLOUD_PROVIDER//[$'\r\n']/}" "${_TB_REG_HOST_OS//[$'\r\n']/}" >"$TRACEBLOC_WSL_HANDOVER"; } 2>/dev/null \
     || error "Couldn't hand what this run found to the Windows installer: ${TRACEBLOC_WSL_HANDOVER} could not be written. Re-run the installer from Windows."
-  log "handover: INSTALL_STATE_REASON=${INSTALL_STATE_REASON:-} TB_PREV_KUBE_CONTEXT=${TB_PREV_KUBE_CONTEXT:-} TRACEBLOC_MACHINE_KIND=${_TB_REG_MACHINE_KIND} TRACEBLOC_CLOUD_PROVIDER=${_TB_REG_CLOUD_PROVIDER} TRACEBLOC_HOST_OS=${_TB_REG_HOST_OS} written to ${TRACEBLOC_WSL_HANDOVER}"
+  log "handover: INSTALL_STATE_REASON=${INSTALL_STATE_REASON:-} TRACEBLOC_KUBE_CONTEXT=$(_tb_kube_context) TRACEBLOC_MACHINE_KIND=${_TB_REG_MACHINE_KIND} TRACEBLOC_CLOUD_PROVIDER=${_TB_REG_CLOUD_PROVIDER} TRACEBLOC_HOST_OS=${_TB_REG_HOST_OS} written to ${TRACEBLOC_WSL_HANDOVER}"
 }
 
 # tb_wsl_client_state_write -- the client run's TRACEBLOC_CLIENT_STATE, handed to the
@@ -2623,7 +2876,7 @@ tb_wsl_client_state_write() {
   local state="${TRACEBLOC_CLIENT_STATE:-}"
   state="${state//[$'\r\n']/}"
   { printf 'TRACEBLOC_CLIENT_STATE=%s\n' "$state" >"$TRACEBLOC_WSL_HANDOVER"; } 2>/dev/null \
-    || { warn "Couldn't hand the client's state to the Windows installer (${TRACEBLOC_WSL_HANDOVER}); it will not set up the example use case."; return 0; }
+    || { warn "Couldn't hand the secure environment's state to the Windows installer (${TRACEBLOC_WSL_HANDOVER}); it will not set up the example use case."; return 0; }
   log "handover: TRACEBLOC_CLIENT_STATE=${state} written to ${TRACEBLOC_WSL_HANDOVER}"
 }
 
@@ -2979,8 +3232,30 @@ TRACEBLOC_RECORD_ARMED=""
 TB_RECORD_ARMED=""
 # _tb_record_armed -- true once main() (or a harness) has armed the writer.
 _tb_record_armed() { [[ "${TRACEBLOC_RECORD_ARMED:-${TB_RECORD_ARMED:-}}" == "1" ]]; }
-# _tb_kube_context -- the kube context this run pointed kubectl at, if any.
+# _tb_kube_context -- the kube context this run added to the user's kubeconfig, if any.
 _tb_kube_context() { printf '%s' "${TRACEBLOC_KUBE_CONTEXT:-${TB_KUBE_CONTEXT:-}}"; }
+# tb_kubectl_shown, tb_helm_shown -- how a kubectl or helm command printed for the
+# user starts: naming tracebloc's context once the run has added one, since the
+# install leaves the user's current context on whatever cluster they chose.
+tb_kubectl_shown() {
+  local ctx; ctx="$(_tb_kube_context)"
+  if [[ -n "$ctx" ]]; then printf 'kubectl --context %s' "$ctx"; else printf 'kubectl'; fi
+}
+tb_helm_shown() {
+  local ctx; ctx="$(_tb_kube_context)"
+  if [[ -n "$ctx" ]]; then printf 'helm --kube-context %s' "$ctx"; else printf 'helm'; fi
+}
+# tb_kube_set_namespace NS -- the context kubectl and the CLI read defaults to NS:
+# tracebloc's, by name, once the run added one; with none, the current context, the
+# cluster the user chose. Best-effort: a failure never aborts the install.
+tb_kube_set_namespace() {
+  local ctx; ctx="$(_tb_kube_context)"
+  if [[ -n "$ctx" ]]; then
+    kubectl config set-context "$ctx" --namespace "$1" >/dev/null 2>&1 || true
+  else
+    kubectl config set-context --current --namespace "$1" >/dev/null 2>&1 || true
+  fi
+}
 # Prepared mode (prepare-host on native k3s, 1.1g): the record belongs to the user
 # the administrator named, never to the administrator who runs it. TB_RECORD_FOR_USER
 # is that user's login name (the record's `user`, and the root copy's <user>),

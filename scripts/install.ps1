@@ -88,13 +88,134 @@ $SignerRepos = 'client|client-dev'
 # anchored at the start so a look-alike host or org cannot prefix its way in.
 $SignerIdRe  = "^https://github\.com/tracebloc/($SignerRepos)/\.github/workflows/release-helm-chart\.yaml@refs/tags/v.*"
 
+# The ✖ line of a release whose signature is missing or wrong (TERMINOLOGY.md), and
+# what to do when a download did not come through.
+$NotSignedLine = "This release isn't signed by tracebloc, so nothing was changed"
+$CheckNetworkNext = "Check this machine's connection and proxy, then run the installer again:"
+
 # =============================================================================
 #  Logging helpers — match install-wsl.ps1 / install.sh UX.
 # =============================================================================
-function Info($m) { Write-Host "  " -NoNewline; Write-Host ([char]0x00B7) -ForegroundColor DarkGray -NoNewline; Write-Host " $m" -ForegroundColor DarkGray }
-function Ok($m)   { Write-Host "  " -NoNewline; Write-Host ([char]0x2714) -ForegroundColor Green    -NoNewline; Write-Host " $m" }
-function Warn($m) { Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow   -NoNewline; Write-Host "  $m" -ForegroundColor Yellow }
-function Err($m)  { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red      -NoNewline; Write-Host " $m" -ForegroundColor Red }
+# ── The output helpers: the same lines in install.ps1 and install-wsl.ps1 (a Pester
+#    test holds the two copies to each other). Glyphs are [char] codes: Windows
+#    PowerShell 5.1 reads a file without a byte-order mark as Latin-1. ──
+$Dot = [string][char]0x00B7
+$InstallCommand = 'irm https://tracebloc.io/i.ps1 | iex'
+# The run's log, which install.ps1 creates (New-HostLog) and its child inherits.
+$script:LOG_FILE = $env:TRACEBLOC_HOST_LOG
+$script:LiveLine = ''
+# A person's console, not a pipe or a file; and one that animates, with colour on.
+function Test-HostTerminal { try { return (-not [Console]::IsOutputRedirected) } catch { return $false } }
+function Test-HostAnimate { return ((Test-HostTerminal) -and -not $env:NO_COLOR -and $env:TERM -ne 'dumb') }
+# Show-Live MSG: "· MSG" while a wait runs, on a console that animates; the next line
+# printed takes its place. Elsewhere nothing, as the outcome's own line says it, unless
+# -Keep: a wait long enough to look frozen prints its line once.
+function Show-Live {
+  param([string]$m, [switch]$Keep)
+  Close-Live
+  if (-not (Test-HostAnimate)) { if ($Keep) { Info $m }; return }
+  $script:LiveLine = "  $Dot $m"
+  Write-Host $script:LiveLine -ForegroundColor DarkGray -NoNewline
+}
+function Close-Live {
+  if (-not $script:LiveLine) { return }
+  Write-Host ("`r" + (' ' * $script:LiveLine.Length) + "`r") -NoNewline
+  $script:LiveLine = ''
+}
+function Info($m) { Close-Live; Write-Host "  " -NoNewline; Write-Host ([char]0x00B7) -ForegroundColor DarkGray -NoNewline; Write-Host " $m" -ForegroundColor DarkGray }
+function Ok($m)   { Close-Live; Write-Host "  " -NoNewline; Write-Host ([char]0x2714) -ForegroundColor Green    -NoNewline; Write-Host " $m" }
+function Warn($m) { Close-Live; Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow   -NoNewline; Write-Host "  $m" -ForegroundColor Yellow }
+function Err($m)  { Close-Live; Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red      -NoNewline; Write-Host " $m" -ForegroundColor Red }
+function Log($m)  { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -Encoding UTF8 -ErrorAction SilentlyContinue } }
+# A line only a machine reads: to the log, and to a console that is not a person's.
+function Write-MachineLine($m) { Log $m; if (-not (Test-HostTerminal)) { Write-Host "  $m" } }
+function Write-Rule { Write-Host ('  ' + ([string][char]0x2500) * 45) -ForegroundColor DarkGray }
+# A section: its heading and the blank line under it, and the two blank lines it ends with.
+function Write-Section($t) { Close-Live; Write-Host "  $t"; Write-Host "" }
+function Write-SectionEnd { Close-Live; Write-Host ""; Write-Host "" }
+function Get-HostLogDir { return (Join-Path $env:USERPROFILE '.tracebloc') }
+function Format-HostLogPath {
+  $leaf = Split-Path -Leaf $script:LOG_FILE
+  if ($script:LOG_FILE -ceq (Join-Path (Get-HostLogDir) $leaf)) { return "~\.tracebloc\$leaf" }
+  return $script:LOG_FILE
+}
+
+# Stop-Setup: ends the run with what a person reads. -What is the ✖ line, -Next what to
+# do, -Command the command under it (the install command unless given; none when '').
+# The message, -Reason, is the whole of it, which the log and a machine read.
+function Stop-Setup {
+  param([Parameter(Mandatory)][string]$Reason, [string]$What, [string]$Next, [AllowEmptyString()][string]$Command)
+  $e = New-Object System.Management.Automation.RuntimeException $Reason
+  if ($What) { $e.Data['TbWhat'] = $What }
+  if ($Next) { $e.Data['TbNext'] = $Next }
+  if ($PSBoundParameters.ContainsKey('Command')) { $e.Data['TbCommand'] = $Command }
+  throw $e
+}
+
+# Write-SetupEnd: the block a run that stops ends with, between two rules: the head,
+# what to do with its command under it, and where the log is.
+function Write-SetupEnd {
+  param([string]$Head = "Setup didn't finish", [string]$Next = "It's safe to run the installer again:",
+        [AllowEmptyString()][string]$Command = $InstallCommand, [char]$Glyph = [char]0x2716,
+        [ConsoleColor]$Color = 'Red', [switch]$NoLog)
+  Write-SectionEnd
+  Write-Rule
+  Write-Host ""
+  Write-Host "  " -NoNewline; Write-Host $Glyph -ForegroundColor $Color -NoNewline; Write-Host " $Head"
+  Write-Host ""
+  foreach ($l in ($Next -split "`n")) { Write-Host "  $l" }
+  if ($Command) { Write-Host "    $Command" -ForegroundColor Cyan }
+  if (-not $NoLog -and $script:LOG_FILE -and (Test-Path -LiteralPath $script:LOG_FILE)) {
+    Write-Host ""
+    Write-Host "  Log: $(Format-HostLogPath)"
+  }
+  Write-Host ""
+  Write-Rule
+}
+
+# Write-SetupStopped ERROR: the end of a run a throw stopped: the reason to the log,
+# the ✖ line, then the block. A throw that is no Stop-Setup has its reason as the line.
+function Write-SetupStopped {
+  param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+  $reason = "$ErrorRecord"
+  $data = $ErrorRecord.Exception.Data
+  Write-MachineLine "Installation stopped: $reason"
+  $what = if ($data.Contains('TbWhat')) { [string]$data['TbWhat'] } else { $reason }
+  $end = @{}
+  if ($data.Contains('TbNext')) { $end.Next = [string]$data['TbNext'] }
+  if ($data.Contains('TbCommand')) { $end.Command = [string]$data['TbCommand'] }
+  Err $what
+  Write-SetupEnd @end
+}
+# ── End of the output helpers. ──
+
+# The banner install.sh draws: "tracebloc · <version>" (a vX.Y.Z tag only), then
+# "Setting up tracebloc on your machine" and a rule.
+function Write-Banner([string]$Version) {
+  Write-Host ""; Write-Host ""
+  Write-Host "  " -NoNewline; Write-Host "tracebloc" -ForegroundColor Cyan -NoNewline
+  if ($Version -match '^v[0-9]') { Write-Host " $Dot $Version" -ForegroundColor DarkGray } else { Write-Host "" }
+  Write-Host ""
+  Write-Host "  Setting up tracebloc on your machine"
+  Write-Host ""
+  Write-Rule
+  Write-Host ""; Write-Host ""
+}
+
+# This run's log, ~\.tracebloc\install-<stamp>-windows.log beside the core's, handed to
+# install-wsl.ps1 as TRACEBLOC_HOST_LOG. A log that cannot be written is no log.
+function Get-HostLogStamp { return (Get-Date -Format 'yyyyMMdd-HHmmss') }
+function New-HostLog {
+  $script:LOG_FILE = $null
+  try {
+    $dir = Get-HostLogDir
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $path = Join-Path $dir "install-$(Get-HostLogStamp)-windows.log"
+    [IO.File]::WriteAllText($path, '')
+    $script:LOG_FILE = $path
+  } catch { $null = $_ }
+  $env:TRACEBLOC_HOST_LOG = $script:LOG_FILE
+}
 
 # =============================================================================
 #  Ref resolution + validation (mirrors install.sh). Functions THROW on failure
@@ -495,15 +616,15 @@ function Resolve-Cosign {
   # download, and during v1.9.7-rc.1 FR a healthy install got killed as
   # "frozen" in exactly this window. The size is cosign-windows-amd64.exe's
   # at the pin: 186,998,456 bytes (it said ~17 MB).
-  Info "cosign not found -- downloading pinned cosign $CosignVersion (~180 MB) to verify the manifest."
-  Info "This is the bootstrap's one big download; a few minutes on a slow network is normal."
+  Log "cosign not found -- downloading pinned cosign $CosignVersion (~180 MB) to verify the manifest."
+  Show-Live -Keep "Downloading what checks tracebloc's signature (180 MB, a few minutes on a slow network)..."
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
   if (-not (Get-OptionalWithTicks "$base/$asset" $bin)) { return $null }
   if ((Get-Sha256 $bin) -ne $want) {
     Err "Bootstrapped cosign failed its own checksum -- not using it."
     return $null
   }
-  Ok "cosign $CosignVersion downloaded and checksum-verified ($([math]::Round($sw.Elapsed.TotalSeconds))s)"
+  Log "cosign $CosignVersion downloaded and checksum-verified ($([math]::Round($sw.Elapsed.TotalSeconds))s)"
   return $bin
 }
 
@@ -613,7 +734,7 @@ function Confirm-ManifestSignature {
       Warn "Proceeding on checksum-only integrity. Not for production."
       return
     }
-    throw "cosign is required to verify the installer's signature and couldn't be found or bootstrapped. Refusing to fall back to an unauthenticated, same-channel checksum. Fix: install cosign (https://docs.sigstore.dev/cosign/installation/) and re-run, or for local development only set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
+    Stop-Setup -What "Couldn't check that this release is signed by tracebloc" -Next "Install cosign (https://docs.sigstore.dev/cosign/installation/), then run the installer again:" -Reason "cosign is required to verify the installer's signature and couldn't be found or bootstrapped. Refusing to fall back to an unauthenticated, same-channel checksum. Fix: install cosign (https://docs.sigstore.dev/cosign/installation/) and re-run, or for local development only set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
   }
 
   # We have a cosign; prove it can run before any failure it reports is read as a
@@ -632,7 +753,7 @@ function Confirm-ManifestSignature {
     # sigstore publishes, reproduces the failure exactly. A remedy that cannot clear
     # the error is worse than none: it costs the user a round trip and teaches them
     # the message is noise.
-    throw "cosign was obtained but won't run on this machine, so the installer's signature can't be checked. This is NOT a failed verification -- nothing suggests the download is bad. Two things cause it: security software may have quarantined or blocked the downloaded cosign.exe (check your antivirus / SmartScreen and allow it); or, on Windows-on-ARM, x64 emulation is unavailable -- Windows 11 on ARM includes it, Windows 10 on ARM may not, and sigstore publishes no native arm64 cosign to fall back on, so one would have to be built from source and put on PATH. For local development only you can set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
+    Stop-Setup -What "Couldn't check that this release is signed by tracebloc" -Next "Allow cosign.exe in your antivirus, then run the installer again:" -Reason "cosign was obtained but won't run on this machine, so the installer's signature can't be checked. This is NOT a failed verification -- nothing suggests the download is bad. Two things cause it: security software may have quarantined or blocked the downloaded cosign.exe (check your antivirus / SmartScreen and allow it); or, on Windows-on-ARM, x64 emulation is unavailable -- Windows 11 on ARM includes it, Windows 10 on ARM may not, and sigstore publishes no native arm64 cosign to fall back on, so one would have to be built from source and put on PATH. For local development only you can set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
   }
 
   # A cosign this run downloaded (into its own temp folder) goes to what runs next,
@@ -668,7 +789,8 @@ function Confirm-ManifestSignature {
           '--certificate-oidc-issuer', $issuer,
           '--offline',
           $Manifest)) {
-      Ok "Download verified as published by tracebloc."
+      Log "Download verified as published by tracebloc."
+      $script:SignatureOk = $true
       return
     }
   }
@@ -681,7 +803,9 @@ function Confirm-ManifestSignature {
       Warn "The installer's signature isn't published for this ref -- not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
       return
     }
-    throw ("Couldn't fetch the installer's signature for this release -- can't confirm the download is authentic. " + (Get-FetchRefusalCause "This release doesn't publish one. Pin a release tag that ships it."))
+    $why = "Couldn't fetch the installer's signature for this release -- can't confirm the download is authentic. " + (Get-FetchRefusalCause "This release doesn't publish one. Pin a release tag that ships it.")
+    if ($script:FetchStatus -eq '404') { Stop-Setup -Reason $why -What $NotSignedLine }
+    Stop-Setup -Reason $why -What "Couldn't download the installer" -Next $CheckNetworkNext
   }
 
   if (Invoke-CosignVerifyBlob -TufRoot $tufRoot $cosign @(
@@ -691,9 +815,10 @@ function Confirm-ManifestSignature {
         '--certificate', $cert,
         '--signature', $sig,
         $Manifest)) {
-    Ok "Download verified as published by tracebloc."
+    Log "Download verified as published by tracebloc."
+    $script:SignatureOk = $true
   } else {
-    throw "Couldn't confirm the installer download is authentic, so the install stopped before changing anything on your machine."
+    Stop-Setup -What $NotSignedLine -Reason "Couldn't confirm the installer download is authentic, so the install stopped before changing anything on your machine."
   }
 }
 
@@ -710,14 +835,14 @@ function Confirm-ScriptIntegrity {
     $local    = Join-Path $TmpDir ($f -replace '^scripts/', '')
     $expected = Find-ManifestDigest -ManifestPath $Manifest -Key $rel
     if (-not $expected) {
-      throw "$rel isn't in the installer's signed checksum list -- refusing to run it."
+      Stop-Setup -What $NotSignedLine -Reason "$rel isn't in the installer's signed checksum list -- refusing to run it."
     }
     $actual = Get-Sha256 -Path $local
     if ($actual -ne $expected) {
-      throw "Integrity check FAILED for $rel`n          expected: $expected`n          actual:   $actual`n        Someone may have tampered with the installer. Aborting before any privileged step runs."
+      Stop-Setup -What $NotSignedLine -Reason "Integrity check FAILED for $rel`n          expected: $expected`n          actual:   $actual`n        Someone may have tampered with the installer. Aborting before any privileged step runs."
     }
   }
-  Ok "all installer scripts verified against the signed manifest"
+  Log "all installer scripts verified against the signed manifest"
 }
 
 # This machine's Windows build and name, from one registry key, or $null where
@@ -737,11 +862,11 @@ function Get-WindowsBuildInfo {
 function Assert-WslWindowsBuild {
   $os = Get-WindowsBuildInfo
   if ($null -eq $os) {
-    throw "This installer could not read this machine's Windows build (CurrentBuildNumber under HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion), so it cannot tell whether this is Windows 11. The tracebloc install needs Windows 11 (build $WslMinWindowsBuild or later)."
+    Stop-Setup -What "Couldn't read this PC's Windows version $Dot tracebloc needs Windows 11" -Reason "This installer could not read this machine's Windows build (CurrentBuildNumber under HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion), so it cannot tell whether this is Windows 11. The tracebloc install needs Windows 11 (build $WslMinWindowsBuild or later)."
   }
   if ($os.Build -lt $WslMinWindowsBuild) {
     $name = if ($os.Name) { $os.Name } else { 'Windows' }
-    throw "This machine runs $name (build $($os.Build)). The tracebloc install needs Windows 11 (build $WslMinWindowsBuild or later). Update to Windows 11, then run the install again."
+    Stop-Setup -What "This PC runs $name $Dot tracebloc needs Windows 11" -Next 'Update to Windows 11, then run the installer again:' -Reason "This machine runs $name (build $($os.Build)). The tracebloc install needs Windows 11 (build $WslMinWindowsBuild or later). Update to Windows 11, then run the install again."
   }
 }
 
@@ -753,7 +878,7 @@ function Assert-WslWindowsBuild {
 function Assert-WindowsSubstrate {
   $asked = [string]$env:TRACEBLOC_SUBSTRATE
   if ($asked -and $asked -cne $WslSubstrate) {
-    throw "TRACEBLOC_SUBSTRATE='$asked' is not a runtime this installer can set up on Windows (it supports: $WslSubstrate, in the tracebloc WSL distro). Nothing was changed. Unset it, then run the install again."
+    Stop-Setup -What "TRACEBLOC_SUBSTRATE='$asked' is not one the installer sets up on Windows" -Next 'Unset TRACEBLOC_SUBSTRATE, then run the installer again:' -Reason "TRACEBLOC_SUBSTRATE='$asked' is not a runtime this installer can set up on Windows (it supports: $WslSubstrate, in the tracebloc WSL distro). Nothing was changed. Unset it, then run the install again."
   }
 }
 
@@ -763,10 +888,12 @@ function Assert-WindowsSubstrate {
 function Invoke-Bootstrap {
   param([object[]]$BootstrapArgs)
 
+  $label = if ($env:TRACEBLOC_REF) { $env:TRACEBLOC_REF } elseif ($env:REF) { $env:REF } else { $DefaultRef }
+  Write-Banner $label
   # The bootstrap takes no arguments, and install-wsl.ps1 takes only the tree. One
   # it was given is refused before anything is fetched, so a -Help never installs.
   if ($BootstrapArgs -and $BootstrapArgs.Count -gt 0) {
-    throw "This installer takes no arguments, and it was given: $($BootstrapArgs -join ' '). Nothing was changed. Run it again without them."
+    Stop-Setup -What "The installer takes no arguments, and it was given: $($BootstrapArgs -join ' ')" -Next 'Run it again without them:' -Reason "This installer takes no arguments, and it was given: $($BootstrapArgs -join ' '). Nothing was changed. Run it again without them."
   }
   # The runtime asked for, and the Windows floor, before anything is fetched or
   # written.
@@ -821,8 +948,13 @@ function Invoke-Bootstrap {
   # Confirm-ManifestSignature hands a cosign it downloaded down as TRACEBLOC_COSIGN;
   # under `irm | iex` this is the user's own session, so the finally puts it back.
   $prevCosign = [Environment]::GetEnvironmentVariable('TRACEBLOC_COSIGN', 'Process')
+  $prevLog = [Environment]::GetEnvironmentVariable('TRACEBLOC_HOST_LOG', 'Process')
+  $script:SignatureOk = $false
   try {
-    Info "Downloading tracebloc client installer (ref: $ref)..."
+    New-HostLog
+    Log "Downloading the tracebloc installer (ref: $ref) from $repoRel"
+    Write-Section 'Downloading'
+    Show-Live 'Downloading the installer...'
 
     # ── Fetch the sub-scripts (release assets on the customer path) ──
     $fetch = {
@@ -840,7 +972,8 @@ function Invoke-Bootstrap {
         New-Item -ItemType Directory -Path $destDir -Force | Out-Null
       }
       $src = Get-SubscriptUrl -File $f -RepoRaw $repoRaw -RepoRel $repoRel -AllowUnverified $allowUnverified
-      Get-WithRetry -Url $src -Dest $dest
+      try { Get-WithRetry -Url $src -Dest $dest }
+      catch { Stop-Setup -Reason "$_" -What "Couldn't download the installer" -Next $CheckNetworkNext }
     }
     foreach ($f in $Files) { & $fetch $f }
 
@@ -853,7 +986,7 @@ function Invoke-Bootstrap {
         Warn "No integrity checksums for ref '$ref' -- skipping the integrity check (TRACEBLOC_ALLOW_UNVERIFIED=1)."
         $manifest = $null
       } else {
-        throw ("Couldn't fetch the installer's integrity checksums for ref '$ref' -- refusing to run unverified installer scripts. " + (Get-FetchRefusalCause "If this ref pre-dates signed releases, pin a newer release tag."))
+        Stop-Setup -What "Couldn't download the installer" -Next $CheckNetworkNext -Reason ("Couldn't fetch the installer's integrity checksums for ref '$ref' -- refusing to run unverified installer scripts. " + (Get-FetchRefusalCause "If this ref pre-dates signed releases, pin a newer release tag."))
       }
     }
 
@@ -868,6 +1001,11 @@ function Invoke-Bootstrap {
       $verify += $core
       Confirm-ScriptIntegrity -Manifest $manifest -TmpDir $tmpDir -Files $verify
     }
+    # What the download came to, claiming no more than was checked, as install.sh's.
+    if ($manifest -and $script:SignatureOk) { Ok "Downloaded and verified $Dot signed by tracebloc" }
+    elseif ($manifest) { Ok 'Downloaded and verified' }
+    else { Ok 'Downloaded' }
+    Write-SectionEnd
 
     # ── Run the verified main installer ──
     # Hand the resolved ref down, exactly as install.sh:247 exports
@@ -884,7 +1022,7 @@ function Invoke-Bootstrap {
     # and there is no way to hand it an unverified one. Its exit code goes through
     # unchanged: 2 is the declared "restart, then re-run" handoff.
     $wsl = Join-Path $tmpDir "install-wsl.ps1"
-    Info "Running tracebloc WSL setup..."
+    Log "Running install-wsl.ps1 from $tmpDir"
     & powershell.exe -ExecutionPolicy Bypass -File $wsl -CoreDir $tmpDir
     $childExit = $LASTEXITCODE
   } finally {
@@ -893,6 +1031,7 @@ function Invoke-Bootstrap {
     # without running a `finally` still waiting below it.
     Remove-InstallerTemp -Path $tmpDir | Out-Null
     $env:TRACEBLOC_COSIGN = $prevCosign   # $null removes it again
+    $env:TRACEBLOC_HOST_LOG = $prevLog
   }
   Complete-Bootstrap -Code $childExit
 }
@@ -978,6 +1117,20 @@ function Complete-Bootstrap {
   exit $Code
 }
 
+# One run of the bootstrap, from its arguments to its exit: the main block's body,
+# a function so the copy catalog's Windows scenarios run it as a person does.
+function Invoke-BootstrapMain {
+  param([object[]]$BootstrapArgs)
+  try {
+    Invoke-Bootstrap -BootstrapArgs $BootstrapArgs
+  } catch {
+    # Clean, branded failure — never a raw stack. "$_" stringifies to the
+    # exception MESSAGE (curated at the throw sites), not the source/stack.
+    Write-SetupStopped $_
+    Complete-Bootstrap -Code 1
+  }
+}
+
 # =============================================================================
 #  Main. $env:TRACEBLOC_PESTER lets the test suite dot-source this file to load the
 #  functions without tripping the platform gate (which exits off-Windows) or
@@ -1000,14 +1153,5 @@ if (-not $env:TRACEBLOC_PESTER) {
   # TLS 1.2 floor — Windows PowerShell 5.1 otherwise negotiates down to TLS 1.0.
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-  try {
-    Invoke-Bootstrap -BootstrapArgs $args
-  } catch {
-    # Clean, branded failure — never a raw stack. "$_" stringifies to the
-    # exception MESSAGE (curated at the throw sites), not the source/stack.
-    Write-Host ""
-    Err "Installation stopped: $_"
-    Write-Host "  It's safe to re-run this installer. If it keeps failing, share the output above with tracebloc support." -ForegroundColor DarkGray
-    Complete-Bootstrap -Code 1
-  }
+  Invoke-BootstrapMain -BootstrapArgs $args
 }

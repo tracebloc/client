@@ -1209,6 +1209,12 @@ autoUpgrade.image:
   tag: "4.2.3"
   digest: "sha256:b97ba4f9b27fe7af16ee3d37e6815783c9d4a51289b6240a9024ec471611ae9b"
   digestFor: "alpine/helm:4.2.3"
+autoUpgrade.cosign.image:
+  registry: ghcr.io
+  repository: sigstore/cosign/cosign
+  tag: "v2.4.1-dev"
+  digest: "sha256:a1bb112f1758703aa1d222bf30b9655d04cf196c0b7feaf3479d1222c2283590"
+  digestFor: "sigstore/cosign/cosign:v2.4.1-dev"
 imageRefresh.image:
   registry: docker.io
   repository: alpine/k8s
@@ -1789,6 +1795,22 @@ Call with the ROOT context: {{ include "tracebloc.trainingPins" . }}
 {{- define "tracebloc.trainingPins" -}}
 {{- $training := default dict (default dict .Values.images).training -}}
 {{- if and $training.digests (include "tracebloc.trainingPinned" .) (include "tracebloc.pinRegistryHonoured" (dict "registry" $training.digestRegistry "root" .)) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.trainingEngineHoldsToken -- "true" where a pod that runs model code may
+still hold the client's token and reach tracebloc directly: every edge except one
+that pins the training engine (tracebloc.trainingPins) to an engine advertising
+no-backend-token. A floating edge runs the registry's :prod engine, which
+carries that capability only once it is released there, and jobs-manager keeps
+routing its pods through the egress proxy until then.
+*/}}
+{{- define "tracebloc.trainingEngineHoldsToken" -}}
+{{- $training := default dict (default dict .Values.images).training -}}
+{{- $caps := splitList "," (toString (default "" $training.capabilities)) -}}
+{{- if not (and (include "tracebloc.trainingPins" .) (has "no-backend-token" $caps)) -}}
 true
 {{- end -}}
 {{- end -}}

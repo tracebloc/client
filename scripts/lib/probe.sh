@@ -217,11 +217,11 @@ _audit_row() {
   printf '  %-18s %-46s %b\n' "$label" "$value" "$m"
 }
 
-# render_host_audit — print the "Host check" panel from the cached PROBE_* vars.
+# render_host_audit — print the "Machine check" panel from the cached PROBE_* vars.
 # Call run_host_probes first (host_audit does both). Read-only; prints only.
 render_host_audit() {
   echo ""
-  echo -e "  ${BOLD}Host check${RESET}"
+  echo -e "  ${BOLD}Machine check${RESET}"
 
   if [[ "${INSTALL_TIER_REASON:-}" == "mac-node" ]]; then
     # The macOS node brings its own runtime.

@@ -136,12 +136,12 @@ _pf_machine_need_gb() {
   fi
 }
 # What a budget below that floor costs, worded once for every gate: the derived
-# floor is about one training run, the typed one about the client itself.
+# floor is about one training run, the typed one about the secure environment itself.
 _pf_vm_floor_words() {
   if _pf_run_floor_mib "${1:-}" >/dev/null; then
-    printf 'below the %s GB one training run needs beside the tracebloc platform' "$(_pf_vm_floor_gb "${1:-}")"
+    printf 'below the %s GB one training needs beside the tracebloc platform' "$(_pf_vm_floor_gb "${1:-}")"
   else
-    printf 'below the %s GB the client needs; it will OOM' "$PF_MIN_MEM_GB"
+    printf 'below the %s GB the secure environment needs; it will OOM' "$PF_MIN_MEM_GB"
   fi
 }
 # The family the RUNTIME grader (_pf_runtime_mem_status) holds a runtime's budget
@@ -573,13 +573,13 @@ _pf_runtime_run_floor_mib() {
 # the real cost is memory per run, not scheduling. Pending stays possible only for
 # a size a human pinned, which _fit_verdict reports itself (`pinned-over`).
 _pf_below_rung_words() {
-  printf 'below it each training run gets less memory than the smallest training size (4 GiB), so a larger model can run out of memory'
+  printf 'below it each training gets less memory than the smallest training size (4 GiB), so a larger model can run out of memory'
 }
 
 # The same consequence for the arms that name what the machine can spare: there is
 # no budget left to point "below it" at, so the sentence names the cost directly.
 _pf_spare_rung_words() {
-  printf 'each training run gets less memory than the smallest training size (4 GiB), so a larger model can run out of memory'
+  printf 'each training gets less memory than the smallest training size (4 GiB), so a larger model can run out of memory'
 }
 
 # "CAN SPARE" UNDER WSL2 IS THE VM ITSELF.
@@ -622,7 +622,7 @@ _pf_runtime_mem_status() {
   rt_fam="$(_pf_runtime_floor_family)"
   run_floor_mib="$(_pf_runtime_run_floor_mib)" || run_floor_mib=""
   if [[ -n "$run_floor_mib" ]] && (( rt_mib < run_floor_mib )); then
-    _pf_detail warn "${what}: $(_pf_tenths_gb "$rt_mib" down) GB — below the $(_pf_tenths_gb "$run_floor_mib" up) GB one training run needs beside the tracebloc platform; no run can schedule."
+    _pf_detail warn "${what}: $(_pf_tenths_gb "$rt_mib" down) GB — below the $(_pf_tenths_gb "$run_floor_mib" up) GB one training needs beside the tracebloc platform; no run can schedule."
     _pf_person mem ⚠ "Low memory · a training needs about ${PF_WARN_MEM_GB} GB"
   elif (( rt_mib < $(_pf_vm_floor_mib "$rt_fam") )); then
     _pf_detail warn "${what}: ${rt_gb} GB — $(_pf_vm_floor_words "$rt_fam")."
@@ -650,10 +650,10 @@ _pf_runtime_mem_status() {
       local spare_gb host_gb
       host_gb="$(_pf_host_mem_gb)"
       spare_gb="$(_pf_spare_gb "$warn_eff" "$host_gb")"
-      _pf_detail warn "${what}: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${spare_gb} GB, so $(_pf_spare_rung_words)."
+      _pf_detail warn "${what}: ${rt_gb} GB — enough to run the secure environment; the smallest training (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${spare_gb} GB, so $(_pf_spare_rung_words)."
       _pf_person mem ⚠ "Low memory · a training needs about ${PF_WARN_MEM_GB} GB"
     else
-      _pf_detail warn "${what}: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted (${rec_eff} GB to train comfortably); $(_pf_below_rung_words)."
+      _pf_detail warn "${what}: ${rt_gb} GB — enough to run the secure environment; the smallest training (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted (${rec_eff} GB to train comfortably); $(_pf_below_rung_words)."
       _pf_person mem ⚠ "Low memory · a training needs about ${PF_WARN_MEM_GB} GB"
     fi
   else
@@ -763,11 +763,11 @@ _pf_arch() {
   if _pf_on_mac_node; then
     # The macOS node runs amd64 images under Rosetta, which the node gets when this Mac
     # has it installed (mac-container.sh, --rosetta); there is no Docker setting to name.
-    _pf_note "Architecture: ${ARCH} — the macOS node runs the amd64 client images under Rosetta when this Mac has it (softwareupdate --install-rosetta)."
+    _pf_note "Architecture: ${ARCH} — the macOS node runs the amd64 tracebloc images under Rosetta when this Mac has it (softwareupdate --install-rosetta)."
     return 0
   fi
   if amd64_emulation_available; then
-    _pf_note "Architecture: ${ARCH} — amd64 emulation (QEMU binfmt) available; client images run emulated (slower)."
+    _pf_note "Architecture: ${ARCH} — amd64 emulation (QEMU binfmt) available; tracebloc images run emulated (slower)."
     return 0
   fi
   # No emulation, and the engine asked above is not 8.4: this host would run the
@@ -864,7 +864,7 @@ _pf_memory() {
   # Tolerance must match the grace already applied to the SHOWN figure above, or
   # the two disagree: a 5 GB VM whose MemTotal sits a few hundred MiB under the
   # configured size displayed as "5 GB" while a 64 MiB tolerance graded it
-  # sub-floor, producing "Memory: 5 GB — below the 5 GB the client needs"
+  # sub-floor, producing "Memory: 5 GB — below the 5 GB the secure environment needs"
   # PF_VM_MEM_GRACE_MIB is the same tolerance
   # _pf_runtime_mem_status uses for its own floor and warn tests, so all three
   # now agree on where the boundaries are.
@@ -918,7 +918,7 @@ _pf_memory() {
     # floor family, not on OS: WSL2 reports OS=Linux but is graded on the
     # Windows VM floor, and _pf_clamp_mem_gb would otherwise lift its "can spare"
     # figure above the host's own RAM.
-    _pf_detail warn "Memory: ${gb} GB (${label}) — the client needs a ${floor_gb} GB node and the OS needs ~${PF_OS_RESERVE_GB} GB, so this machine is below the practical minimum of about $(( floor_gb + PF_OS_RESERVE_GB )) GB. Free up memory or use a larger machine."
+    _pf_detail warn "Memory: ${gb} GB (${label}) — the secure environment needs a ${floor_gb} GB node and the OS needs ~${PF_OS_RESERVE_GB} GB, so this machine is below the practical minimum of about $(( floor_gb + PF_OS_RESERVE_GB )) GB. Free up memory or use a larger machine."
     _pf_person mem ⚠ "Low memory · tracebloc needs about $(( floor_gb + PF_OS_RESERVE_GB )) GB"
   elif [[ "$mib" -lt "$warn_mib" ]]; then
     # The DERIVED budget, not its clamp — the same rule as
@@ -937,10 +937,10 @@ _pf_memory() {
       # the VM less a Windows reserve, which read 6: _pf_spare_gb.
       local spare_gb
       spare_gb="$(_pf_spare_gb "$rec_gb" "$gb")"
-      _pf_detail warn "Memory: ${gb} GB (${label}) — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${spare_gb} GB, so $(_pf_spare_rung_words)."
+      _pf_detail warn "Memory: ${gb} GB (${label}) — enough to run the secure environment; the smallest training (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${spare_gb} GB, so $(_pf_spare_rung_words)."
       _pf_person mem ⚠ "Low memory · a training needs about ${PF_WARN_MEM_GB} GB"
     else
-      _pf_detail warn "Memory: ${gb} GB (${label}) — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted. ${rec_gb} GB of RAM recommended to train locally."
+      _pf_detail warn "Memory: ${gb} GB (${label}) — enough to run the secure environment; the smallest training (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted. ${rec_gb} GB of RAM recommended to train locally."
       _pf_person mem ⚠ "Low memory · a training needs about ${PF_WARN_MEM_GB} GB"
     fi
   else
@@ -961,7 +961,7 @@ _pf_memory() {
     if [[ -n "$avail_kb" ]]; then
       avail_gb=$(( avail_kb / 1024 / 1024 ))
       if [[ "$avail_gb" -lt "$PF_MIN_MEM_GB" ]]; then
-        warn "Memory: only ${avail_gb} GB available right now (other workloads are using this machine) — the client needs ~${PF_MIN_MEM_GB} GB free to start."
+        warn "Memory: only ${avail_gb} GB available right now (other workloads are using this machine) — the secure environment needs ~${PF_MIN_MEM_GB} GB free to start."
       fi
     fi
   fi
@@ -1243,7 +1243,7 @@ _pf_opaque_fuse_warn() {
     fuse.*) warn "Storage: ${1} is on a FUSE filesystem (${2}) — a driver this check does not recognise." ;;
     *)      warn "Storage: ${1} is on a FUSE filesystem (${2}) — the mount table doesn't say which one." ;;
   esac
-  hint "If it is network-backed (sshfs, s3fs, rclone, a cloud-sync mount), the client database (MySQL/InnoDB) can corrupt or crash-loop — move HOST_DATA_DIR to a local disk under your \$HOME."
+  hint "If it is network-backed (sshfs, s3fs, rclone, a cloud-sync mount), the secure environment's database (MySQL/InnoDB) can corrupt or crash-loop — move HOST_DATA_DIR to a local disk under your \$HOME."
   hint "If it is a local FUSE mount (ntfs-3g, gocryptfs, bindfs), this is only a notice — the install continues."
 }
 
@@ -1300,7 +1300,7 @@ early_data_dir_guard() {
     return 0
   fi
   warn "Storage: ${target} is on a network filesystem (${fstype})."
-  hint "The client database (MySQL/InnoDB) corrupts or crash-loops on network storage, and NFS root_squash blocks data-dir setup."
+  hint "The secure environment's database (MySQL/InnoDB) corrupts or crash-loops on network storage, and NFS root_squash blocks data-dir setup."
   _pf_network_fs_remedy   # shared followable remedy
   error "Refusing to create the data directory on ${fstype} before logging starts."
 }
@@ -1341,10 +1341,10 @@ _pf_storage_type() {
   fi
   if _pf_is_network_fstype "$fstype"; then
       if [[ -n "${TRACEBLOC_ALLOW_NETWORK_FS:-}" ]]; then
-        warn "Storage: ${target} is on a network filesystem (${fstype}) — proceeding (TRACEBLOC_ALLOW_NETWORK_FS set); the client database may corrupt or crash-loop on network storage."
+        warn "Storage: ${target} is on a network filesystem (${fstype}) — proceeding (TRACEBLOC_ALLOW_NETWORK_FS set); the secure environment's database may corrupt or crash-loop on network storage."
         return 0
       fi
-      _pf_fail_line "Storage: ${target} is on a network filesystem (${fstype}) — the tracebloc client database (MySQL/InnoDB) corrupts or crash-loops on network storage, and NFS root_squash blocks data-dir setup."
+      _pf_fail_line "Storage: ${target} is on a network filesystem (${fstype}) — the secure environment's database (MySQL/InnoDB) corrupts or crash-loops on network storage, and NFS root_squash blocks data-dir setup."
       PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
       # The old remedy suggested HOST_DATA_DIR=$HOME/.tracebloc — but on a network HOME
       # that's still NFS, and validate_config rejects paths OUTSIDE $HOME, so it could

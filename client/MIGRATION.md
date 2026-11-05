@@ -2,6 +2,36 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## The auto-upgrade checks each chart's signature
+
+**What changed.** Before every upgrade, the hourly auto-upgrade checks the new
+chart against the Sigstore bundle its release attaches beside it, signed by
+tracebloc's release workflow, and upgrades from that checked file. A chart with
+no bundle, or one that does not verify, is not installed: the release stays as
+it is, and the Job's log says *This release isn't signed by tracebloc, so nothing
+was changed*.
+
+- The CronJob's pod has a new init container, `cosign`, from
+  `ghcr.io/sigstore/cosign/cosign` pinned by digest (`autoUpgrade.cosign.image`).
+  It takes the helm container's resources, so the pod reserves no more.
+- Sigstore's public keys ship with the chart, so the check reaches no new host.
+
+**What you have to do: nothing**, unless you mirror. With `global.imageRegistry`,
+copy the cosign image too (`scripts/list-images.sh` lists it). With your own chart
+repository in `autoUpgrade.repoUrl`, serve each chart's `.tgz.bundle` beside it.
+
+## The log Collector sends only usage events
+
+**What changed.** The telemetry Collector sends only the events tracebloc's own
+services record about their work, such as a sign-in or a training pod that
+failed: each event's name and fields, every field cut to 1024 characters,
+through the outbound gate. Every other line those services write to their logs
+stays in your secure environment. Before, the Collector sent those lines too,
+with credentials scrubbed from them.
+
+**What you have to do: nothing.** A service's full log is still on the machine:
+read it with `kubectl logs`.
+
 ## `ingestRunToken` is on for `prod`
 
 **What changed.** `ingestRunTokenByEnv.prod` is now `true`, as `dev` and `stg`

@@ -273,6 +273,19 @@ _native_k3s_install_script_url() {
 
 # ── Downloads ─────────────────────────────────────────────────────────────────
 
+# _native_k3s_binary_expect -- tell the live line about the k3s binary's download
+# before it starts (tb_live_expect), when step c makes one (_native_k3s_binary_due;
+# --print downloads nothing).
+_native_k3s_binary_expect() {
+  local asset url
+  tb_live_watching || return 0
+  ! tb_root_planning || return 0
+  _native_k3s_binary_due || return 0
+  asset="$(_native_k3s_binary_asset "$ARCH_DL" 2>/dev/null)" && url="$(_native_k3s_release_url "$asset" 2>/dev/null)" \
+    || { tb_live_expect ""; return 0; }
+  tb_live_expect "$url"
+}
+
 # _native_k3s_fetch_binary ARCH DEST -- download the k3s binary for ARCH, verify it
 # against the pinned digest, and install it at DEST as root, mode 0755. A mismatch is
 # refused by name and nothing is installed. Same bounds as setup-linux.sh's
@@ -884,8 +897,9 @@ _native_k3s_running_node_name() {
 # never read. Never a constant: the environment switcher shows it.
 # When CONFIG names no node but k3s already runs one (_native_k3s_node_exists, or
 # cannot tell), that node's name is read back from k3s (_native_k3s_running_node_name)
-# and the caller freezes it in CONFIG again; a new name would be a new node. Only when
-# k3s does not say is the run stopped.
+# and the caller freezes it in CONFIG again; a new name would be a new node. Returns 3
+# when k3s does not say it, and 4 when no new name can be made: callers run it in a
+# command substitution, so they end the run with _native_k3s_node_name_stop.
 _native_k3s_node_name() {
   local cfg="${1:-$TB_K3S_CONFIG_PATH}" have rc=0 name
   have="$(_native_k3s_config_value node-name "$cfg")" || rc=$?
@@ -896,15 +910,26 @@ _native_k3s_node_name() {
   fi
   rc=0; _native_k3s_node_exists "$cfg" || rc=$?
   if [[ "$rc" -ne 1 ]]; then
-    name="$(_native_k3s_running_node_name)" \
-      || error "native k3s: ${cfg} no longer names this machine's k3s node, and k3s did not say its name. A new name would leave the node's volumes behind. Start k3s if it is stopped, then re-run. Or run \"tracebloc delete\", which deletes k3s and its data, then install again."
+    name="$(_native_k3s_running_node_name)" || return 3
     log "native k3s node name: '${name}' (read back from k3s; ${cfg} no longer named it)."
     printf '%s\n' "$name"
     return 0
   fi
-  name="$(_native_k3s_mint_node_name)" || error "native k3s: /dev/urandom gave no node name for k3s."
+  name="$(_native_k3s_mint_node_name)" || return 4
   log "native k3s node name: '${name}' (new; frozen in ${cfg} from here on)."
   printf '%s\n' "$name"
+}
+
+# _native_k3s_node_name_stop RC [CONFIG] -- end the run where _native_k3s_node_name
+# returned RC for CONFIG, in the caller's shell, so the end block says what to do.
+_native_k3s_node_name_stop() {
+  local cfg="${2:-$TB_K3S_CONFIG_PATH}"
+  case "$1" in
+    3) tb_fail_next "Start k3s if it is stopped, then run the installer again:"
+       error_said "Can't tell which k3s node holds your data" "native k3s: ${cfg} no longer names this machine's k3s node, and k3s did not say its name. A new name would leave the node's volumes behind. Start k3s if it is stopped, then re-run. Or run \"tracebloc delete\", which deletes k3s and its data, then install again." ;;
+    4) error_said "Couldn't make a name for this machine's k3s node" "native k3s: /dev/urandom gave no node name for k3s." ;;
+    *) exit "$1" ;;
+  esac
 }
 
 # ── Pod and service ranges ────────────────────────────────────────────────────
@@ -1467,51 +1492,77 @@ _native_k3s_wsl_server_localhost() {
 _native_k3s_context() { printf 'k3s-%s' "${CLUSTER_NAME}"; }
 
 # _native_k3s_kubeconfig_target -- the kubeconfig the merge writes: the first entry
-# of KUBECONFIG, else ~/.kube/config.
+# of KUBECONFIG, else ~/.kube/config. The run's context pin
+# (_native_k3s_pin_context) goes first once the merge has run, and is never it.
 _native_k3s_kubeconfig_target() {
   local target="${KUBECONFIG:-${HOME}/.kube/config}"
+  if [[ -n "${TB_KUBE_CONTEXT_PIN:-}" && "${target%%:*}" == "$TB_KUBE_CONTEXT_PIN" ]]; then
+    target="${target#*:}"
+  fi
   printf '%s' "${target%%:*}"
 }
 
-# _native_k3s_merge_kubeconfig -- merge k3s's kubeconfig into the daily user's
-# (_native_k3s_kubeconfig_target), as _native_k3s_context, make it current, and set
-# TRACEBLOC_KUBE_CONTEXT. It is written by this (the daily user's) process, mode 0600, so
-# the user owns it; k3s's own copy stays root's.
+# _native_k3s_current_context FILE KUBECTL... -- FILE's own current-context, read by
+# KUBECTL (the command and its leading words, expanded by the caller: this reads no
+# variable of its caller's), "" when FILE sets none or does not exist. Returns 1 when
+# kubectl cannot read it, and when no KUBECTL is given.
+_native_k3s_current_context() {
+  local file="$1"
+  shift
+  (( $# > 0 )) || return 1
+  [[ -e "$file" ]] || return 0
+  KUBECONFIG="$file" "$@" config view -o 'jsonpath={.current-context}' 2>/dev/null
+}
+
+# _native_k3s_pin_context CTX -- every kubectl and helm this process starts from now
+# on reaches CTX, and the user's kubeconfig keeps its own current-context: a file
+# that holds only `current-context: CTX` goes first in KUBECONFIG (the first file
+# that sets it wins), the user's after it. A HELM_KUBECONTEXT from the user's shell is
+# unset, so helm reads that file as kubectl does. The file is removed when the run exits
+# (tb_scratch_dir). A second call rewrites it, and puts it first again if KUBECONFIG
+# was set since. Returns 1, with KUBECONFIG as it was, when the file cannot be written.
+_native_k3s_pin_context() {
+  local ctx="$1" dir pin="${TB_KUBE_CONTEXT_PIN:-}"
+  if [[ -z "$pin" ]]; then
+    tb_scratch_dir dir tracebloc-kube-context || return 1
+    pin="${dir}/kubeconfig"
+  fi
+  printf 'apiVersion: v1\nkind: Config\ncurrent-context: %s\n' "$ctx" > "$pin" || return 1
+  [[ "${KUBECONFIG:-}" == "${pin}:"* ]] \
+    || export KUBECONFIG="${pin}:${KUBECONFIG:-$(_native_k3s_kubeconfig_target)}"
+  TB_KUBE_CONTEXT_PIN="$pin"
+  unset HELM_KUBECONTEXT
+}
+
+# _native_k3s_merge_kubeconfig -- add k3s's kubeconfig to the daily user's
+# (_native_k3s_kubeconfig_target) as _native_k3s_context, pin that context for the
+# rest of this run (_native_k3s_pin_context), and set TRACEBLOC_KUBE_CONTEXT. The
+# user's current-context is theirs and stays exactly as it was: the merge is refused
+# before anything is written if it would change it. The file is written by this (the
+# daily user's) process, mode 0600, so the user owns it; k3s's own copy stays root's.
 #
 # Merged by `$TB_K3S_BIN_PATH kubectl config view --flatten` with the RENAMED file FIRST in
 # KUBECONFIG: the first file wins a conflict, so a re-install's fresh credentials
-# replace the previous install's, and its current-context becomes the user's.
+# replace the previous install's. The renamed file's current-context is dropped first,
+# so the user's file decides it.
 #
 # SRC, when given, is a k3s.yaml this user already holds, read without sudo: the macOS
 # node's copy, which mac-container.sh fetches from the node. There the Mac has no k3s
 # binary, so the kubectl is the one on PATH (TB_K3S_ON_MAC).
 #
-# With KUBECONFIG unset it is then EXPORTED as the merged file, for the rest of the
-# run. Upstream links kubectl to k3s (D3), and k3s's kubectl reads root's k3s.yaml,
-# never ~/.kube/config, whenever KUBECONFIG is unset and that file exists: on the
-# 1.1e VM every kubectl the run made failed "permission denied" and the API wait
-# ran out. A KUBECONFIG the user set already names the target, and is left alone.
+# KUBECONFIG is then EXPORTED with the pin first and the user's kubeconfig after it,
+# for the rest of the run. Upstream links kubectl to k3s (D3), and k3s's kubectl reads
+# root's k3s.yaml, never ~/.kube/config, whenever KUBECONFIG is unset and that file
+# exists: on the 1.1e VM every kubectl the run made failed "permission denied" and the
+# API wait ran out.
 _native_k3s_merge_kubeconfig() {
-  local src="${1:-}" ctx target td prev_ctx="" kc
+  local src="${1:-}" ctx target td kc before after
   kc=("$TB_K3S_BIN_PATH" kubectl)
   [[ "${TB_K3S_ON_MAC:-}" != 1 ]] || kc=(kubectl)
   ctx="$(_native_k3s_context)"; target="$(_native_k3s_kubeconfig_target)"
-  # What kubectl pointed at before this install, so the summary can say how to switch
-  # back. Read before the merge changes it; a read that
-  # fails or times out is "no previous context", never a failed install. The read
-  # names the user's kubeconfig: with KUBECONFIG unset, k3s's kubectl reads
-  # /etc/rancher/k3s/k3s.yaml (context `default`) and never ~/.kube/config.
-  TB_PREV_KUBE_CONTEXT=""
-  if [[ "$(tb_wsl_phase 2>/dev/null)" == "client" ]]; then
-    # The Windows installer's client run in tracebloc's WSL distro merges after the
-    # cluster run made this context current, so kubectl's answer here would be this
-    # one. What it pointed at before is the cluster run's reading, which the host
-    # hands this run (tb_wsl_handover_write).
-    prev_ctx="${TRACEBLOC_WSL_PREV_KUBE_CONTEXT:-}"
-  else
-    prev_ctx="$(_bounded 10 env KUBECONFIG="${KUBECONFIG:-$target}" "${kc[@]}" config current-context 2>/dev/null)" || prev_ctx=""  # set-u-safe: kc is seeded with the kubectl in both branches
-  fi
-  prev_ctx="${prev_ctx//[$'\r\n']/}"
+  # set-u-safe: kc is seeded with the kubectl in both branches
+  before="$(_native_k3s_current_context "$target" "${kc[@]}")" \
+    || error "native k3s: couldn't read ${target}, so tracebloc's ${ctx} context was not added to it."
   td="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3s-kc-XXXXXX")" || error "native k3s: could not create a temporary directory for the kubeconfig merge."
   # Read as root (adopted: through the prepared group), written as the user: the
   # redirect stays outside the read.
@@ -1533,27 +1584,30 @@ _native_k3s_merge_kubeconfig() {
     mv -f "${td}/hosted.yaml" "${td}/renamed.yaml" \
       || { rm -rf "$td"; error "native k3s: couldn't stage the kubeconfig for Windows in ${td}."; }
   fi
+  sed '/^current-context:/d' "${td}/renamed.yaml" > "${td}/added.yaml" \
+    || { rm -rf "$td"; error "native k3s: couldn't stage the k3s kubeconfig in ${td}."; }
   mkdir -p "$(dirname "$target")" \
     || { rm -rf "$td"; error "native k3s: couldn't create $(dirname "$target")."; }
   # set-u-safe: kc is seeded with the kubectl in both branches
-  KUBECONFIG="${td}/renamed.yaml:${target}" "${kc[@]}" config view --flatten > "${td}/merged.yaml" \
+  KUBECONFIG="${td}/added.yaml:${target}" "${kc[@]}" config view --flatten > "${td}/merged.yaml" \
     || { rm -rf "$td"; error "native k3s: couldn't merge the k3s kubeconfig into ${target}."; }
+  # set-u-safe: kc is seeded with the kubectl in both branches
+  after="$(_native_k3s_current_context "${td}/merged.yaml" "${kc[@]}")" \
+    || { rm -rf "$td"; error "native k3s: couldn't read the merged kubeconfig, so ${target} was left as it was."; }
+  [[ "$after" == "$before" ]] \
+    || { rm -rf "$td"; error "native k3s: adding the ${ctx} context would change your current kubectl context from '${before}' to '${after}', so ${target} was left as it was."; }
   install -m 0600 "${td}/merged.yaml" "$target" \
     || { rm -rf "$td"; error "native k3s: couldn't write ${target}."; }
   rm -rf "$td"
-  if [[ -n "$prev_ctx" && "$prev_ctx" != "$ctx" ]]; then
-    # shellcheck disable=SC2034  # consumed cross-file by summary.sh
-    TB_PREV_KUBE_CONTEXT="$prev_ctx"
-    log "kubectl's current context was '$prev_ctx' before this install; the summary says how to switch back."
-  fi
   # The user's own shell has no KUBECONFIG either, and there k3s's kubectl reads
   # k3s.yaml (context default, no namespace), never this file: print_summary
   # prints the export line for it. Not on the macOS node: there kubectl is the one
   # step b installed, which reads this file by default.
   # shellcheck disable=SC2034  # consumed cross-file by summary.sh (print_summary)
   [[ -n "${KUBECONFIG:-}" || "${TB_K3S_ON_MAC:-}" == 1 ]] || TB_K3S_KUBECONFIG_HINT="$target"
-  [[ -n "${KUBECONFIG:-}" ]] || export KUBECONFIG="$target"
-  log "kubeconfig updated — kubectl now points to '${CLUSTER_NAME}' (context ${ctx})."
+  _native_k3s_pin_context "$ctx" \
+    || error "native k3s: couldn't write the temporary file that names the ${ctx} context for the rest of this run. It's safe to re-run this installer."
+  log "kubeconfig updated: added the ${ctx} context to ${target}; its current context is still '${before}'."
   # shellcheck disable=SC2034  # consumed cross-file by common.sh (tb_record_write's kube_context)
   TRACEBLOC_KUBE_CONTEXT="$ctx"
 }
@@ -2110,17 +2164,17 @@ _native_k3s_gpu_verify() {
   TB_K3S_GPU_UNCONFIRMED=1
   if [[ "$rc" -ne 0 ]]; then
     warn "Couldn't read how many GPUs the node advertises ('kubectl get nodes' did not answer), so the NVIDIA GPU is not confirmed."
-    hint "Check with: kubectl get nodes -o jsonpath='{..allocatable.nvidia\\.com/gpu}'"
+    hint "Check with: $(tb_kubectl_shown) get nodes -o jsonpath='{..allocatable.nvidia\\.com/gpu}'"
     return 0
   fi
-  warn "k3s runs the NVIDIA runtime, but the node advertises no GPU (allocatable nvidia.com/gpu = 0), so GPU training jobs will wait."
+  warn "k3s runs the NVIDIA runtime, but the node advertises no GPU (allocatable nvidia.com/gpu = 0), so GPU trainings will wait."
   # An adopted user has no sudo for dmesg or a reboot: the remedy is the administrator's.
   if [[ "${TB_K3S_ADOPTED:-}" == 1 ]]; then
     hint "Ask the administrator to check 'sudo dmesg | grep -iE \"xid|RmInitAdapter\"': on Xid 140 or 'RmInitAdapter failed', persistence mode from boot (nvidia-persistenced, or 'nvidia-smi -pm 1' before k3s starts), a reboot and a re-run of prepare-host bring the GPUs up. Drivers 550 and newer did not need it."
     return 0
   fi
   if declare -F tb_in_wsl_distro >/dev/null 2>&1 && tb_in_wsl_distro; then
-    hint "In the tracebloc WSL distro the device plugin finds the GPU through ${TB_WSL_DXG_PATH}: 'kubectl -n ${ns} logs daemonset/nvidia-device-plugin-daemonset' says what it found. Then re-run the installer from Windows."
+    hint "In the tracebloc WSL distro the device plugin finds the GPU through ${TB_WSL_DXG_PATH}: '$(tb_kubectl_shown) -n ${ns} logs daemonset/nvidia-device-plugin-daemonset' says what it found. Then re-run the installer from Windows."
     return 0
   fi
   hint "If 'sudo dmesg | grep -iE \"xid|RmInitAdapter\"' shows Xid 140 or 'RmInitAdapter failed', the GPUs failed when they re-initialised: turn persistence mode on from boot (nvidia-persistenced, or 'nvidia-smi -pm 1' before k3s starts), reboot, then re-run this installer. Drivers 550 and newer did not need it."
@@ -2214,6 +2268,7 @@ _native_k3s_install_linux() {
   saved_umask="$(umask)"
   umask 022
   tb_live_quiet "Installing system tools..."
+  _helm_expect
   install_helm
   tb_live_done "System tools ready"
   umask "$saved_umask"
@@ -2553,13 +2608,14 @@ _native_k3s_create_cluster() {
   _native_k3s_fw_apply
   # The live lines are the Mac's (_mac_ct_create_cluster).
   tb_live "Preparing local container runtime..."
+  _native_k3s_binary_expect
   tool="$(_native_k3s_fw_tool)"
   IFS=$'\t' read -r aid apath < <(_native_k3s_fw_artefact "$tool")
   tb_record_write firewall-rule "$aid" "$apath"
   tb_record_write file firewall-rules "$(_native_k3s_fw_file "$tool")"
 
   # 2. The configuration.
-  name="$(_native_k3s_node_name)"
+  name="$(_native_k3s_node_name)" || _native_k3s_node_name_stop "$?"
   cidrs="$(_native_k3s_pick_cidrs)"
   cgroup="$(_native_k3s_cgroup_version)"
   # The volumes' directory, frozen in an existing config.yaml (1.1d). Step b asked for
@@ -2754,6 +2810,7 @@ _native_k3s_adopt_tools() {
   saved_umask="$(umask)"
   umask 022
   tb_live_quiet "Installing system tools..."
+  _helm_expect
   install_helm
   tb_live_done "System tools ready"
   umask "$saved_umask"
@@ -2771,7 +2828,7 @@ _native_k3s_adopt_cluster() {
   local name
   _native_k3s_refuse_host
   log "native k3s: using the k3s an administrator prepared for $(id -un 2>/dev/null) (prepare-host)."
-  name="$(_native_k3s_node_name)"
+  name="$(_native_k3s_node_name)" || _native_k3s_node_name_stop "$?"
   TB_K3S_WAITED_S=0; TB_K3S_WAIT_T0="$(date +%s)"
   _native_k3s_merge_kubeconfig
   tb_record_write kube-context "$(_native_k3s_context)" "$(_native_k3s_kubeconfig_target)"
@@ -2847,7 +2904,7 @@ _native_k3s_prepared_group() {
     || error "prepare-host: couldn't add ${user} to the '${g}' group. Check 'sudo usermod -aG ${g} ${user}', then re-run."
   line="$(getent group "$g" 2>/dev/null)" || line=""
   log "prepare-host: ${user} is in '${g}' (members: ${line##*:})."
-  warn "Every member of the '${g}' group can administer this machine's k3s cluster. Members now: ${line##*:}."
+  warn "Members of the ${g} group can administer k3s on this machine: ${line##*:}."
 }
 
 # _native_k3s_check_prepared_grant -- prepared mode: k3s.yaml must be root's, group

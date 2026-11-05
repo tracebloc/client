@@ -20,6 +20,18 @@
 {{- $tc := default (dict) .Values.telemetryCollector -}}
 {{- if eq (include "tracebloc.telemetryCollectorState" .) "enabled" }}
 {{- /*
+  ONLY CONTRACT EVENTS LEAVE. A contract event is one stdout line: the control
+  plane's logging prefix (a timestamp and level, or the node agent's
+  `- <logger> -` form), then a message that IS the event, as tracebloc_telemetry
+  renders it: `<domain>.<object>.<outcome>` and `key=value` pairs. A value is a
+  bare token, or double-quoted with no quote or backslash in it. The file_log
+  `filter` drops every other line whole, and transform/contract-events lifts the
+  event into attributes, cut to the gate row's 1024 characters, and empties the
+  body after the redaction floor. scripts/tests/egress_door_chart.py runs the
+  door's lines through it.
+*/}}
+{{- $contractEvent := `^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:,[0-9]{3})? (?:- [A-Za-z0-9_.]{1,128} - )?(?:DEBUG|INFO|WARNING|ERROR|CRITICAL) (?:- )?(?P<event_name>[a-z][a-z0-9_]{0,63}(?:[.][a-z][a-z0-9_]{0,63}){2}) (?P<event_attributes>service[.]name=(?:[^ \t\r\n\f"'=\\]+|"[^"\\]*")(?:[ ][a-z][a-z0-9_.]{0,127}=(?:[^ \t\r\n\f"'=\\]+|"[^"\\]*"))*)$` }}
+{{- /*
   The edge Collector's pipeline.
 
   file_log -> transform (redaction floor) -> batch -> otlp_http
@@ -207,6 +219,9 @@ data:
           # on `body` and would otherwise scrub the wrapper and miss the payload.
           - type: container
             id: container-parser
+          - type: filter
+            id: contract-events-only
+            expr: {{ printf "body not matches %s" ($contractEvent | quote) | quote }}
       {{- if $jobIncludes }}
 
       # THE SHORT-LIVED PODS: the auto-upgrade CronJob and the
@@ -229,6 +244,9 @@ data:
         operators:
           - type: container
             id: container-parser
+          - type: filter
+            id: contract-events-only
+            expr: {{ printf "body not matches %s" ($contractEvent | quote) | quote }}
       {{- end }}
 
     processors:
@@ -297,6 +315,25 @@ data:
               - replace_pattern(body, {{ .pattern | quote }}, {{ .replacement | quote }})
               {{- end }}
 
+      # The contract event's name and pairs as attributes, and an empty body: the
+      # exporter writes `body` on every record, and the row admits it only empty.
+      # `set` ignores nil here, so the empty string. After the redaction floor,
+      # so the values it lifts are scrubbed ones. The pairs REPLACE the record's
+      # attributes, so the file_log receiver's own keys (the log file's path,
+      # which names the namespace, pod and uid; the stream) never leave, and a
+      # line the redaction floor broke out of the grammar leaves with none.
+      transform/contract-events:
+        error_mode: ignore
+        log_statements:
+          - context: log
+            statements:
+              - {{ printf "merge_maps(cache, ExtractPatterns(body, %s), \"upsert\")" ($contractEvent | quote) | quote }}
+              - 'set(attributes, ParseKeyValue(cache["event_attributes"], "=", " ")) where cache["event_attributes"] != nil'
+              - 'keep_keys(attributes, []) where cache["event_attributes"] == nil'
+              - 'set(attributes["event.name"], cache["event_name"]) where cache["event_name"] != nil'
+              - 'truncate_all(attributes, 1024)'
+              - 'set(body, "")'
+
       batch:
         # Modest: each batch is one request. The egress gate refuses a body past
         # its cap (413, which the exporter drops), and sends the rest to a Django
@@ -339,7 +376,7 @@ data:
       pipelines:
         logs:
           receivers: [file_log{{ if $jobIncludes }}, file_log/short-lived{{ end }}]
-          processors: [transform/redaction, batch]
+          processors: [transform/redaction, transform/contract-events, batch]
           exporters: [otlp_http/backend]
       telemetry:
         logs:
