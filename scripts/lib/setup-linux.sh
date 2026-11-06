@@ -424,7 +424,7 @@ install_helm() {
     local _helm_tag="${HELM_VERSION:-}"
     [[ "$_helm_tag" == "latest" ]] && _helm_tag=""
     [[ -z "$_helm_tag" || "$_helm_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
-      || error "HELM_VERSION must be a Helm release tag like v4.2.3, or 'latest' (got '${HELM_VERSION:-}')"
+      || error "TRACEBLOC_HELM_VERSION must be a Helm release tag like v4.2.3, or 'latest' (got '${HELM_VERSION:-}')"
 
     # Unpack needs tar + gzip — make sure of them BEFORE spending the download,
     # installing them ourselves when missing (Tier 0 skips system deps).
@@ -438,7 +438,7 @@ install_helm() {
       _helm_tag="$(retry 3 5 curl_secure -fsSL --connect-timeout 15 --max-time 30 \
         "https://get.helm.sh/helm-latest-version" 2>/dev/null | tail -1 | tr -d '[:space:]')" || _helm_tag=""
       [[ "$_helm_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
-        || error "Couldn't resolve the latest Helm release tag — set HELM_VERSION to a release tag (e.g. v4.2.3) and re-run."
+        || error "Couldn't resolve the latest Helm release tag — set TRACEBLOC_HELM_VERSION to a release tag (e.g. v4.2.3) and re-run."
     fi
 
     spin_cmd "Installing system tools…" _fetch_helm_release "$_helm_tag" "$ARCH_DL" \
@@ -559,44 +559,36 @@ install_linux() {
 # any file is created.
 # Exemptions: a genuine root login (no SUDO_USER) is fine — /root IS its home; and
 # prepare-host (the admin path) has already dispatched-and-exited in main() before
-# this runs. Admins provisioning for someone else use prepare-host / TB_PREPARE_USER.
+# this runs. Admins provisioning for someone else use prepare-host / TRACEBLOC_PREPARE_USER.
 refuse_sudo_wrapped_install() {
   # `id -u` (the EFFECTIVE uid) rather than $EUID: EUID is read-only in bash, so the
   # test suite can't shadow it — id() can be mocked.
   [[ "$(id -u 2>/dev/null)" == "0" ]] || return 0
   [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]] || return 0
-  error "Don't run the installer with sudo. It elevates each privileged step itself, and running the whole thing as root would root-own ${SUDO_USER}'s ~/.tracebloc + ~/.kube. Re-run WITHOUT sudo as '${SUDO_USER}'. Admin setting up for someone else? Name the RESEARCHER (not yourself), and prepare-host sets k3s up for them:  export TB_PREPARE_USER=<researcher-username>  &&  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
+  error "Don't run the installer with sudo. It elevates each privileged step itself, and running the whole thing as root would root-own ${SUDO_USER}'s ~/.tracebloc + ~/.kube. Re-run WITHOUT sudo as '${SUDO_USER}'. Admin setting up for someone else? Name the RESEARCHER (not yourself), and prepare-host sets k3s up for them:  export TRACEBLOC_PREPARE_USER=<researcher-username>  &&  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
 }
 
-# _prepare_host_named_user WHAT -- set TB_PREPARE_TARGET to the user prepare-host is
-# run for: TB_PREPARE_USER, trimmed. WHAT finishes the warning's "prepare-host ..."
-# for this path. The user must be named EXPLICITLY: never $SUDO_USER, which is the
-# ADMIN who ran prepare-host, not the researcher (granting the admin would report
-# success while the researcher still can't install).
+# _prepare_host_named_user -- set TB_PREPARE_TARGET to the user prepare-host is run
+# for: TRACEBLOC_PREPARE_USER, or TB_PREPARE_USER when that is unset or blank, each
+# trimmed. The user must be named EXPLICITLY: never $SUDO_USER, which is the ADMIN
+# who ran prepare-host, not the researcher (granting the admin would report success
+# while the researcher still can't install).
 #
-# TB_PREPARE_USER is the ONLY name read here, although the other CLI hand-off names
-# also accept a TRACEBLOC_ spelling. Every `tracebloc prepare-host` clears an
-# inherited TB_PREPARE_USER and sets it only when a researcher was named, so a bare
-# `tracebloc prepare-host` grants nobody. Older CLIs clear only that spelling, and
-# they run this same live installer: a TRACEBLOC_PREPARE_USER left in the admin's
-# shell would pass straight through them, and reading it here would hand k3s
-# cluster-admin to a user the admin did not name on this run. So that spelling is
-# reported, never read.
+# Both set and different is refused, granting nobody: a CLI that sets and clears only
+# TB_PREPARE_USER lets a TRACEBLOC_PREPARE_USER left in the admin's shell arrive beside
+# the user named, and either pick could give k3s to a user the admin did not mean.
 TB_PREPARE_TARGET=""
 _prepare_host_named_user() {
-  local target="${TB_PREPARE_USER:-}"
+  local canon="${TRACEBLOC_PREPARE_USER:-}" legacy="${TB_PREPARE_USER:-}"
   # Trim surrounding whitespace BEFORE the non-empty gate: a pasted value with
   # stray spaces passes [[ -n ]], fails usermod, and skips the honest no-grant
-  # messaging even though a real username was intended (Bugbot r3).
-  target="${target#"${target%%[![:space:]]*}"}"; target="${target%"${target##*[![:space:]]}"}"
-  # A CLI that sets both spellings sets them equal, so only a DIFFERENT value
-  # (or one with no TB_PREPARE_USER beside it) is worth a warning.
-  local _canon="${TRACEBLOC_PREPARE_USER:-}"
-  _canon="${_canon#"${_canon%%[![:space:]]*}"}"; _canon="${_canon%"${_canon##*[![:space:]]}"}"
-  if [[ -n "$_canon" && "$_canon" != "$target" ]]; then
-    warn "Ignoring TRACEBLOC_PREPARE_USER: prepare-host ${1} the user named in TB_PREPARE_USER (or on the tracebloc prepare-host command line)."
+  # messaging even though a real username was intended.
+  canon="${canon#"${canon%%[![:space:]]*}"}"; canon="${canon%"${canon##*[![:space:]]}"}"
+  legacy="${legacy#"${legacy%%[![:space:]]*}"}"; legacy="${legacy%"${legacy##*[![:space:]]}"}"
+  if [[ -n "$canon" && -n "$legacy" && "$canon" != "$legacy" ]]; then
+    error "prepare-host was given two different users: TRACEBLOC_PREPARE_USER='${canon}' and TB_PREPARE_USER='${legacy}'. Nothing was set up. Unset the one you did not mean, then re-run prepare-host."
   fi
-  TB_PREPARE_TARGET="$target"
+  TB_PREPARE_TARGET="${canon:-$legacy}"
 }
 
 # _prepare_host_print — `prepare-host --print`:
@@ -647,7 +639,7 @@ _prepare_host_print() {
 # run_prepare_host — the standalone, admin-run step. An
 # administrator runs this ONCE (`curl … | bash -s -- prepare-host`, or
 # `tracebloc prepare-host`) to set native k3s up FOR the researcher named in
-# TB_PREPARE_USER, who then installs with no administrator rights (k3s.sh,
+# TRACEBLOC_PREPARE_USER, who then installs with no administrator rights (k3s.sh,
 # _native_k3s_prepare_host). It never mints a credential or installs
 # the CLI, so an admin can safely run it on a shared host without provisioning
 # anything as themselves.
@@ -667,7 +659,7 @@ run_prepare_host() {
   # other substrate before this; a run that reached here with one is refused too.
   [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]] \
     || error "prepare-host sets up native ${TB_SUBSTRATE_FRESH_LINUX} on Linux, not '${TRACEBLOC_SUBSTRATE_RESOLVED:-}'. Unset TRACEBLOC_SUBSTRATE and re-run prepare-host."
-  _prepare_host_named_user "sets k3s up only for"
+  _prepare_host_named_user
   _native_k3s_prepare_host "$TB_PREPARE_TARGET"
   return $?
 }

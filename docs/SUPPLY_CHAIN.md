@@ -24,7 +24,7 @@ binary covered only the *leaf*; everything upstream of it was unverified.
 
 1. **Immutable ref.** `scripts/install.sh` fetches every sub-script from a fixed
    release **tag** (`DEFAULT_REF`, e.g. `v2.0.1`), not a branch — as the tag's
-   **release assets** (see the note below §2). A `BRANCH` / non-`vX.Y.Z` ref is
+   **release assets** (see the note below §2). A `TRACEBLOC_BRANCH` / non-`vX.Y.Z` ref is
    refused unless the operator sets `TRACEBLOC_ALLOW_UNVERIFIED=1` (developer-only,
    and it shouts). Whatever the transport, the immutability that matters is the
    **signed manifest** (item 2): the bytes are trusted because their digest is in
@@ -414,8 +414,8 @@ the R8 Windows leg):
 1. **Immutable ref.** The release pipeline stamps `$DefaultRef` to the release
    tag in the same "Stamp the published installer" job that stamps `install.sh`
    (`release-helm-chart.yaml`), and self-tests the stamp before attaching the
-   asset. An un-stamped copy (placeholder ref) **refuses to run**. `$env:REF`
-   pins a different release tag; the legacy `$env:BRANCH` escape and any
+   asset. An un-stamped copy (placeholder ref) **refuses to run**. `$env:TRACEBLOC_REF`
+   pins a different release tag; the `$env:TRACEBLOC_BRANCH` developer escape and any
    non-`vX.Y.Z` ref require `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'` and warn
    loudly.
 2. **Signed manifest.** Its integrity surface is `$Files`, currently
@@ -443,4 +443,4 @@ The raw-`main` copy of `install.ps1` is un-stamped and fails closed by design;
 customers must use the release asset. (A raw `<TAG>` URL serves the same
 un-stamped tree — the committed tag tree keeps the `__TRACEBLOC_RELEASE_REF__`
 placeholder; only the release *asset* is stamped — so it too refuses to run
-unless you also set `$env:REF = '<TAG>'` to pin the ref yourself.)
+unless you also set `$env:TRACEBLOC_REF = '<TAG>'` to pin the ref yourself.)

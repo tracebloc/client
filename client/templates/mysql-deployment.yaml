@@ -78,9 +78,8 @@ spec:
       # this is a backstop against accidental engine flips, not a gate.
       - name: mysql-format-guard
         image: {{ include "tracebloc.thirdPartyImage" (dict "site" "images.busybox" "root" $) | quote }}
-        {{- /* The engine the guard arms for, under the canonical
-             TRACEBLOC_EXPECTED_ENGINE only; the script reads the canonical
-             first. A guard reading a name nothing set would fall
+        {{- /* The engine the guard arms for, under TRACEBLOC_EXPECTED_ENGINE,
+             the one name the script reads. A guard reading a name nothing set would fall
              through to `*)` and silently stand down, so the env name and the
              script move together; a repo test executes the rendered script. */}}
         {{- $expectedEngine := include "tracebloc.mysqlEngineMajor" . }}
@@ -105,7 +104,7 @@ spec:
             if [ ! -e "$d/ibdata1" ] && [ ! -e "$d/mysql.ibd" ]; then
               exit 0  # fresh/empty datadir: the entrypoint initializes it
             fi
-            case "${TRACEBLOC_EXPECTED_ENGINE:-${TB_EXPECTED_ENGINE:-}}" in
+            case "${TRACEBLOC_EXPECTED_ENGINE:-}" in
               8.4)
                 if [ ! -e "$d/mysql.ibd" ] && [ -e "$d/.tracebloc-init-started" ] && [ ! -e "$d/.tracebloc-init-complete" ]; then
                   exit 0  # a first boot killed before mysql.ibd existed, not 5.7 data: mysql-first-boot decides

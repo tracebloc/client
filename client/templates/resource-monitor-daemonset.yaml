@@ -205,8 +205,7 @@ spec:
             # The DATASET filesystem, when datasets were relocated off the local
             # tree. The meter measures the client's storage, and
             # `hostStoragePath` above names one filesystem -- on a
-            # TRACEBLOC_HOST_DATASET_DIR (old name HOST_DATASET_DIR still works)
-            # install the datasets, the one thing that grows without anyone
+            # TRACEBLOC_HOST_DATASET_DIR install the datasets, the one thing that grows without anyone
             # deciding to grow it, are on the disk it is NOT looking at.
             #
             # Same posture as host-root: read-only, statvfs-only, no extra

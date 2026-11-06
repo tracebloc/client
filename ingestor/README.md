@@ -90,7 +90,7 @@ For datasets too large to `kubectl cp` (and any production workflow with version
 
 ### Where the PVC name comes from
 
-The default `client-pvc` is set by the parent client chart's PVC block (see `values.yaml#pvc`). If your install renamed it, the ingestor Pod will mount whatever the parent chart configured via `TRACEBLOC_CLIENT_PVC` (legacy name `CLIENT_PVC`, set alongside it until 2026-12-31) on jobs-manager. In the rare case of a custom name, `kubectl -n tracebloc get pvc` shows what's actually bound, and that's the value to use as `claimName:` in the pvc-shell manifest above.
+The default `client-pvc` is set by the parent client chart's PVC block (see `values.yaml#pvc`). If your install renamed it, the ingestor Pod will mount whatever the parent chart configured via `TRACEBLOC_CLIENT_PVC` on jobs-manager. In the rare case of a custom name, `kubectl -n tracebloc get pvc` shows what's actually bound, and that's the value to use as `claimName:` in the pvc-shell manifest above.
 
 ## What this chart owns
 
@@ -113,7 +113,7 @@ The default `client-pvc` is set by the parent client chart's PVC block (see `val
 3. The hook reads its SA token from the projected volume and the `ingest.yaml` from the ConfigMap mount.
 4. The hook POSTs `{ ingest_config, idempotency_key }` (and `image_digest` if you explicitly pinned one) to `jobs-manager:8080/internal/submit-ingestion-run`.
 5. **jobs-manager** validates the SA token via Kubernetes TokenReview, then checks the (SA, table) pair against the cluster's `ingestionAuthz` policy (a ConfigMap rendered by the parent `tracebloc/client` chart).
-6. If authorized, jobs-manager validates the YAML against the `ingest.v1` JSON schema, resolves the image digest (the body's value if you pinned one, otherwise the cluster's configured default from `INGESTOR_IMAGE_DIGEST`), mints a backend token, creates the per-run ConfigMap + Secret + Job, records the run for idempotency, and returns `201` (or `200` if this idempotency_key has been seen before).
+6. If authorized, jobs-manager validates the YAML against the `ingest.v1` JSON schema, resolves the image digest (the body's value if you pinned one, otherwise the cluster's configured default from `TRACEBLOC_INGESTOR_IMAGE_DIGEST`), mints a backend token, creates the per-run ConfigMap + Secret + Job, records the run for idempotency, and returns `201` (or `200` if this idempotency_key has been seen before).
 7. The hook treats `2xx` as success and exits 0; `helm install` reports success. Non-`2xx` exits 1 and `helm install` fails with the response body in the output.
 
 The customer never builds an image. The customer never writes a Dockerfile. The customer writes ~8 lines of YAML.

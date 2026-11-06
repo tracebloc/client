@@ -246,7 +246,7 @@ using apps/v1: .spec.template.spec.containers[name="api"].resources.limits.cpu
 The `kubectl-patch` in the message is the manager name the API server records for any `kubectl patch` command (verify: `kubectl set …` records `kubectl-set`, `kubectl annotate` records `kubectl-annotate`). So the field was taken over by an out-of-band `kubectl patch` at some point in the fleet's life — a manual resize, a migration step, a rehearsal. It is **not** a Helm or installer action, and **no runtime component of this chart patches that field**:
 
 - The chart is the sole intended owner of `jobs-manager`'s `resources.limits.cpu` — the `1000m` ceiling is deliberate (keeps the api container Burstable while memory is pinned). Do **not** delete the declaration from the chart to dodge the conflict; that silently removes the CPU ceiling.
-- `jobs-manager` reads `RESOURCE_REQUESTS` / `RESOURCE_LIMITS` / `RESOURCE_PROVENANCE` only to size the **training pods it spawns** — it never patches its own Deployment.
+- `jobs-manager` reads `TRACEBLOC_RESOURCE_REQUESTS` / `TRACEBLOC_RESOURCE_LIMITS` / `TRACEBLOC_RESOURCE_PROVENANCE` only to size the **training pods it spawns** — it never patches its own Deployment.
 - `resource-monitor` (the node-agent DaemonSet) has RBAC on `pods` and `nodes` only.
 - `image-refresh` uses `kubectl set image` (`kubectl-set`) and `kubectl annotate` (`kubectl-annotate`), never `kubectl patch`.
 

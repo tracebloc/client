@@ -1248,7 +1248,7 @@ _pf_opaque_fuse_warn() {
     fuse.*) warn "Storage: ${1} is on a FUSE filesystem (${2}) — a driver this check does not recognise." ;;
     *)      warn "Storage: ${1} is on a FUSE filesystem (${2}) — the mount table doesn't say which one." ;;
   esac
-  hint "If it is network-backed (sshfs, s3fs, rclone, a cloud-sync mount), the secure environment's database (MySQL/InnoDB) can corrupt or crash-loop — move HOST_DATA_DIR to a local disk under your \$HOME."
+  hint "If it is network-backed (sshfs, s3fs, rclone, a cloud-sync mount), the secure environment's database (MySQL/InnoDB) can corrupt or crash-loop — move TRACEBLOC_HOST_DATA_DIR to a local disk under your \$HOME."
   hint "If it is a local FUSE mount (ntfs-3g, gocryptfs, bindfs), this is only a notice — the install continues."
 }
 
@@ -1258,10 +1258,10 @@ _pf_opaque_fuse_warn() {
 # options that actually work. Shared by _pf_storage_type and early_data_dir_guard so
 # the two remedies can never drift (early_data_dir_guard already had the good text).
 _pf_network_fs_remedy() {
-  hint "HOST_DATA_DIR must be a LOCAL disk under your \$HOME (paths outside \$HOME are rejected), so on a network home either:"
+  hint "TRACEBLOC_HOST_DATA_DIR must be a LOCAL disk under your \$HOME (paths outside \$HOME are rejected), so on a network home either:"
   hint "  1. install as a user whose home is on a local disk (ask your admin), or"
   hint "  2. set TRACEBLOC_ALLOW_NETWORK_FS=1 to proceed anyway - NOT recommended: the database can corrupt."
-  hint "(Datasets may stay on network storage via HOST_DATASET_DIR - only the data dir must be local.)"
+  hint "(Datasets may stay on network storage via TRACEBLOC_HOST_DATASET_DIR - only the data dir must be local.)"
 }
 
 # Pre-log guard: main() creates HOST_DATA_DIR and tees the session log

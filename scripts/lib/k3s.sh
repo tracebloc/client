@@ -1281,7 +1281,7 @@ _native_k3s_apparmor_rival() {
         for (k = 1; k <= np; k++) out = out expand(substr(g, 1, ob - 1) parts[k] substr(g, cb + 1))
         return out
       }
-      function consider(h,   name, at, rest, q, k, vn, nc, cs, hit, alts, na, a, best, l) {
+      function consider(h,   name, at, rest, q, k, vn, nc, cs, hit, alts, na, a, best, l, undef) {
         sub(/[ \t]+flags[ \t]*=[ \t]*\([^)]*\)$/, "", h)
         if (h ~ /^profile[ \t]/) {
           sub(/^profile[ \t]+/, "", h)
@@ -1293,9 +1293,13 @@ _native_k3s_apparmor_rival() {
         else return
         gsub(/"/, "", at); gsub(/"/, "", name)
         if (at == "" || name == "runc") return
+        # A variable this file does not define (most come from tunables/global, such as
+        # @{multiarch}) stands for any string: ** matches whatever it could expand to, so a
+        # path that cannot match even then is no rival, and one that can stays unsure.
+        undef = 0
         for (k = 0; k < 8 && match(at, /@\{[A-Za-z0-9_]+\}/); k++) {
           vn = substr(at, RSTART + 2, RLENGTH - 3)
-          if (!(vn in vars)) { print "unsure\t" file "\t" name; return }
+          if (!(vn in vars)) { at = substr(at, 1, RSTART - 1) "**" substr(at, RSTART + RLENGTH); undef = 1; continue }
           at = substr(at, 1, RSTART - 1) "{" vars[vn] "}" substr(at, RSTART + RLENGTH)
         }
         if (at ~ /@\{/) { print "unsure\t" file "\t" name; return }
@@ -1305,6 +1309,7 @@ _native_k3s_apparmor_rival() {
           for (k = 1; k <= nc; k++) if (cs[k] != "" && cs[k] ~ g2re(alts[a])) { hit = 1; l = litlen(alts[a]); if (l > best) best = l }
         }
         if (!hit) return
+        if (undef) { print "unsure\t" file "\t" name; return }
         if (index("\n" loaded "\n", "\n" name "\n") > 0 && best >= ours + 0) print "sure\t" file "\t" name
         else print "unsure\t" file "\t" name
       }
@@ -1545,6 +1550,34 @@ _native_k3s_pin_context() {
   unset HELM_KUBECONTEXT
 }
 
+# _native_k3s_persist_kubeconfig TARGET -- a NEW shell reaches tracebloc's context
+# too. k3s's kubectl, which /usr/local/bin/kubectl is, reads
+# root's k3s.yaml whenever KUBECONFIG is unset, never TARGET, so in a fresh login
+# shell `kubectl --context k3s-<name>` said the context does not exist; the
+# summary's export line goes only to the log when a person is watching. One
+# commented line in the user's shell rc (_tools_rc_for_shell) sets KUBECONFIG to
+# TARGET when the shell has none, with k3s.yaml after it when this user can read
+# it, so a bare kubectl that reached k3s's `default` context still does. Called only
+# when the merge set TB_K3S_KUBECONFIG_HINT (no KUBECONFIG, not the Mac). Not in
+# tracebloc's WSL distro (Windows reads TARGET), not for fish (it reads none of
+# these files), and not when the rc already names KUBECONFIG (a
+# prior run, or the user's own line). Best-effort: a hiccup never fails the install.
+_native_k3s_persist_kubeconfig() {
+  local target="$1" rc
+  ! _native_k3s_on_wsl || return 0
+  declare -F _tools_rc_for_shell >/dev/null || return 0
+  [[ "$(basename "${SHELL:-sh}")" != fish ]] || return 0
+  rc="$(_tools_rc_for_shell)"
+  if [[ -f "$rc" ]] && grep -qF 'KUBECONFIG' "$rc" 2>/dev/null; then return 0; fi
+  {
+    printf '\n# Added by tracebloc installer: kubectl reads the kubeconfig with tracebloc'"'"'s context\n'
+    # shellcheck disable=SC2016  # the rc file must get ${KUBECONFIG:-} literally, for its own shell to expand
+    printf 'if [ -z "${KUBECONFIG:-}" ]; then if [ -r %s ]; then export KUBECONFIG="%s:%s"; else export KUBECONFIG="%s"; fi; fi\n' \
+      "$TB_K3S_KUBECONFIG_PATH" "$target" "$TB_K3S_KUBECONFIG_PATH" "$target"
+  } >> "$rc" 2>/dev/null || return 0
+  log "Set KUBECONFIG=${target} for new terminals in ${rc}: there kubectl reaches the $(_native_k3s_context) context."
+}
+
 # _native_k3s_merge_kubeconfig -- add k3s's kubeconfig to the daily user's
 # (_native_k3s_kubeconfig_target) as _native_k3s_context, pin that context for the
 # rest of this run (_native_k3s_pin_context), and set TRACEBLOC_KUBE_CONTEXT. The
@@ -1616,6 +1649,7 @@ _native_k3s_merge_kubeconfig() {
   # step b installed, which reads this file by default.
   # shellcheck disable=SC2034  # consumed cross-file by summary.sh (print_summary)
   [[ -n "${KUBECONFIG:-}" || "${TB_K3S_ON_MAC:-}" == 1 ]] || TB_K3S_KUBECONFIG_HINT="$target"
+  [[ -z "${TB_K3S_KUBECONFIG_HINT:-}" ]] || _native_k3s_persist_kubeconfig "$target"
   _native_k3s_pin_context "$ctx" \
     || error "native k3s: couldn't write the temporary file that names the ${ctx} context for the rest of this run. It's safe to re-run this installer."
   log "kubeconfig updated: added the ${ctx} context to ${target}; its current context is still '${before}'."
@@ -2211,9 +2245,9 @@ TB_K3S_NODE_PASSWORD_PATH="/etc/rancher/node/password"
 # Linux 2023 have no nft, no iptables and no firewalld (S-R2).
 # Then step b installs nftables with the host's package manager. The firewall step
 # still refuses a host it cannot fence. There are no modules to load here: k3s loads
-# every one it needs itself, from the base kernel, at install and after every boot
-# (S-R2), so the native path writes no /etc/modules-load.d file and installs no
-# kernel-modules-extra.
+# every one it needs itself, at install and after every boot (S-R2), so the native
+# path writes no /etc/modules-load.d file. A kernel that lacks br_netfilter gets the
+# file installed (_native_k3s_ensure_bridge_module), and k3s loads it.
 _native_k3s_ensure_firewall_tool() {
   case "$(_native_k3s_fw_pick)" in nft|iptables) return 0 ;; esac
   # Bounded: a stalled package mirror hung here behind the
@@ -2234,6 +2268,54 @@ _native_k3s_ensure_firewall_tool() {
   # --print installed nothing: the rule it plans is for the nftables it plans.
   # shellcheck disable=SC2034  # consumed cross-file by k3s-firewall.sh (_native_k3s_fw_pick)
   if tb_root_planning; then TRACEBLOC_K3S_FW_PLANNED=nft; fi
+}
+
+# _native_k3s_ensure_bridge_module -- k3s loads br_netfilter itself at every start,
+# before the CNI bridge comes up, and sets net.bridge.bridge-nf-call-ip{,6}tables once
+# it is loaded (k3s's syssetup). That load fails when this kernel has no such module:
+# AlmaLinux 10.2's image ships it in a kernel package it does not install, so bridged
+# pod traffic skipped kube-proxy's rules and no pod reached the API's ClusterIP.
+# So when this kernel's modules.dep and modules.builtin name no
+# br_netfilter, step b installs the file by its path with dnf or yum, which picks
+# whichever kernel package holds it for the RUNNING kernel. A kernel that has it, a
+# host whose module index this run cannot read (a container, tracebloc's WSL distro,
+# which never gets here), and every other package manager are left as they were.
+# Best-effort, like nftables: a refusal names what to install.
+# TRACEBLOC_K3S_MODULES_DIR is the TEST SEAM: the running kernel's module directory.
+_native_k3s_ensure_bridge_module() {
+  local dir="${TRACEBLOC_K3S_MODULES_DIR:-/lib/modules/$(uname -r 2>/dev/null)}" ext ko rc=0
+  [[ -r "${dir}/modules.dep" ]] || return 0
+  if grep -qE '(^|/)br_netfilter\.ko' "${dir}/modules.dep" "${dir}/modules.builtin" 2>/dev/null; then return 0; fi
+  case " ${PM_INSTALL:-} " in
+    *" dnf "*|*" yum "*) ;;
+    *) log "step b: native k3s: this kernel has no br_netfilter module, and this package manager cannot be asked for it by path"; return 0 ;;
+  esac
+  # The compression this kernel's modules carry, read from the bridge module's own
+  # line (EL ships .ko.xz); .xz when the index names no bridge module.
+  ext="$(sed -n 's#^kernel/net/bridge/bridge\.ko\(\.[a-z]*\)\{0,1\}:.*#=\1#p' "${dir}/modules.dep")"
+  ext="${ext%%$'\n'*}"
+  if [[ -n "$ext" ]]; then ext="${ext#=}"; else ext=".xz"; fi
+  ko="${dir}/kernel/net/bridge/br_netfilter.ko${ext}"
+  # shellcheck disable=SC2086  # PM_INSTALL is a command line that must word-split
+  spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 600 "Installing the br_netfilter kernel module…" $PM_INSTALL "$ko" || rc=$?
+  # A path is resolved through the repos' filelists metadata, which a dnf configured
+  # without it cannot do. The packages that hold this kernel's modules are asked for
+  # by name instead: on AlmaLinux 10.2 br_netfilter is in kernel-modules-extra, which
+  # needs kernel-modules of the same version. ${dir##*/} is the running kernel's
+  # version. A stalled mirror (124) is not asked twice.
+  if (( rc != 0 && rc != 124 )); then
+    rc=0
+    # shellcheck disable=SC2086  # PM_INSTALL is a command line that must word-split
+    spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 600 "Installing the br_netfilter kernel module…" $PM_INSTALL "kernel-modules-${dir##*/}" "kernel-modules-extra-${dir##*/}" || rc=$?
+  fi
+  if (( rc == 124 )) && [[ -n "${_TB_SPIN_SURVIVORS:-}" ]]; then
+    error "Installing the br_netfilter kernel module did not finish within 10 minutes, and the package manager is still running and holding the package lock. Wait for it to finish, check your network/proxy, then re-run prepare-host or the installer."
+  elif (( rc != 0 )); then
+    warn "This kernel has no br_netfilter module, and installing it failed, so pods may not reach the cluster. Run 'sudo dnf install ${ko}' (after a kernel update, reboot first), then re-run the installer."
+  elif ! tb_root_planning; then
+    # --print installed nothing: its plan lists the install, so nothing is claimed here.
+    log "step b: native k3s: installed ${ko}; k3s loads it when it starts"
+  fi
 }
 
 # _native_k3s_install_linux -- step b on native k3s (D3, D9). k3s runs as root, so
@@ -2312,6 +2394,7 @@ _native_k3s_host_prereqs() {
   apt_wait_for_lock
   install_system_deps
   _native_k3s_ensure_firewall_tool
+  _native_k3s_ensure_bridge_module
 }
 
 # _native_k3s_refuse_host -- refuse, each by name, a host or a setting the native path
@@ -2791,7 +2874,7 @@ _native_k3s_prepared_reason() {
 _native_k3s_prepare_host_cmd() {
   local me
   me="$(id -un 2>/dev/null)" || me=""
-  printf 'curl -fsSL https://tracebloc.io/i.sh | TB_PREPARE_USER=%s bash -s -- prepare-host' "${me:-<your-username>}"
+  printf 'curl -fsSL https://tracebloc.io/i.sh | TRACEBLOC_PREPARE_USER=%s bash -s -- prepare-host' "${me:-<your-username>}"
 }
 
 # _native_k3s_prepare_host_remedy [KEY] -- the way forward for a user who cannot
@@ -2801,7 +2884,7 @@ _native_k3s_prepare_host_remedy() {
   local me
   me="$(id -un 2>/dev/null)" || me=""
   [[ -z "${1:-}" ]] || printf 'An administrator prepared this machine for you, but %s. ' "$(_native_k3s_prepared_reason "$1" why)"
-  printf 'An administrator can prepare this machine for you once: export TRACEBLOC_SUBSTRATE=k3s TB_PREPARE_USER=%s && curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host -- then re-run this installer, with no sudo.' "${me:-<your-username>}"
+  printf 'An administrator can prepare this machine for you once: export TRACEBLOC_SUBSTRATE=k3s TRACEBLOC_PREPARE_USER=%s && curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host -- then re-run this installer, with no sudo.' "${me:-<your-username>}"
 }
 
 # _native_k3s_adopt_tools -- step b at Tier 0 on a host prepared for this user. k3s,
@@ -2960,7 +3043,7 @@ _native_k3s_check_user_record() {
 _native_k3s_prepare_host() {
   local user="${1:-}" pw home made=false
   [[ -n "$user" ]] \
-    || error "prepare-host on native k3s sets k3s up for one named user, and none was named. Name them: export TB_PREPARE_USER=<their-username>, then re-run prepare-host."
+    || error "prepare-host on native k3s sets k3s up for one named user, and none was named. Name them: export TRACEBLOC_PREPARE_USER=<their-username>, then re-run prepare-host."
   pw="$(getent passwd "$user" 2>/dev/null)" || pw=""
   [[ -n "$pw" ]] \
     || error "prepare-host: '${user}' is not a user on this machine (getent passwd ${user}). Name the user who will run tracebloc, then re-run."

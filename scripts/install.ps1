@@ -28,7 +28,7 @@
 #  itself from that same fork:
 #    $env:TRACEBLOC_SOURCE_REPO = "<you>/client"; $env:TRACEBLOC_BRANCH = "<branch>"; $env:TRACEBLOC_ALLOW_UNVERIFIED = "1"
 #  ($env:TRACEBLOC_REF = "<vX.Y.Z>" pins another release instead; the older
-#  $env:REF / $env:BRANCH spellings still work.)
+#  $env:BRANCH spelling still works.)
 #    irm https://raw.githubusercontent.com/<you>/client/<branch>/scripts/install.ps1 | iex
 #
 #  macOS / Linux:
@@ -224,7 +224,7 @@ function New-HostLog {
 # =============================================================================
 
 # Resolve the ref to fetch from and enforce the immutable-tag guarantees. Precedence:
-# explicit $env:REF (pin a different release tag) > legacy $env:BRANCH (dev only)
+# $env:TRACEBLOC_REF (pin a different release tag) > the branch override (dev only)
 # > the stamped $DefaultRef. Returns the validated ref string, or throws.
 function Resolve-InstallRef {
   param(
@@ -506,15 +506,25 @@ function Get-OptionalWithTicks {
     Invoke-WebRequest -Uri $u -OutFile $d -UseBasicParsing -ErrorAction Stop @proxyArgs
   } -ArgumentList $Url, $Dest, $env:HTTPS_PROXY
 
+  $script:FetchUrl = $Url; $script:FetchTries = 1; $script:FetchWaited = 0; $script:FetchStatus = 'none'; $script:FetchError = ''
   if (-not (Wait-JobWithTicks -Job $job -TimeoutSeconds ($TimeoutMinutes * 60))) {
     Remove-Job $job -Force -ErrorAction SilentlyContinue
+    $script:FetchError = "still running after $TimeoutMinutes minutes"
     Err "Download still running after $TimeoutMinutes minutes -- giving up: $Url"
+    Log "Download of $Url gave up: $($script:FetchError)"
     return $false
   }
   $ok = ($job.State -eq 'Completed')
-  try { Receive-Job $job -ErrorAction Stop | Out-Null } catch { $ok = $false }
+  # The job's error is the only record of why the fetch failed; it goes to the log.
+  try { Receive-Job $job -ErrorAction Stop | Out-Null } catch { $ok = $false; $script:FetchError = "$_" }
+  if (-not $ok -and -not $script:FetchError) { $script:FetchError = "job ended $($job.State)" }
   Remove-Job $job -Force -ErrorAction SilentlyContinue
-  return ($ok -and (Test-Path -LiteralPath $Dest))
+  $ok = ($ok -and (Test-Path -LiteralPath $Dest))
+  if ($ok) { $script:FetchStatus = '200' } else {
+    if (-not $script:FetchError) { $script:FetchError = 'no file was written' }
+    Log "Download of $Url failed: $($script:FetchError)"
+  }
+  return $ok
 }
 
 function Get-Sha256 {
@@ -588,7 +598,10 @@ function Resolve-Cosign {
   $sums  = Join-Path $TmpDir "cosign_checksums.txt"
 
   # The checksums first (a few KB): they vouch for a handed-down cosign too.
-  if (-not (Get-Optional "$base/cosign_checksums.txt" $sums)) { return $null }
+  if (-not (Get-Optional "$base/cosign_checksums.txt" $sums)) {
+    Log "cosign bootstrap: the checksums download failed (status $($script:FetchStatus), $($script:FetchTries) attempt(s)): $($script:FetchError)"
+    return $null
+  }
 
   # cosign_checksums.txt lines: "<sha256>␠␠<asset>". Take the one for our asset.
   $want = $null
@@ -596,7 +609,7 @@ function Resolve-Cosign {
     $parts = @($line -split '\s+' | Where-Object { $_ -ne '' })
     if ($parts.Count -ge 2 -and $parts[-1] -eq $asset) { $want = $parts[0].ToLower(); break }
   }
-  if (-not $want) { return $null }
+  if (-not $want) { Log "cosign bootstrap: $asset is not in cosign_checksums.txt"; return $null }
 
   # The website shim (tracebloc.io/i.ps1) has usually just fetched and digest-checked
   # this same pinned build to verify THIS script, into its own temp folder, which
@@ -619,8 +632,12 @@ function Resolve-Cosign {
   Log "cosign not found -- downloading pinned cosign $CosignVersion (~180 MB) to verify the manifest."
   Show-Live -Keep "Downloading what checks tracebloc's signature (180 MB, a few minutes on a slow network)..."
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
-  if (-not (Get-OptionalWithTicks "$base/$asset" $bin)) { return $null }
+  if (-not (Get-OptionalWithTicks "$base/$asset" $bin)) {
+    Log "cosign bootstrap: the cosign download failed after $([math]::Round($sw.Elapsed.TotalSeconds))s: $($script:FetchError)"
+    return $null
+  }
   if ((Get-Sha256 $bin) -ne $want) {
+    Log "cosign bootstrap: the download's sha256 is not the pinned build's"
     Err "Bootstrapped cosign failed its own checksum -- not using it."
     return $null
   }
@@ -888,7 +905,7 @@ function Assert-WindowsSubstrate {
 function Invoke-Bootstrap {
   param([object[]]$BootstrapArgs)
 
-  $label = if ($env:TRACEBLOC_REF) { $env:TRACEBLOC_REF } elseif ($env:REF) { $env:REF } else { $DefaultRef }
+  $label = if ($env:TRACEBLOC_REF) { $env:TRACEBLOC_REF } else { $DefaultRef }
   Write-Banner $label
   # The bootstrap takes no arguments, and install-wsl.ps1 takes only the tree. One
   # it was given is refused before anything is fetched, so a -Help never installs.
@@ -901,10 +918,10 @@ function Invoke-Bootstrap {
   Assert-WslWindowsBuild
 
   $allowUnverified = ($env:TRACEBLOC_ALLOW_UNVERIFIED -eq "1")
-  # Settings naming: TRACEBLOC_REF / TRACEBLOC_BRANCH first, the
-  # legacy REF / BRANCH after them (remove_by 2026-12-31); a non-empty canonical
-  # wins, the bash bootstrap's rule.
-  $refEnv    = if ($env:TRACEBLOC_REF) { $env:TRACEBLOC_REF } else { $env:REF }
+  # The release pin is TRACEBLOC_REF alone; the branch override takes the older
+  # BRANCH when TRACEBLOC_BRANCH is unset or empty (remove_by 2026-12-31): the bash
+  # bootstrap's rule.
+  $refEnv    = $env:TRACEBLOC_REF
   $branchEnv = if ($env:TRACEBLOC_BRANCH) { $env:TRACEBLOC_BRANCH } else { $env:BRANCH }
   $ref = Resolve-InstallRef -DefaultRef $DefaultRef -RefEnv $refEnv -BranchEnv $branchEnv -AllowUnverified $allowUnverified
 

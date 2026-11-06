@@ -48,7 +48,7 @@ tb_tuning_aliases=(
   TB_HELM_LIST_TIMEOUT TB_HELM_TIMEOUT_MIN TB_HELM_VALUES_TIMEOUT TB_INSTALL_CMD
   TB_K3S_CRI_TIMEOUT TB_K3S_INSTALL_SH_TIMEOUT
   TB_METRICS_WAIT_S
-  TB_PLAIN TB_PM_KILL_GRACE TB_PROBE_TIMEOUT
+  TB_PM_KILL_GRACE TB_PROBE_TIMEOUT
   TB_PROGRESS_KUBECTL_TIMEOUT TB_PULL_TIMEOUT
   TB_WSL_INTEROP_KILL_AFTER TB_WSL_INTEROP_TIMEOUT
   GPU_DEVICE_PLUGIN_NAMESPACE SIGN_IN_ATTEMPTS
@@ -284,12 +284,12 @@ _assert_download_size() {
 # lime #91e947 = action — mirrors the Go CLI's internal/ui engine. Each tone
 # renders as exact 24-bit hex on a truecolor terminal, the nearest ANSI-16
 # elsewhere, its deep shade on a light background, and nothing at all when colour
-# is off (NO_COLOR / not a TTY / TERM=dumb / TB_PLAIN=1). Meaning never rests on
+# is off (NO_COLOR / not a TTY / TERM=dumb / TRACEBLOC_PLAIN=1). Meaning never rests on
 # hue alone — headings/commands also carry bold and alerts a distinct glyph.
 #
 # Decided ONCE here, at source time: common.sh is sourced before setup_log_file
 # redirects stdout through `tee`, so the `-t 1` test sees the real terminal.
-if [[ -n "${NO_COLOR:-}" || "${TB_PLAIN:-}" == "1" || "${TERM:-}" == "dumb" || ! -t 1 ]]; then
+if [[ -n "${NO_COLOR:-}" || "${TRACEBLOC_PLAIN:-}" == "1" || "${TERM:-}" == "dumb" || ! -t 1 ]]; then
   _tb_mode=none
 elif [[ "${COLORTERM:-}" == "truecolor" || "${COLORTERM:-}" == "24bit" ]]; then
   _tb_mode=true
@@ -904,11 +904,33 @@ step_header()    {
   n=$(( $(printf '%d' "'$letter") - 96 ))
   # From the first step on, a failed run's end block opens with the gap a section has.
   _TB_END_GAP=1
+  # The Windows installer's client run goes over steps a-c again, after the cluster
+  # run showed them as [1/6]-[3/6]: one header for the three, so the screen's one
+  # sequence goes on at [4/6] and does not start over.
+  if _tb_step_rechecked "$letter"; then
+    [[ "$letter" != a ]] || { echo -e "  ${TB_HEADING}Checking your secure environment${RESET}"; echo ""; }
+    return 0
+  fi
   if [[ "$total" == 1 ]]; then
     echo -e "  ${TB_HEADING}$2${RESET}"; echo ""
   else
     echo -e "  ${TB_HEADING}[${n}/${total}] $2${RESET}"; echo ""
   fi
+}
+
+# _tb_step_rechecked LETTER -- step LETTER is one the Windows installer's cluster run
+# showed already: a, b or c, in the client run in tracebloc's WSL distro. Nowhere else.
+_tb_step_rechecked() {
+  [[ "$1" == [abc] ]] || return 1
+  declare -F tb_wsl_phase >/dev/null 2>&1 || return 1
+  [[ "$(tb_wsl_phase 2>/dev/null)" == client ]]
+}
+
+# step_end LETTER -- the gap after step LETTER's body: two blank lines, and none
+# inside the client run's one header for steps a-c (step_header).
+step_end() {
+  if [[ "$1" == [ab] ]] && _tb_step_rechecked "$1"; then return 0; fi
+  echo ""; echo ""
 }
 
 # ── Utility ──────────────────────────────────────────────────────────────────
@@ -918,7 +940,7 @@ has() { command -v "$1" &>/dev/null; }
 # outside the rule: a letter, then [a-zA-Z0-9._-], 63 characters at most.
 _refuse_invalid_cluster_name() {
   [[ "${1:-}" =~ ^[a-zA-Z][a-zA-Z0-9._-]{0,62}$ ]] \
-    || error "CLUSTER_NAME must start with a letter, contain only [a-zA-Z0-9._-], max 63 chars (got '${1:-}')"
+    || error "TRACEBLOC_CLUSTER_NAME must start with a letter, contain only [a-zA-Z0-9._-], max 63 chars (got '${1:-}')"
 }
 
 # Execute-gate a freshly-installed tool. The old post-install "check" was a
@@ -1401,7 +1423,7 @@ _resource_monitor_daemonset() {
 
 # ── Progress-line gate — animate only where a redraw reads ──
 # A spinner redraws its line with \r, \033[K and tput. Where colour is off
-# (NO_COLOR / not a TTY / TERM=dumb / TB_PLAIN=1, decided once above as
+# (NO_COLOR / not a TTY / TERM=dumb / TRACEBLOC_PLAIN=1, decided once above as
 # _tb_mode=none) those bytes land in a log as frame after frame of garbage, so
 # every in-place progress line goes through these four helpers: animating, they
 # draw and clear as before; plain, _tb_progress_start prints the message ONCE as a
@@ -1954,16 +1976,13 @@ setup_log_file() {
 }
 
 # ── Configuration (overridable via env) ──────────────────────────────────────
-# Settings naming: every knob in this block has a TRACEBLOC_
-# canonical name -- TRACEBLOC_<legacy>, a leading TB_ replaced (TB_STORAGE_MODE
-# -> TRACEBLOC_STORAGE_MODE) -- and the legacy spelling still works (remove_by
-# 2026-12-31). The rule TRACEBLOC_NAMESPACE / TRACEBLOC_HOST_DATA_DIR below set:
-# a non-empty canonical wins, else the legacy, else the default. Each is
-# resolved ONCE, here, into the legacy-named variable the rest of the installer
-# reads and re-assigns (flags, validation, the node-local forcing), so a flag
-# still beats the environment and nothing downstream changes. None of these is
-# exported to a child, so no child can see a stale canonical.
-if [[ -n "${TRACEBLOC_CLUSTER_NAME:-}" ]]; then CLUSTER_NAME="$TRACEBLOC_CLUSTER_NAME"; fi
+# Settings naming: every knob in this block is set by its TRACEBLOC_ name, resolved
+# ONCE, here, into the shorter variable the rest of the installer reads and
+# re-assigns (flags, validation, the node-local forcing), so a flag still beats the
+# environment. A knob read as `X="${TRACEBLOC_X:-}"` takes the canonical alone and
+# overwrites an inherited X; one read as `if [[ -n "${TRACEBLOC_X:-}" ]]` still
+# takes its older spelling when the canonical is unset or blank. None is exported.
+CLUSTER_NAME="${TRACEBLOC_CLUSTER_NAME:-}"
 CLUSTER_NAME="${CLUSTER_NAME:-tracebloc}"
 # The secure-environment name (= the Helm release and the k8s namespace).
 # Settings naming: TRACEBLOC_NAMESPACE is the canonical env var, TB_NAMESPACE
@@ -2007,13 +2026,12 @@ if [[ -n "${TRACEBLOC_LEFTOVER_ACTION:-}" ]]; then TB_LEFTOVER_ACTION="$TRACEBLO
 #   hostpath   (opt-out) : the older model — datasets live in ~/.tracebloc on the
 #                          host, bind-mounted into the cluster; survive cluster
 #                          delete; world-writable dirs. Select with
-#                          TRACEBLOC_STORAGE_MODE=hostpath (legacy:
-#                          TB_STORAGE_MODE; still required for a
+#                          TRACEBLOC_STORAGE_MODE=hostpath (required for a
 #                          TRACEBLOC_HOST_DATASET_DIR network mount).
 # Record whether the operator chose the mode or is getting the D15 default: on an
 # existing hostpath cluster the mismatch guard refuses an explicit node-local but
 # adopts hostpath when node-local is only the default.
-if [[ -n "${TRACEBLOC_STORAGE_MODE:-}" ]]; then TB_STORAGE_MODE="$TRACEBLOC_STORAGE_MODE"; fi
+TB_STORAGE_MODE="${TRACEBLOC_STORAGE_MODE:-}"
 if [[ -n "${TB_STORAGE_MODE:-}" ]]; then TB_STORAGE_MODE_SOURCE="explicit"; else TB_STORAGE_MODE_SOURCE="default"; fi
 TB_STORAGE_MODE="${TB_STORAGE_MODE:-node-local}"
 # Pinned default; an empty value falls back to this pin (`:-` treats empty and
@@ -2083,7 +2101,7 @@ TB_NVIDIA_COMPUTE_CAP_FLOOR="7.5"
 # its published .sha256sum either way (setup-linux.sh) — helm's get-helm-3
 # script is NOT used: it floats on the mutable helm/helm@main and needs
 # openssl, which minimal cloud images don't ship.
-if [[ -n "${TRACEBLOC_HELM_VERSION:-}" ]]; then HELM_VERSION="$TRACEBLOC_HELM_VERSION"; fi
+HELM_VERSION="${TRACEBLOC_HELM_VERSION:-}"
 HELM_VERSION="${HELM_VERSION:-v4.2.3}"
 # The GPU training base image's footprint on a node, in GB (facts.env
 # PREPULL_PARENT_DISK_GB, measured; stamped by check-facts.sh --write): what
@@ -2096,15 +2114,10 @@ TB_PREPULL_PARENT_DISK_GB="11"
 # CPU training prepull adds to the image store. A measurement, so no TRACEBLOC_* override.
 # shellcheck disable=SC2034  # consumed cross-file by summary.sh
 TB_PREPULL_CPU_DISK_GB="4"
-# Settings naming: TRACEBLOC_HOST_DATA_DIR is the canonical env var, HOST_DATA_DIR
-# the legacy one (remove_by 2026-12-31) -- the same rule as TRACEBLOC_NAMESPACE
-# above: a non-empty canonical wins, else the legacy, else the default. Resolved
-# ONCE, here, into HOST_DATA_DIR, the variable the rest of the installer reads
-# and re-assigns (--data-dir, validate_config's normalisation, the leftover
-# guard's new-dir choice); validate_config then exports the decided path as
-# TRACEBLOC_HOST_DATA_DIR (tb_export_host_data_dir), so a child reading it sees
-# that path and not a stale canonical.
-if [[ -n "${TRACEBLOC_HOST_DATA_DIR:-}" ]]; then HOST_DATA_DIR="$TRACEBLOC_HOST_DATA_DIR"; fi
+# The data dir: TRACEBLOC_HOST_DATA_DIR alone, resolved into HOST_DATA_DIR, which
+# --data-dir, validate_config's normalisation and the leftover guard re-assign;
+# validate_config then exports the decided path (tb_export_host_data_dir).
+HOST_DATA_DIR="${TRACEBLOC_HOST_DATA_DIR:-}"
 # The default, named once: native k3s (k3s.sh) reads a data dir other than this
 # one as the operator's choice of where the volumes live.
 TB_HOST_DATA_DIR_DEFAULT="${HOME:-}/.tracebloc"
@@ -2132,8 +2145,7 @@ _hostpath_root() {
 # (default) keeps datasets under HOST_DATA_DIR. When set — e.g. a network/NFS
 # mount like /data01/tracebloc — the chart's dataset PV points there, while mysql
 # + logs stay on the local HOST_DATA_DIR (InnoDB over NFS is unsafe).
-if [[ -n "${TRACEBLOC_HOST_DATASET_DIR:-}" ]]; then HOST_DATASET_DIR="$TRACEBLOC_HOST_DATASET_DIR"; fi
-HOST_DATASET_DIR="${HOST_DATASET_DIR:-}"
+HOST_DATASET_DIR="${TRACEBLOC_HOST_DATASET_DIR:-}"
 
 # ── Input validation ────────────────────────────────────────────────────────
 # _tb_system_path DIR -- true when the absolute path DIR is `/` or lies in a system
@@ -2234,7 +2246,7 @@ validate_config() {
   _refuse_invalid_cluster_name "$CLUSTER_NAME"
 
   [[ "$TB_STORAGE_MODE" == "hostpath" || "$TB_STORAGE_MODE" == "node-local" ]] \
-    || error "TB_STORAGE_MODE must be 'hostpath' or 'node-local' (got '$TB_STORAGE_MODE')"
+    || error "TRACEBLOC_STORAGE_MODE must be 'hostpath' or 'node-local' (got '$TB_STORAGE_MODE')"
 
   # node-local forces hostPath.enabled=false, so a HOST_DATASET_DIR network export
   # would be ignored and datasets would silently land on ephemeral local-path
@@ -2247,12 +2259,12 @@ validate_config() {
   # _tb_data_dir_check, the rule the new-directory prompt asks again by.
   if ! _tb_data_dir_check "$HOST_DATA_DIR"; then
     case "$_TB_DATA_DIR_WHY" in
-      empty)  error "HOST_DATA_DIR must not be empty (got '')." ;;
-      parent) error "HOST_DATA_DIR parent directory could not be resolved: $(dirname "$_TB_DATA_DIR")" ;;
-      root)   error "HOST_DATA_DIR cannot be root (/)" ;;
-      system) error "HOST_DATA_DIR cannot be a system path: $_TB_DATA_DIR" ;;
-      home)   error "HOST_DATA_DIR must be a subdirectory of \$HOME, not \$HOME itself (got: $HOST_DATA_DIR)." ;;
-      *)      error "HOST_DATA_DIR must be under \$HOME (got: $HOST_DATA_DIR)" ;;
+      empty)  error "TRACEBLOC_HOST_DATA_DIR must not be empty (got '')." ;;
+      parent) error "TRACEBLOC_HOST_DATA_DIR parent directory could not be resolved: $(dirname "$_TB_DATA_DIR")" ;;
+      root)   error "TRACEBLOC_HOST_DATA_DIR cannot be root (/)" ;;
+      system) error "TRACEBLOC_HOST_DATA_DIR cannot be a system path: $_TB_DATA_DIR" ;;
+      home)   error "TRACEBLOC_HOST_DATA_DIR must be a subdirectory of \$HOME, not \$HOME itself (got: $HOST_DATA_DIR)." ;;
+      *)      error "TRACEBLOC_HOST_DATA_DIR must be under \$HOME (got: $HOST_DATA_DIR)" ;;
     esac
   fi
   HOST_DATA_DIR="$_TB_DATA_DIR"
@@ -2264,14 +2276,14 @@ validate_config() {
   # barred from system paths. The HOST_DATA_DIR rules above are unchanged.
   if [[ -n "${HOST_DATASET_DIR:-}" ]]; then
     local ddir="$HOST_DATASET_DIR" rddir
-    [[ "$ddir" == /* ]] || error "HOST_DATASET_DIR must be an absolute path (got '$HOST_DATASET_DIR')"
-    [[ -d "$ddir" ]]    || error "HOST_DATASET_DIR does not exist: $ddir (mount the dataset volume before installing)"
-    [[ -w "$ddir" ]]    || error "HOST_DATASET_DIR is not writable (uid $(id -u)): $ddir — check its permissions."
-    rddir="$(cd -P "$ddir" 2>/dev/null && pwd)" || error "HOST_DATASET_DIR could not be resolved: $ddir"
+    [[ "$ddir" == /* ]] || error "TRACEBLOC_HOST_DATASET_DIR must be an absolute path (got '$HOST_DATASET_DIR')"
+    [[ -d "$ddir" ]]    || error "TRACEBLOC_HOST_DATASET_DIR does not exist: $ddir (mount the dataset volume before installing)"
+    [[ -w "$ddir" ]]    || error "TRACEBLOC_HOST_DATASET_DIR is not writable (uid $(id -u)): $ddir — check its permissions."
+    rddir="$(cd -P "$ddir" 2>/dev/null && pwd)" || error "TRACEBLOC_HOST_DATASET_DIR could not be resolved: $ddir"
     case "$rddir" in
-      /) error "HOST_DATASET_DIR cannot be root (/)" ;;
+      /) error "TRACEBLOC_HOST_DATASET_DIR cannot be root (/)" ;;
       /etc|/etc/*|/usr|/usr/*|/var|/var/*|/bin|/sbin|/lib|/lib64)
-        error "HOST_DATASET_DIR cannot be a system path: $rddir" ;;
+        error "TRACEBLOC_HOST_DATASET_DIR cannot be a system path: $rddir" ;;
     esac
     HOST_DATASET_DIR="$rddir"
   fi
@@ -3001,11 +3013,11 @@ tb_mac_floor_reason() {
   esac
 }
 
-# tb_upgrade_run -- this run is a `tracebloc upgrade`: the CLI's flag (TB_ spelling
-# first, as install.sh and assess.sh read it). The one rule for leaving out the
-# first-install pointer at `tracebloc data ingest`.
+# tb_upgrade_run -- this run is a `tracebloc upgrade`: the CLI's flag, TRACEBLOC_
+# spelling first and TB_ as the fallback, as install.sh and assess.sh read it. The
+# one rule for leaving out the first-install pointer at `tracebloc data ingest`.
 tb_upgrade_run() {
-  [[ "${TB_UPGRADE_CLI:-${TRACEBLOC_UPGRADE_CLI:-0}}" == 1 ]]
+  [[ "${TRACEBLOC_UPGRADE_CLI:-${TB_UPGRADE_CLI:-0}}" == 1 ]]
 }
 
 # refuse_unsupported_mac -- a Mac below the floor, stopped by name, on every path.
@@ -3754,8 +3766,7 @@ Data from an earlier install:
   --wipe-data     Delete it and start fresh.
   --data-dir=DIR  Install into DIR and leave it alone.
 
-Advanced settings (environment variables; the older names without
-the TRACEBLOC_ prefix still work):
+Advanced settings (environment variables):
   TRACEBLOC_HOST_DATA_DIR     Where your data lives (default: ~/.tracebloc).
                               A local disk: network storage is refused.
   TRACEBLOC_HOST_DATASET_DIR  A separate folder for datasets (hostpath only)

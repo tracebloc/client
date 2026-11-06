@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+{  # one compound command: a download cut short is a syntax error, so nothing in it runs and bash exits non-zero
 # =============================================================================
 #  Bootstrap installer — downloads the installer sub-scripts from GitHub and
 #  runs install-k8s.sh.
@@ -36,8 +37,8 @@
 #  tracebloc/client, which carries no scripts/ tree), so point it at a source whose
 #  tree is readable — a public fork with your branch pushed:
 #    curl -fsSL ... | TRACEBLOC_SOURCE_REPO=<you>/client TRACEBLOC_BRANCH=<branch> TRACEBLOC_ALLOW_UNVERIFIED=1 bash
-#  (TRACEBLOC_REF=<vX.Y.Z> pins another release instead; the older REF / BRANCH
-#  spellings still work.) A source tree served from elsewhere -- a per-commit
+#  (TRACEBLOC_REF=<vX.Y.Z> pins another release instead; the older BRANCH
+#  spelling still works.) A source tree served from elsewhere -- a per-commit
 #  installer bundle unpacked and served on this machine, say -- is named whole
 #  with TRACEBLOC_SOURCE_URL (https, or http to 127.0.0.1 / localhost / [::1]):
 #    TRACEBLOC_SOURCE_URL=http://127.0.0.1:8765 TRACEBLOC_ALLOW_UNVERIFIED=1 bash install.sh
@@ -52,11 +53,11 @@ set -euo pipefail
 # common.sh (which owns the shared colour palette + helpers) is one of the files
 # this bootstrap is about to fetch and verify, so it isn't sourced yet. Define a
 # small local palette, disabled under the same rule as common.sh's: stdout not a
-# terminal, NO_COLOR, TERM=dumb or TB_PLAIN=1 (TRACEBLOC_PLAIN=1). _tb_anim says
+# terminal, NO_COLOR, TERM=dumb or TRACEBLOC_PLAIN=1. _tb_anim says
 # whether this script's own spinner frames may redraw in place; plain, each step
 # prints one static line instead.
 if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" \
-      && "${TRACEBLOC_PLAIN:-${TB_PLAIN:-}}" != "1" ]]; then
+      && "${TRACEBLOC_PLAIN:-}" != "1" ]]; then
   _B=$'\033[1m'; _C=$'\033[0;36m'; _D=$'\033[2m'; _G=$'\033[0;32m'; _R=$'\033[0m'
   _tb_anim=1
 else
@@ -155,26 +156,23 @@ esac
 # substrate served here (_tb_record_served, below).
 _tb_bail_ok=1
 _tb_force=0
-# Settings naming: TRACEBLOC_REF / TRACEBLOC_BRANCH are the
-# canonical spellings of the release pin and the dev-branch override; REF /
-# BRANCH still work (remove_by 2026-12-31). A non-empty canonical wins, resolved
-# once into the legacy-named variable the rest of this bootstrap reads.
-if [[ -n "${TRACEBLOC_REF:-}" ]]; then REF="$TRACEBLOC_REF"; fi
+# The release pin is TRACEBLOC_REF alone: an inherited REF is overwritten. The
+# dev-branch override takes the older BRANCH when TRACEBLOC_BRANCH is unset or blank
+# (remove_by 2026-12-31). Both resolve into the variable the rest of this bootstrap reads.
+REF="${TRACEBLOC_REF:-}"
 if [[ -n "${TRACEBLOC_BRANCH:-}" ]]; then BRANCH="$TRACEBLOC_BRANCH"; fi
 [[ "${TRACEBLOC_FORCE_REINSTALL:-0}" == "1" ]] && { _tb_bail_ok=0; _tb_force=1; }
 [[ "${TRACEBLOC_ALLOW_UNVERIFIED:-0}" == "1" ]] && { _tb_bail_ok=0; _tb_force=1; }
 [[ -n "${REF:-}" || -n "${BRANCH:-}" ]] && { _tb_bail_ok=0; _tb_force=1; }
-# `tracebloc upgrade` (TB_UPGRADE_CLI=1, or TRACEBLOC_UPGRADE_CLI=1): the user
-# explicitly asked to bring the CLI to the latest release. The TB_ spelling is
-# read FIRST, unlike the installer's other TRACEBLOC_ names: every released CLI
-# sets it on the command it runs, and older CLIs set nothing else, so what the
-# CLI set must outrank a TRACEBLOC_ value left in the user's shell. Skip the
+# `tracebloc upgrade` (TRACEBLOC_UPGRADE_CLI=1; TB_UPGRADE_CLI=1 from a CLI that
+# sets only that spelling, read when the TRACEBLOC_ one is unset or blank): the
+# user explicitly asked to bring the CLI to the latest release. Skip the
 # healthy bailout so we reach install-k8s.sh, whose stop-and-check gate — seeing
 # the same flag — goes on to the normal flow: step b brings the CLI to latest and
 # step c moves the node forward. NOT a forced reinstall: leave _tb_force at 0. A
 # below-floor CLI is the gate's cli-outdated case either way, so the floor keeps
 # its stricter meaning.
-[[ "${TB_UPGRADE_CLI:-${TRACEBLOC_UPGRADE_CLI:-0}}" == "1" ]] && _tb_bail_ok=0
+[[ "${TRACEBLOC_UPGRADE_CLI:-${TB_UPGRADE_CLI:-0}}" == "1" ]] && _tb_bail_ok=0
 # An explicit substrate request (TRACEBLOC_SUBSTRATE set to anything; empty is
 # none, as install-k8s.sh reads it) is install-k8s.sh's to answer, so it skips ONLY
 # the bailout, with no _tb_force. install-k8s.sh hands a healthy
@@ -189,7 +187,7 @@ for _a in "$@"; do
     # prepare-host must reach the sub-script even on a healthy machine — it's
     # useful there (grant ANOTHER researcher the k3s group), and the
     # healthy-bailout would otherwise open the home screen and silently skip the
-    # TB_PREPARE_USER grant. It skips ONLY the bailout — no
+    # TRACEBLOC_PREPARE_USER grant. It skips ONLY the bailout — no
     # _tb_force — so host-prep is never mislabeled as a forced reinstall (the
     # sub-script dispatches prepare-host before its assess gate anyway).
     prepare-host|--prepare-host) _tb_bail_ok=0 ;;
@@ -310,10 +308,9 @@ DEFAULT_REF="__TRACEBLOC_RELEASE_REF__"
 # the signature chain, so it is gated behind an explicit opt-in and shouts.
 ALLOW_UNVERIFIED="${TRACEBLOC_ALLOW_UNVERIFIED:-0}"
 
-# Resolve the ref to fetch from. Precedence: explicit REF env (pin a different
-# release tag) > legacy BRANCH (dev only) > the pinned DEFAULT_REF. BRANCH is
-# retained for backward compatibility (CI, dev docs) but now requires the
-# unverified opt-in below.
+# Resolve the ref to fetch from. Precedence: TRACEBLOC_REF (pin a different
+# release tag) > TRACEBLOC_BRANCH / BRANCH (dev only) > the pinned DEFAULT_REF. A
+# branch requires the unverified opt-in below.
 if [[ -n "${REF:-}" ]]; then
   :                       # explicit pin — honored as-is
 elif [[ -n "${BRANCH:-}" ]]; then
@@ -989,3 +986,4 @@ chmod +x "$TMPDIR/install-k8s.sh"
 
 bash "$TMPDIR/install-k8s.sh" "$@"
 _tb_done=1
+}

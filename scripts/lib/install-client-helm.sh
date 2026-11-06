@@ -4149,7 +4149,7 @@ _native_k3s_release_storage() {
 
   if [[ "$enabled" != true ]]; then
     [[ "$want" != hostpath ]] \
-      || error "TRACEBLOC_STORAGE_MODE=hostpath, but this machine's tracebloc release '${ns}' keeps its data in k3s's local-path volumes (node-local), and an installed release can't change its storage in place. Unset TRACEBLOC_STORAGE_MODE (and the older TB_STORAGE_MODE) to keep node-local, or remove tracebloc from this machine and install again with hostpath."
+      || error "TRACEBLOC_STORAGE_MODE=hostpath, but this machine's tracebloc release '${ns}' keeps its data in k3s's local-path volumes (node-local), and an installed release can't change its storage in place. Unset TRACEBLOC_STORAGE_MODE to keep node-local, or remove tracebloc from this machine and install again with hostpath."
     # The macOS node's job-data folder: the release keeps the one its
     # claims' PVs name, or keeps having none (a v1.11 Mac's release: its claims are in
     # the node and cannot move). _mac_ct_job_data_dir reads the two.
@@ -4159,7 +4159,7 @@ _native_k3s_release_storage() {
   root="${root:-/tracebloc}"   # the chart's default, which is what rendered
   if [[ "$want" == node-local ]]; then
     [[ "${TB_STORAGE_MODE_SOURCE:-default}" != explicit ]] \
-      || error "TRACEBLOC_STORAGE_MODE=node-local, but this machine's tracebloc release '${ns}' keeps its data in hostPath volumes under ${root}, and an installed release can't change its storage in place. Unset TRACEBLOC_STORAGE_MODE (and the older TB_STORAGE_MODE) to keep hostpath, or remove tracebloc from this machine and install again with node-local."
+      || error "TRACEBLOC_STORAGE_MODE=node-local, but this machine's tracebloc release '${ns}' keeps its data in hostPath volumes under ${root}, and an installed release can't change its storage in place. Unset TRACEBLOC_STORAGE_MODE to keep hostpath, or remove tracebloc from this machine and install again with node-local."
     TB_STORAGE_MODE=hostpath
     log "Storage mode: hostpath — kept from the release '${ns}' (node-local is only the default, and the release was installed with hostpath)."
     info "Keeping hostpath storage: this machine's tracebloc release was installed with it, and its data stays in ${root}."

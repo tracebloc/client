@@ -200,8 +200,7 @@ spec:
       #
       # Each dir is fixed INDEPENDENTLY and best-effort, and so is each OPERATION. The chown
       # and the chmod used to be chained with a logical AND, which meant that on any mount that
-      # refused the chown — a pre-provisioned volume, an NFS root_squash export via TRACEBLOC_HOST_DATASET_DIR
-      # (old name HOST_DATASET_DIR still works),
+      # refused the chown — a pre-provisioned volume, an NFS root_squash export via TRACEBLOC_HOST_DATASET_DIR,
       # a Windows-filesystem bind mount — the chmod was never attempted, while the log still
       # said "leaving as-is". That is backwards: the MODE is the load-bearing half (these dirs must
       # be other-writable for writers this chart does not own, see above), the chown to 1000 is

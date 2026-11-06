@@ -18,12 +18,8 @@ data:
     # runAsNonRoot pod — both `awk` and `tr` are busybox built-ins.
     set -eu
 
-    # Settings naming: the chart sets each identity var under its canonical
-    # TRACEBLOC_ name only. Read the canonical first; the legacy name is the
-    # fallback for an env that still carries it, so a blank or absent canonical
-    # leaves the legacy value -- and `set -u`'s refusal of an unset one -- alone.
-    if [ -n "${TRACEBLOC_RELEASE_NAME:-}" ]; then RELEASE_NAME="$TRACEBLOC_RELEASE_NAME"; fi
-    if [ -n "${TRACEBLOC_RELEASE_NAMESPACE:-}" ]; then RELEASE_NAMESPACE="$TRACEBLOC_RELEASE_NAMESPACE"; fi
+    # Settings naming: every setting this script reads is the CronJob's env under
+    # its TRACEBLOC_ name, read directly; `set -u` refuses one the pod lacks.
 
     # Helm needs writable cache/config/data dirs. The Pod runs with
     # readOnlyRootFilesystem: true, so point Helm at the emptyDir mounted
@@ -65,23 +61,9 @@ data:
     }
     trap upgrade_exit EXIT
 
-    # Settings naming: the CronJob sets each of these under its canonical
-    # TRACEBLOC_ name only. Read the canonical first; the legacy name is the
-    # fallback for an env that still carries it, so a blank or absent canonical
-    # leaves the legacy value -- and any default or `set -u` refusal below -- alone.
-    # The chart source (REPO_URL / REPO_NAME / CHART_NAME) takes the spelling the
-    # installer and the cli already give the same three facts
-    # (install-client-helm.sh TRACEBLOC_HELM_REPO_URL / _NAME, TRACEBLOC_CHART_NAME),
-    # not TRACEBLOC_<legacy>: one concept, one name.
-    if [ -n "${TRACEBLOC_HELM_REPO_URL:-}" ]; then REPO_URL="$TRACEBLOC_HELM_REPO_URL"; fi
-    if [ -n "${TRACEBLOC_HELM_REPO_NAME:-}" ]; then REPO_NAME="$TRACEBLOC_HELM_REPO_NAME"; fi
-    if [ -n "${TRACEBLOC_CHART_NAME:-}" ]; then CHART_NAME="$TRACEBLOC_CHART_NAME"; fi
-    if [ -n "${TRACEBLOC_UPGRADE_TIMEOUT:-}" ]; then UPGRADE_TIMEOUT="$TRACEBLOC_UPGRADE_TIMEOUT"; fi
-    if [ -n "${TRACEBLOC_WEDGE_MIN_AGE_SECONDS:-}" ]; then WEDGE_MIN_AGE_SECONDS="$TRACEBLOC_WEDGE_MIN_AGE_SECONDS"; fi
-    if [ -n "${TRACEBLOC_AUTO_UPGRADE_NAME:-}" ]; then AUTO_UPGRADE_NAME="$TRACEBLOC_AUTO_UPGRADE_NAME"; fi
-    if [ -n "${TRACEBLOC_TRAINING_DEFER_ENABLED:-}" ]; then TRAINING_DEFER_ENABLED="$TRACEBLOC_TRAINING_DEFER_ENABLED"; fi
-    if [ -n "${TRACEBLOC_TRAINING_DEFER_MAX:-}" ]; then TRAINING_DEFER_MAX="$TRACEBLOC_TRAINING_DEFER_MAX"; fi
-    if [ -n "${TRACEBLOC_TRAINING_FINISHED_WINDOW_SECONDS:-}" ]; then TRAINING_FINISHED_WINDOW_SECONDS="$TRACEBLOC_TRAINING_FINISHED_WINDOW_SECONDS"; fi
+    # The chart source (TRACEBLOC_HELM_REPO_URL / TRACEBLOC_HELM_REPO_NAME /
+    # TRACEBLOC_CHART_NAME) takes the spelling the installer and the cli already
+    # give the same three facts: one concept, one name.
 
     # The wait mode, read once for both `helm upgrade --atomic` calls below.
     # Helm 4 `--rollback-on-failure` (alias `--atomic`) switches the default wait
@@ -208,7 +190,7 @@ data:
         *"an error occurred while rolling back the release"*)
           _au_rollback_err=yes
           _au_orig="${_au_err#*original upgrade error: }"
-          _au_orig="${_au_orig%": release $RELEASE_NAME failed: "*}" ;;
+          _au_orig="${_au_orig%": release $TRACEBLOC_RELEASE_NAME failed: "*}" ;;
       esac
       _au_warn="$(grep 'msg="upgrade failed"' "$_au_out" 2>/dev/null | tail -n 1 || true)"
       rm -f "$_au_out"
@@ -219,7 +201,7 @@ data:
       case "$_au_orig" in
         *"context deadline exceeded"*|*"timed out waiting for the condition"*) _au_kind=timeout ;;
       esac
-      _au_status="$(helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" 2>/dev/null \
+      _au_status="$(helm status "$TRACEBLOC_RELEASE_NAME" -n "$TRACEBLOC_RELEASE_NAMESPACE" 2>/dev/null \
         | awk '/^STATUS:/ {print $2; exit}' || true)"
       if [ "$_au_rollback_err" = yes ]; then
         _au_rb=failed
@@ -236,13 +218,13 @@ data:
         if [ "$_au_kind" = timeout ]; then UPGRADE_FAIL_REASON=timeout; else UPGRADE_FAIL_REASON=rolled_back; fi
       fi
       if [ "$_au_kind" = timeout ]; then
-        _au_res="$( { helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" --show-resources 2>/dev/null \
-          || helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" 2>/dev/null; } | not_ready_workloads || true)"
-        log "ERROR: UPGRADE TIMEOUT $_au_from -> $_au_to: helm's wait did not see the release ready within --timeout $UPGRADE_TIMEOUT; rollback: $_au_rb (release status: ${_au_status:-unreadable}); not ready: ${_au_res:-none named by helm status, check: kubectl -n $RELEASE_NAMESPACE get pods}"
+        _au_res="$( { helm status "$TRACEBLOC_RELEASE_NAME" -n "$TRACEBLOC_RELEASE_NAMESPACE" --show-resources 2>/dev/null \
+          || helm status "$TRACEBLOC_RELEASE_NAME" -n "$TRACEBLOC_RELEASE_NAMESPACE" 2>/dev/null; } | not_ready_workloads || true)"
+        log "ERROR: UPGRADE TIMEOUT $_au_from -> $_au_to: helm's wait did not see the release ready within --timeout $TRACEBLOC_UPGRADE_TIMEOUT; rollback: $_au_rb (release status: ${_au_status:-unreadable}); not ready: ${_au_res:-none named by helm status, check: kubectl -n $TRACEBLOC_RELEASE_NAMESPACE get pods}"
       fi
       case "$_au_rb" in
         failed)
-          log "ERROR: ROLLBACK FAILED after the $_au_kind failure of $_au_from -> $_au_to: release '$RELEASE_NAME' is '${_au_status:-unreadable}', not 'deployed'; it is left broken, not on $_au_from. Inspect: helm history $RELEASE_NAME -n $RELEASE_NAMESPACE"
+          log "ERROR: ROLLBACK FAILED after the $_au_kind failure of $_au_from -> $_au_to: release '$TRACEBLOC_RELEASE_NAME' is '${_au_status:-unreadable}', not 'deployed'; it is left broken, not on $_au_from. Inspect: helm history $TRACEBLOC_RELEASE_NAME -n $TRACEBLOC_RELEASE_NAMESPACE"
           exit 3 ;;
         unknown)
           log "ERROR: upgrade $_au_from -> $_au_to failed and the release status cannot be read afterwards ('${_au_status}'): cannot tell whether helm's rollback left it deployed" ;;
@@ -256,7 +238,7 @@ data:
     # upgrade that is currently IN FLIGHT (must be left alone). Injected from
     # autoUpgrade.pendingWedgeMinAge; the `:-` fallback keeps a standalone run
     # (e.g. the discrimination test) working when the env var is absent.
-    WEDGE_MIN_AGE_SECONDS="${WEDGE_MIN_AGE_SECONDS:-2700}"
+    TRACEBLOC_WEDGE_MIN_AGE_SECONDS="${TRACEBLOC_WEDGE_MIN_AGE_SECONDS:-2700}"
 
     # seconds the release has been in its current (pending) revision, i.e.
     # now - info.last_deployed. Echoes the age, or nothing if it can't be read.
@@ -300,7 +282,7 @@ data:
         # civil→days math a nonsensical date. A month/day that rolls the instant
         # into the deep past yields a LARGE POSITIVE age; the downstream sanitiser
         # only rejects empty/non-numeric/NEGATIVE, so that bogus-but-positive age
-        # clears WEDGE_MIN_AGE_SECONDS and rolls back a release that was never
+        # clears TRACEBLOC_WEDGE_MIN_AGE_SECONDS and rolls back a release that was never
         # wedged. Reject any out-of-range field so a non-instant yields NO age
         # (→ "cannot tell" → skip), never a fabricated one. Bounds are the RFC3339
         # ranges (ss<=60 admits a leap second); day is the coarse 1–31 the issue
@@ -322,7 +304,7 @@ data:
           # Same class as the date fields: the offset regex is
           # SHAPE-only too, so `+40:00` / `+99:99` pass and shift the epoch by up
           # to ~4 days — enough to age a genuinely RECENT (in-flight) upgrade past
-          # WEDGE_MIN_AGE_SECONDS and roll it back. Bound it to a real RFC3339
+          # TRACEBLOC_WEDGE_MIN_AGE_SECONDS and roll it back. Bound it to a real RFC3339
           # numoffset (hour 0–23, minute 0–59); anything else is not an instant.
           oh = substr(o, 2, 2) + 0; om = substr(o, 5, 2) + 0
           if (oh > 23 || om > 59) exit
@@ -355,10 +337,10 @@ data:
     COSIGN="${TRACEBLOC_COSIGN:-/verifier/cosign}"
     CHECKED_CHART=""
 
-    # The first URL for CHART_NAME at version $1 in the index `helm repo update`
+    # The first URL for TRACEBLOC_CHART_NAME at version $1 in the index `helm repo update`
     # cached, the one `helm search repo` read, so the version and its URL agree.
     chart_url() {
-      awk -v chart="$CHART_NAME" -v want="$1" '
+      awk -v chart="$TRACEBLOC_CHART_NAME" -v want="$1" '
         function keep() {
           if (name == chart && ver == want && url != "" && found == "") found = url
           ver = ""; url = ""; key = ""
@@ -375,14 +357,14 @@ data:
         }
         /^    - / && key == "urls" && url == "" { url = $2; gsub(/[\042\047]/, "", url) }
         END { keep(); if (found != "") print found }
-      ' "$HELM_CACHE_HOME/repository/${REPO_NAME}-index.yaml"
+      ' "$HELM_CACHE_HOME/repository/${TRACEBLOC_HELM_REPO_NAME}-index.yaml"
     }
 
     # fetch URL DEST: 0 on a 200 curl delivered whole; the HTTP status in
     # FETCH_STATUS (000: no answer). https only, redirects included.
     fetch() {
       _f_rc=0
-      FETCH_STATUS="$(curl -sS -L --proto '=https' --proto-redir '=https' --max-time 120 \
+      FETCH_STATUS="$(curl -sS -L --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 20 --max-time 120 \
         -o "$2" -w '%{http_code}' "$1")" || _f_rc=$?
       [ "$_f_rc" -eq 0 ] || FETCH_STATUS=000
       [ "$FETCH_STATUS" = 200 ]
@@ -395,22 +377,22 @@ data:
       exit 1
     }
 
-    # chart_check VERSION -- CHART_NAME at VERSION, downloaded and checked against
+    # chart_check VERSION -- TRACEBLOC_CHART_NAME at VERSION, downloaded and checked against
     # the Sigstore bundle its release attaches beside it (<chart url>.bundle),
     # signed as CHART_SIGNER_RE. The trust keys are the ones this chart ships,
     # beside this script, so cosign needs no network. Leaves the checked file in
     # CHECKED_CHART, which the upgrade installs.
     chart_check() {
       _cc_url="$(chart_url "$1")" || _cc_url=""
-      [ -n "$_cc_url" ] || chart_refused "$1" "the index at $REPO_URL lists no URL for ${CHART_NAME} $1"
-      case "$_cc_url" in *://*) ;; *) _cc_url="${REPO_URL%/}/${_cc_url#/}" ;; esac
+      [ -n "$_cc_url" ] || chart_refused "$1" "the index at $TRACEBLOC_HELM_REPO_URL lists no URL for ${TRACEBLOC_CHART_NAME} $1"
+      case "$_cc_url" in *://*) ;; *) _cc_url="${TRACEBLOC_HELM_REPO_URL%/}/${_cc_url#/}" ;; esac
       case "$_cc_url" in
         https://*) ;;
-        *) chart_refused "$1" "${CHART_NAME} $1 is listed at $_cc_url, not an https URL" ;;
+        *) chart_refused "$1" "${TRACEBLOC_CHART_NAME} $1 is listed at $_cc_url, not an https URL" ;;
       esac
       [ -x "$COSIGN" ] || { log "ERROR: no cosign at $COSIGN to check the chart with; not upgrading this tick"; exit 1; }
       _cc_dir="$(mktemp -d "${TMPDIR:-/tmp}/auto-upgrade-chart.XXXXXX")"
-      _cc_tgz="$_cc_dir/${CHART_NAME}-$1.tgz"
+      _cc_tgz="$_cc_dir/${TRACEBLOC_CHART_NAME}-$1.tgz"
       if ! fetch "$_cc_url" "$_cc_tgz"; then
         log "ERROR: could not download $_cc_url (status $FETCH_STATUS); not upgrading this tick"
         UPGRADE_FAIL_REASON=download_failed
@@ -452,11 +434,11 @@ data:
       case "$_ka_host" in *:*) _ka_host="[$_ka_host]" ;; esac
       _ka_url="https://${_ka_host}:${KUBERNETES_SERVICE_PORT:-443}$2"
       if [ -n "${3:-}" ]; then
-        printf 'header = "Authorization: Bearer %s"\n' "$_ka_tok" | curl -sS -f -K - --max-time 15 \
+        printf 'header = "Authorization: Bearer %s"\n' "$_ka_tok" | curl -sS -f -K - --tlsv1.2 --connect-timeout 5 --max-time 15 \
           --noproxy "$KUBERNETES_SERVICE_HOST" --cacert "$TRACEBLOC_SA_DIR/ca.crt" -X "$1" \
           -H "Content-Type: application/merge-patch+json" --data "$3" "$_ka_url"
       else
-        printf 'header = "Authorization: Bearer %s"\n' "$_ka_tok" | curl -sS -f -K - --max-time 15 \
+        printf 'header = "Authorization: Bearer %s"\n' "$_ka_tok" | curl -sS -f -K - --tlsv1.2 --connect-timeout 5 --max-time 15 \
           --noproxy "$KUBERNETES_SERVICE_HOST" --cacert "$TRACEBLOC_SA_DIR/ca.crt" -X "$1" "$_ka_url"
       fi
     }
@@ -466,8 +448,8 @@ data:
     # and goes with the release.
     UPGRADE_DEFER_KEY="tracebloc.io/upgrade-training-deferrals"
     upgrade_cronjob_path() {
-      [ -n "${AUTO_UPGRADE_NAME:-}" ] || { echo "AUTO_UPGRADE_NAME is unset" >&2; return 1; }
-      printf '/apis/batch/v1/namespaces/%s/cronjobs/%s' "$RELEASE_NAMESPACE" "$AUTO_UPGRADE_NAME"
+      [ -n "${TRACEBLOC_AUTO_UPGRADE_NAME:-}" ] || { echo "TRACEBLOC_AUTO_UPGRADE_NAME is unset" >&2; return 1; }
+      printf '/apis/batch/v1/namespaces/%s/cronjobs/%s' "$TRACEBLOC_RELEASE_NAMESPACE" "$TRACEBLOC_AUTO_UPGRADE_NAME"
     }
     gate_streak_read() {
       _gs_path="$(upgrade_cronjob_path)" || return 1
@@ -490,11 +472,11 @@ data:
     }
     {{- include "tracebloc.trainingGateSh" . | nindent 4 }}
 
-    log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE repo=$REPO_URL"
+    log "release=$TRACEBLOC_RELEASE_NAME namespace=$TRACEBLOC_RELEASE_NAMESPACE repo=$TRACEBLOC_HELM_REPO_URL"
 
     UPGRADE_FAIL_REASON=download_failed
-    helm repo add "$REPO_NAME" "$REPO_URL" >/dev/null
-    helm repo update "$REPO_NAME" >/dev/null
+    helm repo add "$TRACEBLOC_HELM_REPO_NAME" "$TRACEBLOC_HELM_REPO_URL" >/dev/null
+    helm repo update "$TRACEBLOC_HELM_REPO_NAME" >/dev/null
     UPGRADE_FAIL_REASON=helm_error
 
     # auto-recover from an interrupted upgrade BEFORE attempting another
@@ -541,10 +523,10 @@ data:
     }
 
     # The chart version of revision REV in the same history body, split into
-    # records the same way: the `"chart":"<CHART_NAME>-<version>"` it names, or
+    # records the same way: the `"chart":"<TRACEBLOC_CHART_NAME>-<version>"` it names, or
     # nothing.
     revision_chart_version() {  # HISTORY_JSON REV
-      printf '%s' "$1" | tr -d '\n' | awk -v rev="$2" -v chart="$CHART_NAME" '{
+      printf '%s' "$1" | tr -d '\n' | awk -v rev="$2" -v chart="$TRACEBLOC_CHART_NAME" '{
         n = split($0, recs, /\{[ ]*"revision":[ ]*/)
         for (i = 2; i <= n; i++) {
           r = recs[i]
@@ -557,7 +539,7 @@ data:
       }'
     }
 
-    STATUS="$(helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" 2>/dev/null \
+    STATUS="$(helm status "$TRACEBLOC_RELEASE_NAME" -n "$TRACEBLOC_RELEASE_NAMESPACE" 2>/dev/null \
       | awk '/^STATUS:/ {print $2; exit}')"
     case "$STATUS" in
       pending-upgrade|pending-rollback)
@@ -572,13 +554,13 @@ data:
         # just-attempted upgrade is seconds/minutes old. Only reclaim a release
         # that has sat here past the threshold. Read the release JSON once (for
         # both the age and the discarded revision number).
-        INFO_JSON="$(helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" -o json 2>/dev/null || true)"
+        INFO_JSON="$(helm status "$TRACEBLOC_RELEASE_NAME" -n "$TRACEBLOC_RELEASE_NAMESPACE" -o json 2>/dev/null || true)"
         AGE="$(pending_age_seconds "$INFO_JSON")"
         # Guard: only an unsigned/negative integer is a usable age. A negative
         # age (node clock skew — the pending revision looks "in the future")
         # falls through as "too recent", which is the safe side: never clobber.
         case "$AGE" in ''|*[!0-9-]*) AGE="" ;; esac
-        if [ -n "$AGE" ] && [ "$AGE" -ge "$WEDGE_MIN_AGE_SECONDS" ]; then
+        if [ -n "$AGE" ] && [ "$AGE" -ge "$TRACEBLOC_WEDGE_MIN_AGE_SECONDS" ]; then
           # awk-only; `[0-9][0-9]*` (>=1 digit, no quote) so this matches only the
           # bare-number top-level release "version":N, never a quoted
           # chart-metadata "version":"1.2.3" that may also appear in the JSON.
@@ -605,29 +587,29 @@ data:
           # never land in the JSON body; unique per tick, as atomic_upgrade's are.
           _hist_err="$(mktemp "${TMPDIR:-/tmp}/auto-upgrade-history-err.XXXXXX")"
           _hist_rc=0
-          HISTORY_JSON="$(helm history "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" -o json 2>"$_hist_err")" \
+          HISTORY_JSON="$(helm history "$TRACEBLOC_RELEASE_NAME" -n "$TRACEBLOC_RELEASE_NAMESPACE" -o json 2>"$_hist_err")" \
             || _hist_rc=$?
           _hist_msg="$(tail -n 1 "$_hist_err" 2>/dev/null || true)"
           rm -f "$_hist_err"
           if [ "$_hist_rc" -ne 0 ]; then
-            log "ERROR: release '$RELEASE_NAME' is stuck in '$STATUS', but its history could not"
+            log "ERROR: release '$TRACEBLOC_RELEASE_NAME' is stuck in '$STATUS', but its history could not"
             log "be read (helm history exited $_hist_rc: $_hist_msg)."
             log "This is a failed read, not an empty history. Refusing the rollback: without the"
             log "history there is no known-good revision to return to. Check that"
             log "this CronJob can read the release, then recover by hand:"
-            log "  helm history $RELEASE_NAME -n $RELEASE_NAMESPACE"
-            log "  helm rollback $RELEASE_NAME <revision> -n $RELEASE_NAMESPACE --wait"
+            log "  helm history $TRACEBLOC_RELEASE_NAME -n $TRACEBLOC_RELEASE_NAMESPACE"
+            log "  helm rollback $TRACEBLOC_RELEASE_NAME <revision> -n $TRACEBLOC_RELEASE_NAMESPACE --wait"
             exit 1
           fi
           TARGET_REV="$(last_deployed_revision "$HISTORY_JSON")"
           if [ -z "$TARGET_REV" ]; then
-            log "ERROR: release '$RELEASE_NAME' is stuck in '$STATUS' and its history names no"
+            log "ERROR: release '$TRACEBLOC_RELEASE_NAME' is stuck in '$STATUS' and its history names no"
             log "'deployed' revision to return to. Refusing the rollback: a revision-less one"
             log "would land on whatever revision precedes the wedge, which may be the failed"
             log "upgrade itself. Recover by hand: read the history, then roll"
             log "back to the last revision that worked:"
-            log "  helm history $RELEASE_NAME -n $RELEASE_NAMESPACE"
-            log "  helm rollback $RELEASE_NAME <revision> -n $RELEASE_NAMESPACE --wait"
+            log "  helm history $TRACEBLOC_RELEASE_NAME -n $TRACEBLOC_RELEASE_NAMESPACE"
+            log "  helm rollback $TRACEBLOC_RELEASE_NAME <revision> -n $TRACEBLOC_RELEASE_NAMESPACE --wait"
             exit 1
           fi
           # The killed upgrade's versions, for the event: the revision it goes back
@@ -642,14 +624,14 @@ data:
           # keeps this Pod's log readable so an operator can see
           # what was undone and recover the values.
           log "=========================== auto-upgrade WARNING ==========================="
-          log "release '$RELEASE_NAME' has been stuck in '$STATUS' for ${AGE}s (>= threshold"
-          log "${WEDGE_MIN_AGE_SECONDS}s): a previous 'helm upgrade' is presumed killed"
+          log "release '$TRACEBLOC_RELEASE_NAME' has been stuck in '$STATUS' for ${AGE}s (>= threshold"
+          log "${TRACEBLOC_WEDGE_MIN_AGE_SECONDS}s): a previous 'helm upgrade' is presumed killed"
           log "mid-operation and ABANDONED. Rolling back to the last deployed revision"
           log "(revision $TARGET_REV) so auto-upgrade can proceed. This DISCARDS the values from the"
           log "interrupted upgrade${PENDING_REV:+ (revision $PENDING_REV)}. If that upgrade was intentional,"
           log "recover its values BEFORE the next tick re-applies chart defaults:"
-          log "  helm history $RELEASE_NAME -n $RELEASE_NAMESPACE"
-          log "  helm get values $RELEASE_NAME -n $RELEASE_NAMESPACE${PENDING_REV:+ --revision $PENDING_REV}"
+          log "  helm history $TRACEBLOC_RELEASE_NAME -n $TRACEBLOC_RELEASE_NAMESPACE"
+          log "  helm get values $TRACEBLOC_RELEASE_NAME -n $TRACEBLOC_RELEASE_NAMESPACE${PENDING_REV:+ --revision $PENDING_REV}"
           log "============================================================================"
           # Wait on it: the rollback is this tick's only readiness
           # check on the revision it restores. The wait mode is the upgrade's
@@ -660,14 +642,14 @@ data:
           case "$HELM_VERSION_SHORT" in
             v[0-9]*) [ -n "$ROLLBACK_WAIT_FLAG" ] || ROLLBACK_WAIT_FLAG="--wait" ;;
           esac
-          if ! helm rollback "$RELEASE_NAME" "$TARGET_REV" -n "$RELEASE_NAMESPACE" \
+          if ! helm rollback "$TRACEBLOC_RELEASE_NAME" "$TARGET_REV" -n "$TRACEBLOC_RELEASE_NAMESPACE" \
               ${ROLLBACK_WAIT_FLAG:+"$ROLLBACK_WAIT_FLAG"} \
-              --timeout "$UPGRADE_TIMEOUT"; then
-            log "ERROR: rollback of '$RELEASE_NAME' to revision $TARGET_REV failed; not upgrading this tick"
+              --timeout "$TRACEBLOC_UPGRADE_TIMEOUT"; then
+            log "ERROR: rollback of '$TRACEBLOC_RELEASE_NAME' to revision $TARGET_REV failed; not upgrading this tick"
             exit 1
           fi
           # The tick ENDS here. The rollback just waited up to
-          # $UPGRADE_TIMEOUT, and an `--atomic` upgrade can wait that twice more,
+          # $TRACEBLOC_UPGRADE_TIMEOUT, and an `--atomic` upgrade can wait that twice more,
           # which is past the Job's activeDeadlineSeconds (sized for ONE
           # `--atomic`, below): killed mid-op, the release would be wedged again.
           # The next hourly tick finds it `deployed` and upgrades as usual.
@@ -681,7 +663,7 @@ data:
           # re-evaluates: by then the upgrade has either completed (STATUS:
           # deployed → normal upgrade path) or aged past the threshold (→ handled
           # above as a genuine wedge).
-          log "release is '$STATUS' but only ${AGE:-an indeterminate number of} seconds old (< threshold ${WEDGE_MIN_AGE_SECONDS}s): an upgrade is most likely in progress. NOT rolling back — skipping this tick so an in-flight upgrade is never clobbered."
+          log "release is '$STATUS' but only ${AGE:-an indeterminate number of} seconds old (< threshold ${TRACEBLOC_WEDGE_MIN_AGE_SECONDS}s): an upgrade is most likely in progress. NOT rolling back — skipping this tick so an in-flight upgrade is never clobbered."
           exit 0
         fi
         ;;
@@ -690,30 +672,30 @@ data:
         # rollback failed (exit 3). Not a wedge -- helm upgrades over `failed`
         # -- so the tick proceeds, but it says so, so the state is never
         # readable only from `helm status`.
-        log "WARNING: release '$RELEASE_NAME' is 'failed' before this tick (an earlier upgrade or its rollback failed; see helm history $RELEASE_NAME -n $RELEASE_NAMESPACE); attempting the upgrade over it"
+        log "WARNING: release '$TRACEBLOC_RELEASE_NAME' is 'failed' before this tick (an earlier upgrade or its rollback failed; see helm history $TRACEBLOC_RELEASE_NAME -n $TRACEBLOC_RELEASE_NAMESPACE); attempting the upgrade over it"
         ;;
       uninstalling)
         # A killed `helm uninstall` leaves this state. We can't clear it here — the
         # CronJob is part of the release, so completing the uninstall would delete
         # itself — but skip cleanly rather than fall through to a `helm upgrade`
         # that fails every tick with an opaque "another operation is in progress".
-        log "release is mid-uninstall ('uninstalling'); skipping this tick until it settles (run 'helm uninstall $RELEASE_NAME -n $RELEASE_NAMESPACE' to finish it)"
+        log "release is mid-uninstall ('uninstalling'); skipping this tick until it settles (run 'helm uninstall $TRACEBLOC_RELEASE_NAME -n $TRACEBLOC_RELEASE_NAMESPACE' to finish it)"
         exit 0
         ;;
     esac
 
     # Latest published version.
-    LATEST="$(helm search repo "${REPO_NAME}/${CHART_NAME}" -o yaml | parse_repo_version)"
+    LATEST="$(helm search repo "${TRACEBLOC_HELM_REPO_NAME}/${TRACEBLOC_CHART_NAME}" -o yaml | parse_repo_version)"
 
     # Currently deployed chart version. `helm list -o yaml` emits
     # `chart: client-<version>` for the matching release.
-    CURRENT_CHART="$(helm list -n "$RELEASE_NAMESPACE" \
-      --filter "^${RELEASE_NAME}\$" -o yaml \
+    CURRENT_CHART="$(helm list -n "$TRACEBLOC_RELEASE_NAMESPACE" \
+      --filter "^${TRACEBLOC_RELEASE_NAME}\$" -o yaml \
       | awk '/^[[:space:]]*chart:/ {print $2; exit}')"
-    CURRENT="${CURRENT_CHART#${CHART_NAME}-}"
+    CURRENT="${CURRENT_CHART#${TRACEBLOC_CHART_NAME}-}"
 
     if [ -z "$LATEST" ]; then
-      log "ERROR: could not resolve latest chart version from $REPO_URL"
+      log "ERROR: could not resolve latest chart version from $TRACEBLOC_HELM_REPO_URL"
       exit 1
     fi
     if [ -z "$CURRENT" ] || [ "$CURRENT" = "$CURRENT_CHART" ]; then
@@ -779,13 +761,13 @@ data:
     # those edges stay client-side (3-way merge); see docs/MIGRATIONS.md.
     # Through atomic_upgrade: same argv, its failure classified. The chart is the
     # file chart_check verified, never a second download.
-    atomic_upgrade "$CURRENT" "$LATEST" helm upgrade "$RELEASE_NAME" "$CHECKED_CHART" \
-      --namespace "$RELEASE_NAMESPACE" \
+    atomic_upgrade "$CURRENT" "$LATEST" helm upgrade "$TRACEBLOC_RELEASE_NAME" "$CHECKED_CHART" \
+      --namespace "$TRACEBLOC_RELEASE_NAMESPACE" \
       --reset-then-reuse-values \
       --atomic \
       ${HELM_WAIT_FLAG:+"$HELM_WAIT_FLAG"} \
       --cleanup-on-fail \
-      --timeout "$UPGRADE_TIMEOUT"
+      --timeout "$TRACEBLOC_UPGRADE_TIMEOUT"
     log "upgrade complete: $CURRENT -> $LATEST (signature checked)"
   {{- /* Sigstore's trust keys for chart_check, beside the script (autoUpgrade.cosign). */}}
   {{- range $key, $file := dict "sigstore-fulcio.crt" "files/sigstore/fulcio.crt" "sigstore-rekor.pub" "files/sigstore/rekor.pub" "sigstore-ctfe.pub" "files/sigstore/ctfe.pub" }}

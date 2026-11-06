@@ -34,9 +34,8 @@ data:
     pid_filename none
     access_log stdio:/dev/stdout
     cache_log stdio:/dev/stderr
-    # No peers/cache → the ICMP pinger (needs CAP_NET_RAW, which the pod drops) is
-    # just noise/errors. Disable it.
-    pinger_enable off
+    # No `pinger_enable`: the image's squid is built without ICMP, so there is no
+    # pinger to turn off and squid rejects the directive with an ERROR at every start.
 
     acl SSL_ports port 443
     acl CONNECT method CONNECT

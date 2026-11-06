@@ -15,10 +15,8 @@
 #  once per machine, to enable WSL, and the installer names that one step):
 #    irm https://tracebloc.io/i.ps1 | iex
 #
-#  Environment variable overrides (optional). Each TRACEBLOC_ name's older
-#  spelling -- the name without TRACEBLOC_ (CLUSTER_NAME), or TB_ in its place
-#  (TB_STORAGE_MODE) -- still works until 2026-12-31; a non-empty TRACEBLOC_
-#  one wins:
+#  Environment variable overrides (optional), read under their TRACEBLOC_ names
+#  and the legacy aliases listed here:
 #    TRACEBLOC_SUBSTRATE=k3s     default: k3s
 #                                (the Kubernetes runtime to set up: native k3s on
 #                                Linux and inside WSL, and k3s in Apple's VM on a Mac
@@ -35,7 +33,6 @@
 #    TB_NAMESPACE=myns           legacy alias for TRACEBLOC_NAMESPACE, remove_by 2026-12-31
 #    TRACEBLOC_HELM_VERSION=v4.2.3  default: v4.2.3  (Helm release tag; "latest" resolves at install time)
 #    TRACEBLOC_HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
-#    HOST_DATA_DIR=~/.tracebloc  legacy alias for TRACEBLOC_HOST_DATA_DIR, remove_by 2026-12-31
 #    TRACEBLOC_STORAGE_MODE=hostpath  default: node-local
 #                                node-local (default) stores datasets on k3s local-path
 #                                INSIDE the node — no ~/.tracebloc host dirs, wiped on
@@ -54,7 +51,7 @@
 #                                guard — same as --reuse-data / --wipe-data.
 #                                A new install onto a machine that still holds old
 #                                data STOPS and asks by default rather than
-#                                silently adopting it; a fresh HOST_DATA_DIR (or
+#                                silently adopting it; a fresh TRACEBLOC_HOST_DATA_DIR (or
 #                                --data-dir=PATH) sidesteps the prompt.
 #    TRACEBLOC_SKIP_LEFTOVER_GUARD=1  bypass the leftover-data guard entirely
 #    TRACEBLOC_SKIP_REBOOT_PROMPT=1 (Linux) skip "Reboot now?" after NVIDIA driver install
@@ -372,7 +369,7 @@ main() {
   # The chart step e installs, checked against tracebloc's signature while nothing on
   # the machine has changed yet (verify_client_chart), so a refusal can say so.
   verify_client_chart --before-deps
-  echo ""; echo ""
+  step_end a
 
   # ── b) Install dependencies ──────────────────────────────────────────────
   #     Prerequisites (the cluster runtime + system tools) AND the tracebloc CLI. The CLI moved
@@ -399,7 +396,7 @@ main() {
     install_tracebloc_cli
     require_tracebloc_cli_floor
   fi
-  echo ""; echo ""
+  step_end b
 
   # ── c) Create your secure environment ────────────────────────────────────
   step_header c "Creating your secure environment"

@@ -219,8 +219,7 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
   The meter reports the client's storage -- every filesystem this client stores
   on -- and `hostStoragePath` above can only name one. An install that relocated
   its datasets off the local tree therefore has a disk the meter cannot see, and
-  that is not a narrow case: it is exactly the TRACEBLOC_HOST_DATASET_DIR flow
-  (old name HOST_DATASET_DIR still works),
+  that is not a narrow case: it is exactly the TRACEBLOC_HOST_DATASET_DIR flow,
   where the installer bind-mounts the customer's network volume at /tracebloc-data
   and points `hostPath.datasetPath` there, while mysql + logs stay local. Both are
   consumed client storage; measuring either alone reports a plausible wrong number.
@@ -350,8 +349,7 @@ client-pvc
   hostPath base for the DATASET (shared-images) PV ONLY. Defaults to the
   historical local path /tracebloc so installs without a network dataset mount
   render byte-identically. When the installer bind-mounts a customer network
-  (NFS) dir at /tracebloc-data (TRACEBLOC_HOST_DATASET_DIR set -- old name
-  HOST_DATASET_DIR still works), it passes
+  (NFS) dir at /tracebloc-data (TRACEBLOC_HOST_DATASET_DIR set), it passes
   hostPath.datasetPath=/tracebloc-data to relocate datasets onto that mount,
   while mysql + logs ALWAYS stay on the local /tracebloc tree (InnoDB over NFS
   is unsafe). The /<release>/data suffix is appended here.

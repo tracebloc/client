@@ -24,7 +24,7 @@
 #               or any other partial state).
 #               cli-behind-latest is the ONE degraded reason where the
 #               environment is fully healthy: it fires ONLY under an explicit
-#               `tracebloc upgrade` (TB_UPGRADE_CLI) when the CLI is above the
+#               `tracebloc upgrade` (TRACEBLOC_UPGRADE_CLI) when the CLI is above the
 #               floor but behind the latest release.
 # =============================================================================
 
@@ -151,12 +151,12 @@ _assess_cli_outdated() {
 # — which re-runs this installer — found the machine "healthy" and changed
 # nothing. The nag named a command that could not carry it out.
 #
-# GATED on TB_UPGRADE_CLI so it is INERT on every ordinary installer run. That
+# GATED on TRACEBLOC_UPGRADE_CLI so it is INERT on every ordinary installer run. That
 # matters twice over: it keeps this classifier free (no "what is latest?" lookup
 # on a normal run — the property _assess_cli_outdated's floor was chosen to
 # preserve), and it means a routine re-run is never reclassified by it. The
 # comparison itself does NO network: `tracebloc upgrade` already resolved latest
-# and passed it as TB_CLI_LATEST, so this is a pure version compare.
+# and passed it as TRACEBLOC_CLI_LATEST, so this is a pure version compare.
 #
 # Fail SAFE toward updating: under an explicit upgrade an unknown/unparseable
 # latest (a copy-pasted manual retry carries the flag but not the version) or an
@@ -164,15 +164,14 @@ _assess_cli_outdated() {
 # which is exactly what the user asked for. Only a latest we can read AND that the
 # installed CLI already meets returns "not behind".
 _assess_cli_behind_latest() {
-  # TB_UPGRADE_CLI / TB_CLI_LATEST are read FIRST, their TRACEBLOC_ spellings
-  # only when the TB_ one is unset or blank. Every released CLI sets the TB_
-  # names and older CLIs set nothing else, so what the CLI set must outrank a
-  # TRACEBLOC_ value left in the user's shell.
-  [[ "${TB_UPGRADE_CLI:-${TRACEBLOC_UPGRADE_CLI:-0}}" == 1 ]] || return 1
+  # TRACEBLOC_UPGRADE_CLI / TRACEBLOC_CLI_LATEST are read first, their TB_
+  # spellings only when the TRACEBLOC_ one is unset or blank: CLIs that set only
+  # the TB_ names still reach this live installer.
+  [[ "${TRACEBLOC_UPGRADE_CLI:-${TB_UPGRADE_CLI:-0}}" == 1 ]] || return 1
   local bin ver latest
   bin="$(_assess_cli_bin)" || return 1     # absent — cli-missing already covers it
   ver="$(_assess_cli_version "$bin")"
-  latest="${TB_CLI_LATEST:-${TRACEBLOC_CLI_LATEST:-}}"; latest="${latest#v}"
+  latest="${TRACEBLOC_CLI_LATEST:-${TB_CLI_LATEST:-}}"; latest="${latest#v}"
   # Can't prove current (missing/unparseable latest, or unreadable version) -> update.
   [[ "$latest" =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 0
   [[ "$ver"    =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 0
@@ -355,7 +354,7 @@ _assess_classify_release() {
   # it without the degraded lines, and main() runs the full install, whose step b
   # updates the CLI. Ordered AFTER the floor check so a below-floor CLI stays
   # cli-outdated (a mandatory full reinstall), and inert on ordinary runs because
-  # _assess_cli_behind_latest gates itself on TB_UPGRADE_CLI.
+  # _assess_cli_behind_latest gates itself on TRACEBLOC_UPGRADE_CLI.
   if [[ "$cli_here" == 1 ]] && _assess_cli_behind_latest; then
     INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cli-behind-latest"
     return 0

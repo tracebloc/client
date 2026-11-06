@@ -43,7 +43,7 @@ sudo ubuntu-drivers install --gpgpu nvidia:580-server
 **Without administrator rights.** An administrator runs this once, with your user name in place of `<user>`:
 
 ```bash
-export TRACEBLOC_SUBSTRATE=k3s TB_PREPARE_USER=<user> && curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host
+export TRACEBLOC_SUBSTRATE=k3s TRACEBLOC_PREPARE_USER=<user> && curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host
 ```
 
 This sets up k3s and adds you to the `tracebloc` group. Log out and back in, then run the installer with no `sudo`. To list the commands it would run as root, without running any, add `--print` after `prepare-host`.
@@ -202,7 +202,7 @@ On Windows, the installer sets up **k3s in tracebloc's own WSL distro**. This is
 | Processor | 64-bit `amd64` (x64): tracebloc's distro image is built for it |
 | WSL | 2.5 or later. If it is missing or older, an administrator turns it on once (see below). |
 | Administrator rights | Once, for that step. Everything after it runs as the signed-in user, and the installer refuses to run as the SYSTEM account. |
-| Memory | At least 8 GB in WSL's VM: the installer warns below that, because a smaller VM cannot fit one training run beside the tracebloc platform. 10 GB in the VM fits the smallest training run, and 16 GB is recommended. WSL gives its VM half of the machine's memory by default; `memory=` under `[wsl2]` in `%UserProfile%\.wslconfig`, WSL's own setting, changes that. |
+| Memory | At least 8 GB in WSL's VM: the installer warns below that, because a smaller VM cannot fit one training run beside the tracebloc platform. 10 GB in the VM fits the smallest training run, and 16 GB is recommended. WSL gives its VM half of the machine's memory by default; `memory=` under `[wsl2]` in `%UserProfile%\.wslconfig`, WSL's own setting, changes that. When a `memory=` set there leaves Windows too little memory, the installer warns, says how much is left, and goes on: lower the value, then run `wsl --shutdown`. |
 | Disk | At least 30 GB free on the drive that holds the distro. The distro's disk is capped at what is free there, less 20 GB that is left to Windows. The installer stops if that leaves less than 10 GB for the distro. |
 | CPU | 2 cores, 4 recommended |
 | Network | Outbound HTTPS (port 443) to the hosts below |

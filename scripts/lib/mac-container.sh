@@ -2186,7 +2186,7 @@ _mac_ct_runner_gpu_ready() {
       success "GPU training set up" ;;
     no)
       TRACEBLOC_MAC_GPU_TRAINING_OFF=1
-      log "The tracebloc runner: the chart sends it no GPU training (no ConfigMap ${TB_MAC_CT_RUNNER_BUNDLE_CM}: appleGpuRunner.gpuTraining is off, or this environment pins no macOS engine bundle), so trainings on this Mac run on the CPU." ;;
+      log "The tracebloc runner: GPU training on Macs is switched off for now; training runs on the CPU (the chart sends it no GPU training: no ConfigMap ${TB_MAC_CT_RUNNER_BUNDLE_CM}, so appleGpuRunner.gpuTraining is off or this environment pins no macOS engine bundle)." ;;
     *)
       log "The tracebloc runner: whether the chart sends it GPU trainings cannot be told, so the summary does not name the Apple GPU." ;;
   esac

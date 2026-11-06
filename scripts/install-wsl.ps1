@@ -692,6 +692,72 @@ function Assert-WslNetworkingNat {
   }
 }
 
+# WSL's memory cap, from memory= in the [wsl2] section of the user's own .wslconfig,
+# read as Assert-WslNetworkingNat reads networkingMode. Bytes, or $null: no file, no
+# key, or a value this cannot read (logged), all of which leave WSL's default, half
+# the machine's memory, which leaves Windows the other half.
+function Get-WslMemoryCap {
+  param([string]$Path = (Join-Path $env:USERPROFILE '.wslconfig'))
+  if (-not (Test-Path -LiteralPath $Path)) { return $null }
+  try { $text = [System.IO.File]::ReadAllText($Path) } catch { Log "Memory: could not read $Path ($($_.Exception.Message))."; return $null }
+  $section = ''
+  $cap = $null
+  foreach ($raw in ($text -split "`r?`n")) {
+    $line = $raw.Trim()
+    if (-not $line -or $line.StartsWith('#') -or $line.StartsWith(';')) { continue }
+    if ($line -match '^\[([^\]]*)\]\s*([#;].*)?$') { $section = $Matches[1].Trim(); continue }
+    $eq = $line.IndexOf('=')
+    if ($section -ine 'wsl2' -or $eq -lt 0) { continue }
+    if ($line.Substring(0, $eq).Trim() -ine 'memory') { continue }
+    $value = $line.Substring($eq + 1).Trim().Trim('"')
+    # WSL reads a bare number as bytes.
+    if ($value -notmatch '^(\d+(\.\d+)?)\s*(([KMGT])B?|B)?$') { Log "Memory: memory=$value in $Path is not a size this reads."; $cap = $null; continue }
+    $unit = switch ("$($Matches[4])") { 'K' { 1KB } 'M' { 1MB } 'G' { 1GB } 'T' { 1TB } default { 1 } }
+    try { $cap = [long]([double]$Matches[1] * $unit) } catch { Log "Memory: memory=$value in $Path is too large to read."; $cap = $null; continue }
+  }
+  return $cap
+}
+
+# This machine's memory, in bytes: its total and what is available now. $null when
+# Windows will not say.
+function Get-HostMemory {
+  try {
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    return [pscustomobject]@{ TotalBytes = [long]$os.TotalVisibleMemorySize * 1KB; AvailableBytes = [long]$os.FreePhysicalMemory * 1KB }
+  } catch {
+    Log "Memory: could not read this computer's memory ($($_.Exception.Message))."
+    return $null
+  }
+}
+
+# A warning, never a stop, when the user's own memory= leaves Windows less than
+# $HostMemoryFloorBytes: of the total, or, for a cap over WSL's default half, of what
+# is available now with the platform running. At or under half, low available memory
+# is other programs', not the cap's, as it is without memory=, and nothing is said.
+$HostMemoryFloorBytes = 2GB
+function Format-MemorySize([long]$Bytes) {
+  if ($Bytes -lt 1GB) { return "$([math]::Round($Bytes / 1MB)) MB" }
+  return "$([math]::Round($Bytes / 1GB, 1)) GB"
+}
+function Write-WslMemoryCapWarning {
+  $cap = Get-WslMemoryCap
+  if ($null -eq $cap) { return }
+  $mem = Get-HostMemory
+  if ($null -eq $mem -or $mem.TotalBytes -le 0) { return }
+  $headroom = [long]($mem.TotalBytes - $cap)
+  Log "Memory: WSL capped at $cap bytes by memory=; this computer has $($mem.TotalBytes) bytes, $($mem.AvailableBytes) available."
+  $capOverHalf = $cap -gt [long]($mem.TotalBytes / 2)
+  if ($headroom -ge $HostMemoryFloorBytes -and -not ($capOverHalf -and $mem.AvailableBytes -lt $HostMemoryFloorBytes)) { return }
+  # A cap at or over the total lets WSL take all of it; what is left is then what is free now.
+  $left = [long]$mem.AvailableBytes
+  if ($headroom -gt 0) { $left = [math]::Min($left, $headroom) }
+  Write-SectionEnd
+  Warn "$(Format-MemorySize $left) of memory left for Windows $Dot WSL is capped at $(Format-MemorySize ([math]::Min($cap, $mem.TotalBytes)))"
+  Hint 'Lower memory= under [wsl2] in ~\.wslconfig, then run'
+  Hint 'this (it stops every WSL distro):'
+  Hint '  wsl --shutdown'
+}
+
 # =============================================================================
 #  2. The distro image: the WSL distro's root filesystem.
 #
@@ -4376,6 +4442,9 @@ function Invoke-WslInstall {
     # The core has said why. 1, never its own code: 2 is the restart code.
     return 1
   }
+  # The user's own WSL memory cap, measured with the platform running. Advice only: it
+  # never turns a finished install into a failure.
+  try { Write-WslMemoryCapWarning } catch { Log "Memory: could not check WSL's memory cap ($($_.Exception.Message))." }
   # The client run exits 0 connected or still starting. Last, after the record: a
   # Ctrl-C stops this script, as anywhere in it, and then costs only the example.
   Invoke-HostExample -Cli $script:HostSignedInCli -ClientState $script:HostClientState -KubeContext $script:HostKubeContext

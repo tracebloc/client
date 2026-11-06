@@ -2,6 +2,28 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## A secure environment last updated before 1.9.180 is reinstalled
+
+**What changed.** The chart reads the credentials in `<release>-secrets` and
+`mysql-credentials` under their `TRACEBLOC_` keys only. A chart older than
+1.9.180 wrote them under the older names alone, so a secure environment that has
+not been updated since then holds none of the `TRACEBLOC_` keys. The upgrade refuses
+it rather than generating new MySQL passwords over a database that still has the
+old ones: the release stays as it is, and the error (in the auto-upgrade Job's
+log, or from your `helm upgrade`) says the Secret has no `TRACEBLOC_CLIENT_ID`
+and `TRACEBLOC_CLIENT_PASSWORD` keys. Setting `clientId` and `clientPassword`
+does not get past it.
+
+**What you have to do.** Nothing, if the secure environment was updated at any time
+since 1.9.180. Otherwise reinstall it: `tracebloc delete`, then run the
+installer again. On a cluster you manage with Helm, `helm uninstall <release> -n
+<ns>`, `kubectl -n <ns> delete pvc mysql-pvc`, then install the chart again
+([docs/INSTALL.md](../docs/INSTALL.md)). Reinstalling deletes the secure
+environment's data, so its datasets are ingested again; use cases and models stay on
+tracebloc. A release Secret you created by hand without the `TRACEBLOC_` keys is
+refused the same way: add `TRACEBLOC_CLIENT_ID` and `TRACEBLOC_CLIENT_PASSWORD`
+to it instead.
+
 ## The auto-upgrade checks each chart's signature
 
 **What changed.** Before every upgrade, the hourly auto-upgrade checks the new
@@ -641,9 +663,8 @@ variant of that config before it is published: each allowlisted FQDN tunnels on
 denied. The tag reads `<package>-tb.<N>`: the Alpine package version, and N
 counts tracebloc builds of it.
 
-One new line in the gateway's log at every start is expected and harmless:
-`ERROR: 'pinger_enable' requires --enable-icmp`. Alpine builds squid without ICMP,
-and the chart already turns the pinger off; squid starts normally.
+Alpine builds squid without ICMP, so the chart no longer sets `pinger_enable`
+and the gateway's log has no error line at start.
 
 **What you have to do: nothing, on a default install.**
 

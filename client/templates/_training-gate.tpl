@@ -14,8 +14,8 @@
                             when it cannot be read
     gate_streak_write N     record N; non-zero on failure
     gate_streak_clear       drop the record; non-zero on failure
-  and sets TRACEBLOC_RELEASE_NAMESPACE (or the legacy RELEASE_NAMESPACE, read only
-  under a blank canonical) plus the three values tracebloc.trainingGateEnv renders.
+  and sets TRACEBLOC_RELEASE_NAMESPACE plus the three values
+  tracebloc.trainingGateEnv renders.
 */}}
 {{- define "tracebloc.trainingGateSh" -}}
 # --- defer while training: begin (tracebloc.trainingGateSh) -----------------
@@ -68,14 +68,14 @@ training_newest_finish_age() {
 
 # Is the edge training? Prints one reason line; returns 0 training, 1 idle,
 # 2 cannot tell. Training is a training pod that has not finished, or one that
-# finished inside TRAINING_FINISHED_WINDOW_SECONDS: between two cycles of a run
+# finished inside TRACEBLOC_TRAINING_FINISHED_WINDOW_SECONDS: between two cycles of a run
 # no pod runs, and jobs-manager starts the next one as soon as the cycle closes.
 training_activity_verdict() {
-  case "${TRAINING_FINISHED_WINDOW_SECONDS:-}" in
-    ''|*[!0-9]*) echo "the finished-pod window reads '${TRAINING_FINISHED_WINDOW_SECONDS:-}', not a number of seconds"; return 2 ;;
+  case "${TRACEBLOC_TRAINING_FINISHED_WINDOW_SECONDS:-}" in
+    ''|*[!0-9]*) echo "the finished-pod window reads '${TRACEBLOC_TRAINING_FINISHED_WINDOW_SECONDS:-}', not a number of seconds"; return 2 ;;
   esac
-  _tv_ns="${TRACEBLOC_RELEASE_NAMESPACE:-${RELEASE_NAMESPACE:-}}"
-  [ -n "$_tv_ns" ] || { echo "neither TRACEBLOC_RELEASE_NAMESPACE nor RELEASE_NAMESPACE names the release namespace"; return 2; }
+  _tv_ns="${TRACEBLOC_RELEASE_NAMESPACE:-}"
+  [ -n "$_tv_ns" ] || { echo "TRACEBLOC_RELEASE_NAMESPACE does not name the release namespace"; return 2; }
   _tv_pods="/api/v1/namespaces/${_tv_ns}/pods?labelSelector=${TRAINING_POD_SELECTOR}"
   _tv_body="$(kube_raw_get "${_tv_pods}&fieldSelector=status.phase%21%3DSucceeded%2Cstatus.phase%21%3DFailed&limit=1" 2>&1)" \
     || { echo "cannot list the training pods: $(printf '%s\n' "$_tv_body" | tail -n 1)"; return 2; }
@@ -91,11 +91,11 @@ training_activity_verdict() {
     || { echo "the finished training pod list read back is not a PodList"; return 2; }
   _tv_age="$(printf '%s' "$_tv_body" | training_newest_finish_age)"
   case "$_tv_age" in ''|*[!0-9-]*) _tv_age="" ;; esac
-  if [ -n "$_tv_age" ] && [ "$_tv_age" -lt "$TRAINING_FINISHED_WINDOW_SECONDS" ]; then
-    echo "a training pod finished ${_tv_age}s ago, inside the ${TRAINING_FINISHED_WINDOW_SECONDS}s window (a run between two cycles)"
+  if [ -n "$_tv_age" ] && [ "$_tv_age" -lt "$TRACEBLOC_TRAINING_FINISHED_WINDOW_SECONDS" ]; then
+    echo "a training pod finished ${_tv_age}s ago, inside the ${TRACEBLOC_TRAINING_FINISHED_WINDOW_SECONDS}s window (a run between two cycles)"
     return 0
   fi
-  echo "no training pod is running or pending, and none finished in the last ${TRAINING_FINISHED_WINDOW_SECONDS}s"
+  echo "no training pod is running or pending, and none finished in the last ${TRACEBLOC_TRAINING_FINISHED_WINDOW_SECONDS}s"
   return 1
 }
 
@@ -106,13 +106,13 @@ training_activity_verdict() {
 # job did before this gate. After VALUES.maxDeferrals in a row it goes ahead anyway.
 training_gate() {
   _tg_what="$1"; _tg_values="$2"
-  if [ "${TRAINING_DEFER_ENABLED:-}" != "true" ]; then
+  if [ "${TRACEBLOC_TRAINING_DEFER_ENABLED:-}" != "true" ]; then
     log "${_tg_values}.enabled is not true: going ahead with $_tg_what without checking for training"
     return 0
   fi
-  case "${TRAINING_DEFER_MAX:-}" in
+  case "${TRACEBLOC_TRAINING_DEFER_MAX:-}" in
     ''|*[!0-9]*|0)
-      log "WARNING: ${_tg_values}.maxDeferrals reads '${TRAINING_DEFER_MAX:-}', not a whole number above 0, so a deferral could not be bounded: going ahead with $_tg_what"
+      log "WARNING: ${_tg_values}.maxDeferrals reads '${TRACEBLOC_TRAINING_DEFER_MAX:-}', not a whole number above 0, so a deferral could not be bounded: going ahead with $_tg_what"
       return 0 ;;
   esac
   _tg_rc=0
@@ -133,8 +133,8 @@ training_gate() {
     return 0
   fi
   case "$_tg_n" in ''|*[!0-9]*) _tg_n=0 ;; esac
-  if [ "$_tg_n" -ge "$TRAINING_DEFER_MAX" ]; then
-    log "BACKSTOP: $_tg_what has waited $_tg_n ticks in a row for training to stop (${_tg_values}.maxDeferrals=$TRAINING_DEFER_MAX): going ahead now, although $_tg_why"
+  if [ "$_tg_n" -ge "$TRACEBLOC_TRAINING_DEFER_MAX" ]; then
+    log "BACKSTOP: $_tg_what has waited $_tg_n ticks in a row for training to stop (${_tg_values}.maxDeferrals=$TRACEBLOC_TRAINING_DEFER_MAX): going ahead now, although $_tg_why"
     gate_streak_clear || log "WARNING: could not clear the recorded deferral count; a stale count only brings the next backstop forward"
     return 0
   fi
@@ -143,7 +143,7 @@ training_gate() {
     log "WARNING: the edge is training ($_tg_why), but deferral $_tg_n could not be recorded, so it could not be bounded: going ahead with $_tg_what"
     return 0
   fi
-  log "DEFERRED: $_tg_what waits, because $_tg_why (deferral $_tg_n of $TRAINING_DEFER_MAX; then it goes ahead anyway). The next tick retries."
+  log "DEFERRED: $_tg_what waits, because $_tg_why (deferral $_tg_n of $TRACEBLOC_TRAINING_DEFER_MAX; then it goes ahead anyway). The next tick retries."
   return 1
 }
 # --- defer while training: end ----------------------------------------------

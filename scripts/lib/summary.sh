@@ -30,10 +30,8 @@ TRACEBLOC_CLIENT_STATE=""
 # Default raised 300 -> 600 so a slow/proxied laptop pulling several GB of
 # images isn't reported "not connected" while still healthily starting. Kept in
 # sync with scripts/spec/facts.env (check-facts.sh); override via
-# TRACEBLOC_READY_TIMEOUT (the legacy READY_TIMEOUT still works, remove_by
-# 2026-12-31; a non-empty canonical wins).
-if [[ -n "${TRACEBLOC_READY_TIMEOUT:-}" ]]; then READY_TIMEOUT="$TRACEBLOC_READY_TIMEOUT"; fi
-READY_TIMEOUT="${READY_TIMEOUT:-600}"
+# TRACEBLOC_READY_TIMEOUT. An inherited READY_TIMEOUT is ignored.
+READY_TIMEOUT="${TRACEBLOC_READY_TIMEOUT:-600}"
 # A run that would end starting with MySQL's first boot still running then waits for
 # it, up to TB_MYSQL_FIRST_BOOT_STALL_S plus two progress lines more (_mysql_first_boot_settle):
 # about 660 s on top of READY_TIMEOUT. TRACEBLOC_MYSQL_FIRST_BOOT_SETTLE=0 turns that off,
@@ -234,6 +232,22 @@ _mysql_client_crashlooping() {
     if [[ "$reason" == CrashLoopBackOff ]] || (( n >= 2 )); then return 0; fi
   done <<<"$rows"
   return 1
+}
+
+# _mysql_crashing_container NS -- the name of a container in mysql-client's pod, init or
+# app, that is crash-looping (waiting in CrashLoopBackOff, or restarted twice or more
+# and not ready: a restart count outlives a recovered or completed container), or no output. An init container such as init-mysql-data that cannot write MySQL's
+# data folder loops before mysql-client's own container ever starts, so
+# _mysql_client_crashlooping alone misses it. Always exits 0.
+_mysql_crashing_container() {
+  local rows name n ready reason
+  rows="$(kubectl get pods -n "$1" -l app=mysql-client --request-timeout=5s \
+    -o 'jsonpath={range .items[*]}{range .status.initContainerStatuses[*]}{.name} {.restartCount} {.ready} {.state.waiting.reason}{"\n"}{end}{range .status.containerStatuses[*]}{.name} {.restartCount} {.ready} {.state.waiting.reason}{"\n"}{end}{end}' 2>/dev/null || true)"
+  while read -r name n ready reason; do
+    [[ "$name" =~ ^[a-z0-9-]+$ && "$n" =~ ^[0-9]+$ ]] || continue
+    if [[ "$reason" == CrashLoopBackOff ]] || { (( n >= 2 )) && [[ "$ready" != true ]]; }; then printf '%s' "$name"; return 0; fi
+  done <<<"$rows"
+  return 0
 }
 
 # A first boot running this long at the end of the run is a stall, not a start: a whole
@@ -453,6 +467,17 @@ _crash_or_pull_summary() {
   echo -e "  ${TB_ERR}✖ Setup didn't finish — ${reason}.${RESET}" >&2
   echo ""
   echo -e "  Inspect:  ${TB_CMD}$(tb_kubectl_shown) get pods -n ${1}${RESET}"
+  echo -e "  Logs:     ${DIM}~/.tracebloc/install-*.log${RESET}"
+  echo -e "  ${DIM}Re-running this installer is safe.${RESET}"
+}
+
+# _mysql_crash_summary NS CONTAINER -- the crash outcome when the loop is in MySQL's
+# pod: names MySQL and the container, and how to read why.
+_mysql_crash_summary() {
+  echo -e "  ${TB_ERR}✖ Setup didn't finish — MySQL is restarting (crash loop in its ${2} container).${RESET}" >&2
+  echo ""
+  echo -e "  See why:  ${TB_CMD}$(tb_kubectl_shown) logs -n ${1} deploy/mysql-client -c ${2}${RESET}"
+  echo -e "  Inspect:  ${TB_CMD}$(tb_kubectl_shown) get pods -n ${1} -l app=mysql-client${RESET}"
   echo -e "  Logs:     ${DIM}~/.tracebloc/install-*.log${RESET}"
   echo -e "  ${DIM}Re-running this installer is safe.${RESET}"
 }
@@ -878,7 +903,7 @@ print_summary() {
   elif [[ "${TRACEBLOC_MAC_GPU_TRAINING_OFF:-}" == 1 ]]; then
     # The runner is ready, but the chart sends it no GPU training (mac-container.sh
     # _mac_ct_runner_gpu_ready, _mac_ct_runner_bundle_rendered): every training runs on the CPU.
-    training="CPU (GPU training on Macs is off for now)"
+    training="CPU (GPU training on Macs is switched off for now)"
   fi
   local ns="${TB_NAMESPACE:-default}"
   local cver; cver="$(_chart_version "$ns")"
@@ -1024,7 +1049,9 @@ print_summary() {
       if [[ "$fb" == "incomplete "* || "$fb" == "never-served "* ]]; then
         _mysql_incomplete_summary "$ns" "${fb%% *}" "${fb#* }"
       else
-        _crash_or_pull_summary "$ns"
+        local mc
+        mc="$(_mysql_crashing_container "$ns")"
+        if [[ -n "$mc" ]]; then _mysql_crash_summary "$ns" "$mc"; else _crash_or_pull_summary "$ns"; fi
       fi
       ;;
     image_pull)

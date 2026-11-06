@@ -136,11 +136,9 @@ spec:
               value: "/home/kubectl"
             - name: TRACEBLOC_NAMESPACE
               value: {{ .Release.Namespace | quote }}
-            {{- /* The Helm RELEASE NAME. Its canonical is TRACEBLOC_RELEASE_NAME, the
-                 spelling the rest of this chart uses for the same value -- NOT
-                 TRACEBLOC_RELEASE, which is the PLATFORM release version the
-                 backend serves on /version/. The script's legacy
-                 name stays RELEASE (remove_by 2026-12-31). */}}
+            {{- /* The Helm release NAME, under the spelling the rest of this
+                 chart uses for the same value -- NOT TRACEBLOC_RELEASE, which is
+                 the PLATFORM release version the backend serves on /version/. */}}
             - name: TRACEBLOC_RELEASE_NAME
               value: {{ .Release.Name | quote }}
             - name: TRACEBLOC_EXPECTED_STORAGE_CLASS
@@ -171,10 +169,8 @@ spec:
             - -c
             - |
               set -u
-              # Canonical TRACEBLOC_ names first, legacy second (remove_by
-              # 2026-12-31); a blank canonical leaves the legacy value as-is.
-              if [ -n "${TRACEBLOC_NAMESPACE:-}" ]; then NAMESPACE="$TRACEBLOC_NAMESPACE"; fi
-              if [ -n "${TRACEBLOC_RELEASE_NAME:-}" ]; then RELEASE="$TRACEBLOC_RELEASE_NAME"; fi
+              # Settings naming: every setting this script reads is the Job's env
+              # under its TRACEBLOC_ name, read directly; `set -u` refuses one it lacks.
               # kubectl in this image does not auto-detect in-cluster config and falls
               # back to localhost:8080: build the kubeconfig from the mounted
               # ServiceAccount (rationale: image-refresh-cronjob.yaml). tokenFile keeps
@@ -185,9 +181,9 @@ spec:
               case "$api_host" in *:*) api_host="[$api_host]" ;; esac
               kubectl config set-cluster in-cluster --server="https://${api_host}:${KUBERNETES_SERVICE_PORT}" --certificate-authority="${SA_DIR}/ca.crt" >/dev/null
               kubectl config set "users.in-cluster.tokenFile" "${SA_DIR}/token" >/dev/null
-              kubectl config set-context in-cluster --cluster=in-cluster --user=in-cluster --namespace="${NAMESPACE}" >/dev/null
+              kubectl config set-context in-cluster --cluster=in-cluster --user=in-cluster --namespace="${TRACEBLOC_NAMESPACE}" >/dev/null
               kubectl config use-context in-cluster >/dev/null
-              KC="kubectl --request-timeout=10s -n ${NAMESPACE}"
+              KC="kubectl --request-timeout=10s -n ${TRACEBLOC_NAMESPACE}"
               # A failed read KEEPS kubectl's stderr. It was sent to
               # /dev/null, so a Forbidden or an unreachable API printed as "MISSING" /
               # '<none>' and the log could not say why. _err prints it on one line, cut
@@ -196,34 +192,23 @@ spec:
               KC_ERR="${TMPDIR:-/tmp}/storage-assertions.kc.err"
               _err() { e=$(tr '\n' ' ' 2>/dev/null < "$KC_ERR"); : > "$KC_ERR"; printf '%.160s' "${e:-kubectl printed no error}"; }
               fail=0
-              # Settings naming: the Job sets each of these under its canonical
-              # TRACEBLOC_ name only, so that is the one read. A blank or absent
-              # canonical leaves the variable as it was, for any default or `set -u`
-              # refusal below.
-              if [ -n "${TRACEBLOC_EXPECTED_STORAGE_CLASS:-}" ]; then EXPECTED_STORAGE_CLASS="$TRACEBLOC_EXPECTED_STORAGE_CLASS"; fi
-              if [ -n "${TRACEBLOC_EXPECTED_PVCS:-}" ]; then EXPECTED_PVCS="$TRACEBLOC_EXPECTED_PVCS"; fi
-              if [ -n "${TRACEBLOC_CHART_HOSTPATH_PVS:-}" ]; then CHART_HOSTPATH_PVS="$TRACEBLOC_CHART_HOSTPATH_PVS"; fi
-              if [ -n "${TRACEBLOC_HOSTPATH_MODE:-}" ]; then HOSTPATH_MODE="$TRACEBLOC_HOSTPATH_MODE"; fi
-              if [ -n "${TRACEBLOC_PV_SCAN:-}" ]; then PV_SCAN="$TRACEBLOC_PV_SCAN"; fi
-              if [ -n "${TRACEBLOC_TIMEOUT_SECONDS:-}" ]; then TIMEOUT_SECONDS="$TRACEBLOC_TIMEOUT_SECONDS"; fi
-              if [ -n "${TRACEBLOC_NODE_LOCAL_PREFIXES:-}" ]; then NODE_LOCAL_PREFIXES="$TRACEBLOC_NODE_LOCAL_PREFIXES"; fi
-              JOB_DATA_CLAIMS="${TRACEBLOC_JOB_DATA_CLAIMS:-}"
+              TRACEBLOC_JOB_DATA_CLAIMS="${TRACEBLOC_JOB_DATA_CLAIMS:-}"
               # _jd CLAIM -- "<PV> <path>" when CLAIM is on the macOS node's job-data
-              # folder (JOB_DATA_CLAIMS), else nothing.
-              _jd() { printf '%s\n' "$JOB_DATA_CLAIMS" | while read -r c v p; do if [ "$c" = "$1" ]; then printf '%s %s\n' "$v" "$p"; break; fi; done; }
-              echo "[storage-assertions] release=${RELEASE} ns=${NAMESPACE} expected-class=${EXPECTED_STORAGE_CLASS} hostPath-mode=${HOSTPATH_MODE} pv-scan=${PV_SCAN}"
+              # folder (TRACEBLOC_JOB_DATA_CLAIMS), else nothing.
+              _jd() { printf '%s\n' "$TRACEBLOC_JOB_DATA_CLAIMS" | while read -r c v p; do if [ "$c" = "$1" ]; then printf '%s %s\n' "$v" "$p"; break; fi; done; }
+              echo "[storage-assertions] release=${TRACEBLOC_RELEASE_NAME} ns=${TRACEBLOC_NAMESPACE} expected-class=${TRACEBLOC_EXPECTED_STORAGE_CLASS} hostPath-mode=${TRACEBLOC_HOSTPATH_MODE} pv-scan=${TRACEBLOC_PV_SCAN}"
 
               # ── pvc-bound: every release PVC exists and is Bound ──────────
               # Wait first (bounded): WaitForFirstConsumer classes bind only
               # when the consuming pod schedules, and a fresh install may still
               # be pulling images. FAIL only if still unbound at the deadline.
-              deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
+              deadline=$(( $(date +%s) + TRACEBLOC_TIMEOUT_SECONDS ))
               pending=""
               read_err=""
               while :; do
                 pending=""
                 read_err=""
-                for pvc in $EXPECTED_PVCS; do
+                for pvc in $TRACEBLOC_EXPECTED_PVCS; do
                   # MISSING only for a claim the API says is NotFound; any other
                   # failed read is UNREADABLE, and its error goes on the FAIL line.
                   if phase=$($KC get pvc "$pvc" -o jsonpath='{.status.phase}' 2>"$KC_ERR"); then
@@ -242,21 +227,21 @@ spec:
                 sleep 5
               done
               if [ -z "$pending" ]; then
-                echo "OK  pvc-bound: all release PVCs are Bound ($EXPECTED_PVCS)"
+                echo "OK  pvc-bound: all release PVCs are Bound ($TRACEBLOC_EXPECTED_PVCS)"
               else
-                echo "FAIL  pvc-bound: not all release PVCs reached Bound within ${TIMEOUT_SECONDS}s:$pending${read_err:+ — kubectl could not read them: $read_err}"
+                echo "FAIL  pvc-bound: not all release PVCs reached Bound within ${TRACEBLOC_TIMEOUT_SECONDS}s:$pending${read_err:+ — kubectl could not read them: $read_err}"
                 fail=1
               fi
 
               # ── pvc-storageclass: every release PVC is on the expected class ──
-              for pvc in $EXPECTED_PVCS; do
+              for pvc in $TRACEBLOC_EXPECTED_PVCS; do
                 if ! sc=$($KC get pvc "$pvc" -o jsonpath='{.spec.storageClassName}' 2>"$KC_ERR"); then
                   echo "FAIL  pvc-storageclass: could not read PVC $pvc ($(_err)) — its class is UNVERIFIED, and unverified is reported unsealed."
                   fail=1
                   continue
                 fi
                 # A claim on the job-data folder is bound to its PV statically, with no class.
-                want="$EXPECTED_STORAGE_CLASS"
+                want="$TRACEBLOC_EXPECTED_STORAGE_CLASS"
                 [ -z "$(_jd "$pvc")" ] || want=""
                 if [ "$sc" = "$want" ]; then
                   echo "OK  pvc-storageclass: $pvc is on '${sc:-<none>}'"
@@ -267,10 +252,10 @@ spec:
               done
 
               # ── pv-hostpath: no unmanaged hostPath backing in dynamic mode ──
-              if [ "$HOSTPATH_MODE" = "true" ]; then
+              if [ "$TRACEBLOC_HOSTPATH_MODE" = "true" ]; then
                 echo "SKIP  pv-hostpath: hostPath.enabled=true — hostPath PVs are this install's declared storage model; nothing to assert."
               else
-                for pvc in $EXPECTED_PVCS; do
+                for pvc in $TRACEBLOC_EXPECTED_PVCS; do
                   if ! vol=$($KC get pvc "$pvc" -o jsonpath='{.spec.volumeName}' 2>"$KC_ERR"); then
                     echo "FAIL  pv-hostpath: could not read PVC $pvc ($(_err)) — its backing is UNVERIFIED, and unverified is reported unsealed, never sealed."
                     fail=1
@@ -288,7 +273,7 @@ spec:
                     if [ "$vol" != "$jd_pv" ]; then
                       echo "FAIL  pv-hostpath: PVC $pvc is bound to PV '$vol', not to its job-data PV '$jd_pv'."
                       fail=1
-                    elif [ "$PV_SCAN" != "true" ]; then
+                    elif [ "$TRACEBLOC_PV_SCAN" != "true" ]; then
                       echo "WARNING  pv-hostpath: PARTIAL verification for $pvc (clusterScope=false grants no PV read). Verified only that the claim is bound to its job-data PV '$jd_pv' by name; the PV's path was NOT read. Set clusterScope=true for full verification."
                     elif ! hp=$(kubectl --request-timeout=10s get pv "$vol" -o jsonpath='{.spec.hostPath.path}' 2>"$KC_ERR"); then
                       echo "FAIL  pv-hostpath: could not read PV '$vol' ($(_err)) — its backing is UNVERIFIED, and unverified is reported unsealed, never sealed."
@@ -305,14 +290,14 @@ spec:
                   # names and capture the claim even in dynamic mode.
                   # Detectable by name with no PV read RBAC.
                   legacy_hit=""
-                  for legacy in $CHART_HOSTPATH_PVS; do
+                  for legacy in $TRACEBLOC_CHART_HOSTPATH_PVS; do
                     if [ "$vol" = "$legacy" ]; then
                       echo "FAIL  pv-hostpath: PVC $pvc is bound to the chart's legacy hostPath PV '$vol' while hostPath.enabled=false — a leftover PV from a previous hostPath install captured this claim."
                       fail=1
                       legacy_hit=1
                     fi
                   done
-                  if [ "$PV_SCAN" = "true" ]; then
+                  if [ "$TRACEBLOC_PV_SCAN" = "true" ]; then
                     if ! hp=$(kubectl --request-timeout=10s get pv "$vol" -o jsonpath='{.spec.hostPath.path}' 2>"$KC_ERR"); then
                       echo "FAIL  pv-hostpath: could not read PV '$vol' ($(_err)) — its backing is UNVERIFIED, and unverified is reported unsealed, never sealed."
                       fail=1
@@ -327,7 +312,7 @@ spec:
                       # must not admit /opt/local-path-provisioner-evil. Trailing
                       # slashes on entries are normalized away, so both entry
                       # styles behave identically.
-                      for prefix in $NODE_LOCAL_PREFIXES; do
+                      for prefix in $TRACEBLOC_NODE_LOCAL_PREFIXES; do
                         p=${prefix%/}
                         case "$hp" in "$p"|"$p"/*) allowed=1 ;; esac
                       done

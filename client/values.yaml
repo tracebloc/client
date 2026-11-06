@@ -418,8 +418,7 @@ hostPath:
   # Base host path for the DATASET PV ONLY (shared training data). Unset, it is
   # root, so datasets stay on the local tree alongside mysql/logs. The installer
   # sets it when a customer network (NFS) dataset mount is provided via
-  # TRACEBLOC_HOST_DATASET_DIR (old name HOST_DATASET_DIR still works),
-  # to the mount's own path. mysql +
+  # TRACEBLOC_HOST_DATASET_DIR, to the mount's own path. mysql +
   # logs ALWAYS stay on the local root tree (InnoDB over NFS is unsafe). The
   # chart appends /<release>/data. mysql/logs PV paths are not affected by this key.
   #
@@ -533,9 +532,8 @@ resourceMonitor:
   # on such a node measures the wrong disk and reports nothing wrong.
   #
   # NOT THE ONLY PATH MEASURED. An install that relocated
-  # its datasets (hostPath.datasetPath, the TRACEBLOC_HOST_DATASET_DIR flow --
-  # old name HOST_DATASET_DIR still works) gets that
-  # mount measured TOO, and the two are summed after de-duplicating by backing
+  # its datasets (hostPath.datasetPath, the TRACEBLOC_HOST_DATASET_DIR flow) gets
+  # that mount measured TOO, and the two are summed after de-duplicating by backing
   # device -- so you no longer have to choose between seeing the dataset volume
   # and seeing mysql/logs/scratch, and pointing this key at the dataset mount by
   # hand is no longer the workaround it was.
@@ -1467,56 +1465,59 @@ images:
   training:
     pinned: ""
     digestRegistry: "ghcr.io"
-    engineCommit: "0143465f0ea68f98e612a34bcbacc3aef56e1c6b"
+    engineCommit: "b29e36b0b02532b39da031e0b4cab5c673f5ea1b"
     digests:
       causal_language_modeling:
-        cpu: "sha256:de6884ab025a196d5ce876c50490f3a804f9406e66c9e6793b2e73b9ea871fe3"
-        gpu: "sha256:42a62b971dc7df3df7ec561e014181f3a661b12e7ca20c4fd41dad8835b0e98b"
+        cpu: "sha256:2df991969a270ab47c64644b7e6cdf4dd076f01b80aba3ff8c07c46d0c3bc8ec"
+        gpu: "sha256:01c5ffda197e504bda958ce6d241938bc41f5e217f9bb9d7ef1f0198c5584381"
       embeddings:
-        cpu: "sha256:d011703aa053e89cd4c0fb40e2ffd59af615dc44604ff21f6885407d2b3f197c"
-        gpu: "sha256:22cec77e0eb0d4ec963a888540c4cdfcffcc3132b2ed98467b32531e4b4a83f0"
+        cpu: "sha256:5de52fd116d323d81d9775df87fcc4f67eda5ecf05798de4783f0eab1e833bd3"
+        gpu: "sha256:2a19f87f80c0b1a4811fc621823b7e890e0360b0e598f6e1b1c824ac69258c62"
       image_classification:
-        cpu: "sha256:a72347192ba2ab929c24d95b000425ce36203209df015174db2a815afacabf87"
-        gpu: "sha256:227f514b786b48aa9c8400a32d3415f6211d8e716f9b19772a72eed30b4398b2"
+        cpu: "sha256:5af8193f20330c82a0385647eb2f1dd5dd1f45cda799ec36f4deb4eb36763a01"
+        gpu: "sha256:02c0e63bf7e5fe3af6113bafd22b2c382d3d2d182e4d6eb79a04debab78a7745"
       keypoint_detection:
-        cpu: "sha256:7e298cad46510a6c08ce5323ba73211173fe8c8cce2b82a18e3f346641b393cb"
-        gpu: "sha256:4d5d5c5982d081faedfdb47af9de07738edf2dd1430dd80fed62a49241de9f15"
+        cpu: "sha256:6af102f2bb797a86200f059c6e4b1487f30bc79220737d15ae0e90cbac6a3180"
+        gpu: "sha256:ba53b929df2f29b52afa0319d99f3ea7a503b9f2e11e5b73f170fd8c4fdc34f1"
       masked_language_modeling:
-        cpu: "sha256:10b1a95546d845c7b772a7e53b0cfea0f710d1a323f0119d9ae4bd731ab3727e"
-        gpu: "sha256:4e4b6baac2ae9eebdf217c01dd475fb667280f705b34ba5ddaf346f9331fcf79"
+        cpu: "sha256:a388844e40779d70220b6457aa5458a536c533ae486c6e9f3a4e181c97c28a43"
+        gpu: "sha256:efb567f3972db3c74f4ef7ed123e2fd46db36324474ed64056b210580a00550e"
+      multi_label_text_classification:
+        cpu: "sha256:92e479c2d0242cebecb22d4733bbfc895506545543ab0a09568ebcd016254f2d"
+        gpu: "sha256:8362f9d4743aa68b06f028ba834315880b69ea7271affd4feb0b6ee715ad4703"
       object_detection:
-        cpu: "sha256:45b7821074b11170bc2a7213bd72ead3a6e263f40efe44a2bb23e526b59a312d"
-        gpu: "sha256:25540fea03e711ba6ecf24b8455545cb648b75fca2caf842b5567558d1d61e19"
+        cpu: "sha256:6bd4fca8a1ea5101832e095ca507d38e3ad580d4dda12088a7b34b22fca5ef92"
+        gpu: "sha256:164011764b07f72a67657bd23ebc27b99e2dadd2c053a2544318eff7cf4f56bb"
       semantic_segmentation:
-        cpu: "sha256:3187fcae1e4dd4ad8f3d8be3fea52809e5a7ee82f52e2a1b20cdbe8c96deb3f9"
-        gpu: "sha256:819e4da8a5641b4ee04b49be572e72daced9eb986f1c52ce7490f5f982a3ccfc"
+        cpu: "sha256:32720d9c44a1bc857ef53575762dba63276c787edd6c15c810a48df7bb8b7cdb"
+        gpu: "sha256:55fd2c671bf2830686ced32ea2bcab688e4efac78419ad9f19fbf03973a859f2"
       sentence_pair_classification:
-        cpu: "sha256:8913d3e70f9b37986a120baf824449c6da5604a4e14ea7526bf9d025d616becb"
-        gpu: "sha256:1f87757aa85defb6d0cfa95fe4056648ad6cbfbc42cce1d614b12b509b8198fe"
+        cpu: "sha256:9373b0e1548cbeda9a7261c06360bf0d7d373bc6f9e5aaf424960ffee37f03cf"
+        gpu: "sha256:3976fdca43428cb772d41fbcc926db9ec4e9185a6f572fd5db1f11d61f9e6c41"
       seq2seq:
-        cpu: "sha256:d64a1d088e302cccc69a6f45686aaaede1dfebfc61924069b499218f0154c5ed"
-        gpu: "sha256:6ff9c2c1f3f57ade65020449bdbc7caf089462b01484c70bc4f502937e94ca7d"
+        cpu: "sha256:44f9057ef4553745497cbb03f9522864095dc04be338b766038c1cce8a2586c7"
+        gpu: "sha256:cbab48b6c6d5cf3165e3354ff8c26de6f029e0c48e8c232e1c5d73b64fdc6e73"
       tabular_classification:
-        cpu: "sha256:9255f57e58652cd0d081231907e175ccfa0e9550f2e34d0386319750df877952"
-        gpu: "sha256:aad67dd1285a0ea27a93d530488002bbe8d3e5ecb1129f51e772c957661dc914"
+        cpu: "sha256:a9db1749edf3d4a10ce90dc05757ba61648a45ce3bfcaed4db84330603783e50"
+        gpu: "sha256:aa5455fea8022e295fa4d5ff7e829b263effd2d17cc7f17a0f25c6f8691fdcf8"
       tabular_regression:
-        cpu: "sha256:d27af1230d88f0e4707e2b0fbbb99dc427e454115fa6c90566a9e01d5edd26f2"
-        gpu: "sha256:4e2475be90bafaadea50cc93dbce107026be3a3683204df5a26340ec0bbaec5a"
+        cpu: "sha256:f48ddd9a4e22f204a76b24c72af13a32f9228e0e3ea2d192c63a46f52f4244b2"
+        gpu: "sha256:5a0f9a97e65a3ae613a30e9d6e5ff797555405173898cea738cd5f1323ef4571"
       text_classification:
-        cpu: "sha256:20a3bb63d2067434ae6a3641f0fa6a75be32492be5843c66dbb234e90f173d9b"
-        gpu: "sha256:40c79b6f6180b96b4fc5cc9e99a81968f16803150ffdeca163dbc119601e7b45"
+        cpu: "sha256:3cbec3308c89d410ab98524b174c1f048362525b5803b6c493f6ace3dc15c0ae"
+        gpu: "sha256:6344cfe235d943822a5acb476a32b7f0d9b45a372775d5257467e4c9422e8288"
       time_series_classification:
-        cpu: "sha256:60fb4be10dfad446611a293074485f8032c1908ccb19f9765a758dec35c98637"
-        gpu: "sha256:38022a5018b513af6c3ce2da3a76fa475833d27fa6adc89cca52d0201ca3987a"
+        cpu: "sha256:a34239e9464b5432f04390c5a3df67d139f7b436d70f993d2be4ebf5eb2d21d0"
+        gpu: "sha256:a5d588b69025a7a44fd93f0f97bfd18dbfbc7ac194d4085a3a16ff39fd19809a"
       time_series_forecasting:
-        cpu: "sha256:538e9fed5d64807da2dd40a0160977c7f28b7d517da53453b6b8540d4a4e0e50"
-        gpu: "sha256:c879608c697e4e130fa70306a8259c99d986f9a9bfe64df45ffcc9f9cb4d21e3"
+        cpu: "sha256:ff54b0d854fb9b762a8612be6732753ed6cad7e3239720bae62b1c41ef02e507"
+        gpu: "sha256:b88d91329020ab9dd7391ad1f16b4e0179c3ec01232a71cd7aac61ae6946916f"
       time_to_event_prediction:
-        cpu: "sha256:f0e69500e40c285fac2932f44b4eca73ce73385a347038666a95dd40ac54b2f9"
-        gpu: "sha256:25704558f9463d15fec28a66472644a1f336d5549d466e0ea104c7208417d021"
+        cpu: "sha256:929221a24d61444138434019e691024ad49b0c974bad6239f12e3e5d08ce984b"
+        gpu: "sha256:b52fada63b9bf64439e7a1389a6accc5965eb2c4db7893f8142271d5c6bf0aca"
       token_classification:
-        cpu: "sha256:603f69c549ac0b4fdb74b7b6ddb11f41ab2495045c8e35f8d036d101dbed5841"
-        gpu: "sha256:eec7f846e034364a32b8c37171bac263f4954b78b1a2f97b313e674ad8d7fc4e"
+        cpu: "sha256:39ea9881f4b0f7727d24a62659f5d500352962782d6824bf27be0998dd304851"
+        gpu: "sha256:05fd462f540733464e5140f1076409b7702d39b8c6abbf91a825bd84f17b31c6"
     capabilities: "ddp,loss-coupled:embeddings,loss-coupled:time_to_event_prediction,min-micro-batch:2,no-backend-token,per_rank_split"
     parents:
       gpu:
@@ -1525,8 +1526,8 @@ images:
         platforms:
           - "linux/amd64"
     macosBundle:
-      digest: "sha256:2b55ef7364c6fcf7bd0494c0d455193ace49b7bc61833f7a9133b7187d6d1064"
-      location: "ghcr.io/tracebloc/engine-macos-arm64@sha256:ce905d777d03af89081bf1e3345111b9899ddc1df7f1ad477dede6253c579512"
+      digest: "sha256:f695915b34b17bccd85b98412cf232c0239265ee3a16d2f0f7905c13333640a5"
+      location: "ghcr.io/tracebloc/engine-macos-arm64@sha256:431d0612fe12a2ae39e6478a9fa63529c5bfe5b901b35c9a18d9e5c9139c315b"
   # The ingestor image is spawned by
   # jobs-manager at ingestion-submission time, not as a long-lived pod.
   # jobs-manager resolves ONE effective digest from the keys below and spawns
@@ -2197,18 +2198,16 @@ podDisruptionBudget:
 # templates/secrets.yaml:
 #   1. these values, else
 #   2. the TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD keys already in the
-#      release Secret (or, only when those are absent, the legacy CLIENT_ID /
-#      CLIENT_PASSWORD), else
+#      release Secret, else
 #   3. a hard failure naming both options.
 #
 # THE SECRET CARRIES EACH CREDENTIAL UNDER ITS TRACEBLOC_ KEY. The chart writes
-# TRACEBLOC_CLIENT_ID and TRACEBLOC_CLIENT_PASSWORD, and the pods read them; it no
-# longer writes the legacy CLIENT_ID / CLIENT_PASSWORD keys, and an upgrade removes
-# them. A Secret that has only the CLIENT_* keys (one written before the chart
-# added the canonical keys, or pre-created that way) still works: the chart
-# resolves from it and writes the TRACEBLOC_ names on the same render that starts
-# the pods. When you create or rotate the Secret by hand, set the TRACEBLOC_ keys,
-# as the commands below do -- a CLIENT_* key beside a TRACEBLOC_* one is ignored.
+# TRACEBLOC_CLIENT_ID and TRACEBLOC_CLIENT_PASSWORD, and the pods read them; the
+# chart reads no other key. A release Secret that exists without both keys (one
+# written by a chart older than 1.9.180, or pre-created without them) is refused,
+# even with these values set: the environment is reinstalled, or a hand-made
+# Secret gets both TRACEBLOC_ keys. When you create or rotate the Secret by hand,
+# set the TRACEBLOC_ keys, as the commands below do.
 #
 # WHY YOU WOULD BOTHER: anything passed as a value is stored by Helm in the
 # release's user-supplied values IN CLEARTEXT, in every retained revision (10 by
