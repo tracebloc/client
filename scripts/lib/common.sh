@@ -79,7 +79,7 @@ tb_resolve_tuning_aliases
 # into one argv element that curl rejects.
 readonly CURL_SECURE="--tlsv1.2"
 
-# tb_client_env — TRACEBLOC_ENV/CLIENT_ENV reduced to the canonical dev|stg|prod.
+# tb_client_env — TRACEBLOC_ENV reduced to the canonical dev|stg|prod.
 #
 # The chart, client-runtime and this installer all key on dev|stg|prod, while
 # values.schema.json documents development|staging|production as accepted
@@ -89,16 +89,13 @@ readonly CURL_SECURE="--tlsv1.2"
 # PROD branch silently.
 #
 # That is not hypothetical here. `_backend_url` feeds verify_credentials(),
-# so a `CLIENT_ENV=staging` install validated the customer's STAGING client
+# so a `TRACEBLOC_ENV=staging` install validated the customer's STAGING client
 # credentials against the PRODUCTION backend and told them their correct
 # credentials were wrong.
 #
-# Settings naming: TRACEBLOC_ENV is the canonical shell var,
-# CLIENT_ENV the legacy one (remove_by 2026-12-31), same alias-first
-# precedence as the chart's tracebloc.clientEnv -- a non-empty TRACEBLOC_ENV
-# wins, else CLIENT_ENV, else absent. This is only the AMBIENT-ENV fallback:
-# an explicit $1 (even "") still wins outright, so a caller that has already
-# resolved its own value (e.g. from a values-file read) is unaffected.
+# The ambient stage is TRACEBLOC_ENV alone, blank meaning absent; no other
+# name is read. An explicit $1 (even "") still wins outright, so a caller that
+# has already resolved its own value (e.g. from a values-file read) is unaffected.
 #
 # Unknown values pass through unchanged: this normalises spellings, it does not
 # validate. Each caller keeps its own fallback for genuinely unrecognised input.
@@ -107,7 +104,7 @@ tb_client_env() {
   if [ "$#" -ge 1 ]; then
     raw="$1"
   else
-    raw="${TRACEBLOC_ENV:-${CLIENT_ENV:-}}"
+    raw="${TRACEBLOC_ENV:-}"
   fi
   case "$raw" in
     development) printf 'dev'  ;;
@@ -121,7 +118,7 @@ tb_client_env() {
 # read their credentials, or see whether it came online.
 #
 # Bugbot caught that this still hardcoded production at ten sites while
-# `_backend_url` was correctly env-aware — so a `CLIENT_ENV=dev` install on Linux
+# `_backend_url` was correctly env-aware — so a `TRACEBLOC_ENV=dev` install on Linux
 # or macOS still sent the operator to ai.tracebloc.io for credentials `dev-api`
 # then rejects. (The retired PowerShell core had been fixed first.)
 #
@@ -150,11 +147,9 @@ tb_client_env() {
 # /clients now only redirects there.
 _dashboard_url() {
   local path="${1-secure-environment}" base
-  # Bare call, no explicit fallback: tb_client_env's own ambient-env path
-  # already reads TRACEBLOC_ENV alias-first, and an unset/unrecognised result
-  # lands in the *) branch below the same way an explicit "prod" would --
-  # spelling out "${TRACEBLOC_ENV:-${CLIENT_ENV:-prod}}" here would just
-  # re-derive what tb_client_env already does internally.
+  # Bare call: tb_client_env reads the ambient TRACEBLOC_ENV, and an
+  # unset/unrecognised result lands in the *) branch below the same way an
+  # explicit "prod" would.
   case "$(tb_client_env)" in
     dev) base='https://dev.tracebloc.io' ;;
     stg) base='https://stg.tracebloc.io' ;;

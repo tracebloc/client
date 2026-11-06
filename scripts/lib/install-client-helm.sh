@@ -1742,16 +1742,13 @@ _sanitize_workspace_name() {
 
 # ── Credential verification ────────────────────────────────────────
 # Resolve the backend base URL the same way jobs-manager does
-# (client-runtime/controller.py: TRACEBLOC_ENV/CLIENT_ENV → backend),
-# defaulting to prod.
+# (client-runtime/controller.py: TRACEBLOC_ENV → backend), defaulting to prod.
 _backend_url() {
   # Reduce aliases FIRST: a raw `staging` fell through to the
   # prod branch, so verify_credentials() checked staging credentials against
   # the production backend and reported them invalid.
-  # Bare call: tb_client_env's own ambient-env path is already alias-first
-  # (TRACEBLOC_ENV, else CLIENT_ENV), and the *) branch below is the
-  # prod-equivalent for any unset/unrecognised result, so there's nothing for
-  # an explicit "${TRACEBLOC_ENV:-${CLIENT_ENV:-prod}}" fallback to add here.
+  # Bare call: tb_client_env reads the ambient TRACEBLOC_ENV, and the *)
+  # branch below is the prod-equivalent for any unset/unrecognised result.
   case "$(tb_client_env)" in
     dev) printf 'https://dev-api.tracebloc.io/' ;;
     stg) printf 'https://stg-api.tracebloc.io/' ;;
@@ -4974,12 +4971,11 @@ install_client_helm() {
   # file is never chmodded underneath them.
   : > "$values_file" || error "Could not create $values_file"
   chmod 600 "$values_file" 2>/dev/null || true
-  # The stage, read from the shell canonical-first (TRACEBLOC_ENV, else the
-  # legacy CLIENT_ENV a user may still export), the precedence tb_client_env's
-  # own ambient-env fallback uses. It is written under env.TRACEBLOC_ENV only:
-  # every reader of these values (the chart's tracebloc.clientEnv, assess.sh's
-  # _assess_release_client_env, the CLI) reads that key first.
-  local _tb_stage_raw="${TRACEBLOC_ENV:-${CLIENT_ENV:-}}" _tb_stage_resolved=""
+  # The stage, read from the shell's TRACEBLOC_ENV as tb_client_env reads it,
+  # and written under env.TRACEBLOC_ENV only: every reader of these values (the
+  # chart's tracebloc.clientEnv, assess.sh's _assess_release_client_env, the
+  # CLI) reads that key first.
+  local _tb_stage_raw="${TRACEBLOC_ENV:-}" _tb_stage_resolved=""
   [ -n "$_tb_stage_raw" ] && _tb_stage_resolved="$(tb_client_env "$_tb_stage_raw")"
   cat <<EOF > "$values_file"
 # ============================================================

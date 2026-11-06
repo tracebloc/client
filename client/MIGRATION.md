@@ -2,6 +2,55 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Service database accounts are always on, and prod ingests with ingestor 0.12
+
+**What changed.** jobs-manager creates the two service database accounts,
+`tb_meta` and `tb_ingest`, in every secure environment, and the data plane signs
+in to MySQL with them instead of `edgeuser`. The `serviceDbAccounts` and
+`serviceDbAccountsByEnv` values are retired. A stored `false` in either is
+ignored: the secure environment moves to the service accounts on its next
+upgrade, and the upgrade's notes name the value they ignored.
+
+Prod secure environments run the ingestor from the `0.12` line
+(`images.ingestor.prodDigestServiceDb`), which reads FASTA folders, four-channel
+images, images of mixed sizes and tabular data with a text column. The older
+prod pin `images.ingestor.prodDigest` is gone, and a value stored under that name
+is ignored. So the per-run ingestion token is on in every prod secure
+environment too.
+
+**What you have to do: nothing.** The hourly auto-upgrade moves the secure
+environment. To clear the notice, drop the stored value:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> \
+  --reset-then-reuse-values --set serviceDbAccounts=null --set serviceDbAccountsByEnv=null
+```
+
+**In the same upgrade.** On a secure environment that has rotated its MySQL
+root password and uses per-experiment database credentials, jobs-manager also
+narrows and then removes `edgeuser` at the start that creates the service
+accounts. An ingestion that started before the upgrade can fail then; ingest
+that dataset again.
+
+**Upgrading with plain `--reuse-values`** (Helm older than 3.14) keeps the old
+chart's defaults, so the secure environment keeps the ingestor it ran. Upgrade
+with `--reset-then-reuse-values` to pick up the new pin.
+
+## The installer reads the stage from `TRACEBLOC_ENV` only
+
+**What changed.** The installers (`install.sh`, `install.ps1`) take the stage
+a client is installed for from the shell variable `TRACEBLOC_ENV` alone. The
+older `CLIENT_ENV` is ignored: a shell that sets only `CLIENT_ENV` installs
+against prod, and the installer's sign-in goes to prod with it. The Windows
+installer no longer hands `CLIENT_ENV` to the install it runs in WSL.
+
+**What you have to do.**
+- **Nothing**, unless you set `CLIENT_ENV` yourself before running the
+  installer. Set `TRACEBLOC_ENV` instead, with the same value.
+- **A client installed already** keeps the stage stored in its release's values
+  when it is updated. Installed again from scratch, it takes the stage from
+  `TRACEBLOC_ENV`.
+
 ## A secure environment last updated before 1.9.180 is reinstalled
 
 **What changed.** The chart reads the credentials in `<release>-secrets` and
@@ -62,11 +111,6 @@ backend token, scoped to ingestion and valid for one run and 24 hours, instead
 of the secure environment's shared backend token (see 1.9.198 below for how).
 The run's token carries the mark you give the dataset at ingest, so a dataset
 you mark as open data or synthetic data is no longer read as patient data.
-
-**Where it stays off.** A prod secure environment with `serviceDbAccounts` off
-runs the ingestor `images.ingestor.prodDigest` names, which predates the
-per-run token. The chart keeps the shared token there, even with
-`ingestRunToken: true`, and its datasets are still read as patient data.
 
 **What you have to do: nothing.** The prod ingestor and the prod backend both
 support the per-run token.
@@ -258,8 +302,8 @@ and the tracebloc CLI, so every client resolves the same stage as before. A
 prod client is unchanged: the installer writes no stage for it, and the chart
 resolves prod.
 
-The installer still takes the stage from either shell variable, `TRACEBLOC_ENV`
-or the older `CLIENT_ENV`.
+The installer reads the stage from the shell's `TRACEBLOC_ENV` only (see
+"The installer reads the stage from `TRACEBLOC_ENV` only" above).
 
 **What you have to do.**
 - **Nothing**, unless you read the release's values yourself.
@@ -1661,9 +1705,9 @@ otherwise-default values: the object set gains exactly the two objects from
 identities — `serviceDbAccountsByEnv` is still `dev: true`, `stg: true`,
 `prod: false`. On an edge where that flag resolves false, `requests-proxy`
 renders byte-for-byte identically across these versions apart from the chart
-labels, so its metadata-bootstrap behaviour is unchanged by the upgrade. Flipping
-that flag is a separate, windowed decision with its own ordering constraint —
-read the note on `images.ingestor.prodDigest` in `values.yaml` before you do.
+labels, so its metadata-bootstrap behaviour is unchanged by the upgrade. That
+flag has since been retired: see *Service database accounts are always on* at
+the top of this guide.
 
 **New values keys, all off or empty by default — and they did not all arrive at
 the same version.** All six are new to the `1.9.63` fleet this section targets,
@@ -1760,7 +1804,8 @@ kubectl -n "$NAMESPACE" get deploy "$NAMESPACE-jobs-manager" -o yaml | grep RESO
 
 The digest that pins the spawned ingestion image on prod now lives in the
 chart's **default** `client/values.yaml` as `images.ingestor.prodDigest`, gated
-to prod. The `client/values-prod.yaml` install-time overlay has been **deleted**.
+to prod. (The prod pin is `images.ingestor.prodDigestServiceDb` today: see
+*Service database accounts are always on* at the top of this guide.) The `client/values-prod.yaml` install-time overlay has been **deleted**.
 
 **Why:** an install-time `-f` overlay could never deliver the pin.
 
@@ -1785,7 +1830,7 @@ deliberate: passing `-f values-prod.yaml` would re-create the frozen-value bug.
 
 | Edge | `env.CLIENT_ENV` | Ingestor image |
 |---|---|---|
-| Prod (installer writes no `CLIENT_ENV`) | unset → resolves `prod` | Pinned to `images.ingestor.prodDigest`, `imagePullPolicy: IfNotPresent` |
+| Prod (installer writes no `CLIENT_ENV`) | unset → resolves `prod` | Pinned to the chart's prod pin, `imagePullPolicy: IfNotPresent` |
 | Dev / staging | `dev` / `stg` | Floating `images.ingestor.tag`, `imagePullPolicy: Always` (unchanged) |
 
 The pin arrives on the next hands-off auto-upgrade, and each subsequent
@@ -1793,7 +1838,7 @@ republished pin follows the same way.
 
 **If you hand-layered the old overlay, clear the stored value.** A manually
 applied `-f client/values-prod.yaml` stored `images.ingestor.digest` as a
-user-supplied value, and that key still takes precedence over `prodDigest` — so
+user-supplied value, and that key still takes precedence over the prod pin — so
 such an edge would stay frozen on its install-day digest. Clear it once:
 
 ```bash

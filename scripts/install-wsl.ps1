@@ -2517,16 +2517,16 @@ $CorePhaseClient = 'client'
 # What the core reads from this process's environment, carried onto its line,
 # because no Windows variable crosses into the distro:
 #   - the release the bootstrap resolved (lib/common.sh's TB_VERSION reads it);
-#   - the stage, both names lib/common.sh's tb_client_env reads (canonical first,
-#     then the legacy one), so the core installs against the backend the host CLI
-#     signs in to: the CLI reads the same two on Windows. Without them the core
-#     falls back to prod while the CLI mints the credential on stg;
+#   - the stage, by the name lib/common.sh's tb_client_env reads, so the core
+#     installs against the backend the host CLI signs in to (Get-HostClientCredential
+#     hands the login the same name). Without it the core falls back to prod while
+#     the CLI mints the credential on stg;
 #   - every telemetry opt-out the core honours (lib/telemetry.sh's
 #     TB_TELEMETRY_OPT_OUT_VARS), so an opt-out set on Windows still opts out.
 # Pester tests hold the stage names and the opt-outs to those declarations. Each
 # goes on the line only when it is set, with the value as it was set: the core
 # reduces the stage's spelling itself.
-$CorePassThroughVars = @('TRACEBLOC_INSTALL_REF', 'TRACEBLOC_ENV', 'CLIENT_ENV', 'TRACEBLOC_SKIP_TELEMETRY', 'TRACEBLOC_NO_TELEMETRY', 'DO_NOT_TRACK')
+$CorePassThroughVars = @('TRACEBLOC_INSTALL_REF', 'TRACEBLOC_ENV', 'TRACEBLOC_SKIP_TELEMETRY', 'TRACEBLOC_NO_TELEMETRY', 'DO_NOT_TRACK')
 
 # THE INSTALL'S OWN SETTINGS. install-k8s.sh's header and the core's --help name
 # the settings a user sets for the install, and lib/common.sh resolves each
@@ -3514,7 +3514,16 @@ function Get-HostClientCredential {
   $dir = Join-Path (Join-Path $env:LOCALAPPDATA 'tracebloc') ('credential-' + [guid]::NewGuid().ToString('N'))
   New-PrivateDirectory -Path $dir
   try {
-    Invoke-HostCliShown -Cli $Cli -ArgumentList @('login')
+    # The login is handed the stage the core reads, prod when TRACEBLOC_ENV is unset:
+    # its session is the backend the create mints on, and the CLI reads stage names
+    # the core is not handed. Put back as found.
+    $stageWas = [Environment]::GetEnvironmentVariable('TRACEBLOC_ENV')
+    if (-not $stageWas) { Set-ProcessEnv -Name 'TRACEBLOC_ENV' -Value 'prod' }
+    try {
+      Invoke-HostCliShown -Cli $Cli -ArgumentList @('login')
+    } finally {
+      Set-ProcessEnv -Name 'TRACEBLOC_ENV' -Value $stageWas
+    }
     if ($LASTEXITCODE -ne 0) {
       Stop-Setup -What "Signing in didn't finish" -Next 'Run the installer again to sign in:' -Reason "Signing in with the tracebloc CLI did not finish (it exited $LASTEXITCODE), so this machine was not registered. Run this installer again to sign in."
     }
@@ -3603,7 +3612,7 @@ function Get-HostClientCredential {
 }
 
 # The backend a Client ID belongs to, read from the verified installer tree, so it is
-# the one the distro's install asks: TRACEBLOC_ENV, else CLIENT_ENV, reduced by
+# the one the distro's install asks: TRACEBLOC_ENV, reduced by
 # lib/common.sh's tb_client_env and named by lib/install-client-helm.sh's _backend_url,
 # each matched case for case as bash matches. $null when either table can't be read or
 # the address is not HTTPS: the pair is then left to the distro's check.
@@ -3620,7 +3629,6 @@ function Get-HostBackendUrl {
   $otherwise = [regex]::Matches($urlFn, "(?m)^    \*\) +printf '([^']*)' +;;")
   if ($aliases.Count -eq 0 -or $stages.Count -eq 0 -or $otherwise.Count -ne 1) { return $null }
   $raw = "$env:TRACEBLOC_ENV"
-  if (-not $raw) { $raw = "$env:CLIENT_ENV" }
   $stage = $raw
   foreach ($m in $aliases) { if ($m.Groups[1].Value -ceq $raw) { $stage = $m.Groups[2].Value } }
   $url = $otherwise[0].Groups[1].Value

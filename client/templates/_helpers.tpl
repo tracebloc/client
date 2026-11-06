@@ -2130,13 +2130,15 @@ Precedence (most specific first):
   1. `images.ingestor.digest` non-empty  -> that digest, in ANY environment.
      The long-standing per-edge opt-in pin; unchanged semantics.
   2. otherwise the prod gate: `images.ingestor.prodPin` (default TRUE when the
-     key is absent) AND the resolved CLIENT_ENV == "prod"  -> `prodDigest`.
+     key is absent) AND the resolved CLIENT_ENV == "prod"  -> `prodDigestServiceDb`,
+     the one prod pin. The retired `prodDigest` key is never read, so a release
+     that stored it cannot pin the build it named.
   3. otherwise empty -> float on `tag` with imagePullPolicy=Always.
 
 Why the gate is on CLIENT_ENV: dev and staging installs carry
 `env.CLIENT_ENV: dev|stg` in their user-supplied values while the chart defaults
 CLIENT_ENV to "prod", so this pins prod and floats non-prod with zero per-edge
-action — and because `prodDigest` is a chart DEFAULT, a republished pin reaches
+action — and because `prodDigestServiceDb` is a chart DEFAULT, a republished pin reaches
 installed edges through `helm upgrade --reset-then-reuse-values` (the fleet
 auto-upgrade path), which an install-time `-f` overlay never could.
 
@@ -2176,8 +2178,8 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   WHY FAIL AT ALL, rather than pass the value through. Passing through was not
   a graceful degradation, it was a silent reconfiguration of the edge in four
   places at once -- three control-plane image tags pointing at tags no producer
-  publishes, a missed `channelTags` lookup, a missed `serviceDbAccountsByEnv`
-  lookup, and a dropped prod digest pin (the pin applies only where the env
+  publishes, a missed `channelTags` lookup, missed per-environment gate
+  defaults, and a dropped prod digest pin (the pin applies only where the env
   resolves to exactly "prod"). The only validator that existed was
   client-runtime jobs_manager.py's `sys.exit(1)` on "Unknown CLIENT_ENV", which
   lives INSIDE the container that cannot start, so it cannot help. Failing at
@@ -2186,38 +2188,23 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   passwords, perDatasetPvcs without clusterScope, and a missing metrics API.
 */}}
 {{/*
-  Whether the dedicated tb_meta / tb_ingest DB identities are on for THIS edge.
-
-  Resolution, highest first:
-    1. `serviceDbAccounts` — an explicit operator override, true or false.
-    2. `serviceDbAccountsByEnv[<resolved CLIENT_ENV>]` — the fleet default.
-
-  WHY THIS IS KEYED ON THE ENVIRONMENT AT ALL. The rollout is
-  "flip per environment, dev first", and a single global boolean has no mechanism for that: the
-  value was one global boolean, so "per environment" meant editing every edge's
-  values by hand and remembering which fleet was where. Nobody could see the
-  fleet's posture in one place, and nothing tested it.
-
-  That gap had teeth. An ingestor release removed the ingestor's edgeuser
-  fallback, making DB_USER/DB_PASSWORD required, on the stated precondition
-  that this flag was "on fleet-wide". It was on nowhere. dev and staging edges
-  float on the :dev/:stg ingestor channels, picked the change up the same day,
-  and every ingestion Job now fails at Config() before reading a byte. Prod escaped only because its ingestor is digest-pinned to
-  the 0.7 line -- a caution engineered for D16, not for this, and one that
-  a pending ingestor bump is about to spend.
-
-  Resolving through `tracebloc.clientEnv` (not the raw value) so a documented
-  alias like `staging` maps to `stg` and cannot silently miss its entry --
-  a failure that has already happened once.
+  The stored values that used to turn the tb_meta / tb_ingest service accounts
+  off, one NOTES line each. The accounts are always on: `serviceDbAccounts` and
+  `serviceDbAccountsByEnv` are retired, and an explicit false in either is
+  ignored rather than refused, so an edge that stored one is migrated by its
+  next upgrade (jobs-manager mints both accounts at boot) instead of failing
+  it. NOTES.txt prints what this returns, so the operator learns which value
+  no longer applies. Nil-safe: a release without the keys renders nothing.
 */}}
-{{- define "tracebloc.serviceDbAccounts" -}}
-{{- $override := (default dict .Values).serviceDbAccounts -}}
-{{- if not (kindIs "invalid" $override) -}}
-{{- if $override }}true{{ end -}}
-{{- else -}}
-{{- $env := include "tracebloc.clientEnv" . -}}
-{{- $byEnv := default dict .Values.serviceDbAccountsByEnv -}}
-{{- if get $byEnv $env }}true{{ end -}}
+{{- define "tracebloc.ignoredServiceDbAccountsOff" -}}
+{{- $v := default dict .Values -}}
+{{- if and (kindIs "bool" $v.serviceDbAccounts) (not $v.serviceDbAccounts) }}
+  - serviceDbAccounts = false
+{{- end -}}
+{{- range $env, $on := (default dict $v.serviceDbAccountsByEnv) -}}
+{{- if and (kindIs "bool" $on) (not $on) }}
+  - serviceDbAccountsByEnv.{{ $env }} = false
+{{- end -}}
 {{- end -}}
 {{- end }}
 
@@ -2229,16 +2216,13 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   from the endpoint falls back to the shared token, any other failure fails the
   submit with 502.
 
-  Resolution, highest first -- identical to tracebloc.serviceDbAccounts:
+  Resolution, highest first -- identical to tracebloc.narrowEdgeuser:
     1. `ingestRunToken` -- an explicit operator override, true or false.
     2. `ingestRunTokenByEnv[<resolved CLIENT_ENV>]` -- the fleet default.
 
-  NEVER ON THE prodDigest PIN, whichever answer the two give. The token is BOUND
-  to one ingestor, and a secure environment whose ingestor resolves to
-  `images.ingestor.prodDigest` (a prod secure environment with service DB
-  accounts off, see tracebloc.ingestorDigest) runs a release held behind the
-  token support (docs/SECURITY.md §4.1.1), whose backend calls fail under one.
-  That edge keeps the shared token, so the backend reads its data as patient data.
+  The token is BOUND to one ingestor, so the ingestor must read
+  TRACEBLOC_INGESTOR_ID / BACKEND_TOKEN_SCHEME. Every chart pin does; an
+  operator-set `images.ingestor.digest` must too.
 
   NIL-SAFE BOTH WAYS. An edge upgraded with plain `--reuse-values` from a chart
   that predates these keys has NEITHER of them: the override reads as unset and
@@ -2257,8 +2241,6 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- $byEnv := default dict .Values.ingestRunTokenByEnv -}}
 {{- if get $byEnv $env }}{{ $on = "true" }}{{ end -}}
 {{- end -}}
-{{- $pin := (default dict (index (default dict .Values.images) "ingestor")).prodDigest | default "" -}}
-{{- if and $on $pin (eq (include "tracebloc.ingestorDigest" .) $pin) }}{{ $on = "" }}{{ end -}}
 {{- $on -}}
 {{- end }}
 
@@ -2273,13 +2255,10 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
        (each fleet turns on once its ingestor is shown to carry
        the whole D16 path on a dev edge).
 
-  NEVER ON THE prodDigest PIN, whichever answer the two give. A secure
-  environment whose ingestor resolves to `images.ingestor.prodDigest` (a prod
-  secure environment with service DB accounts off, see tracebloc.ingestorDigest)
-  runs v0.8.2, which predates the ds_ handle fix: under the flag
-  it reports the dataset's --name instead of its ds_ table, so `tb data delete`
-  misses the table. The backend cannot see that secure environment's overrides,
-  so the chart refuses the combination.
+  An ingestor before data-ingestors v0.8.16 reports the dataset's --name
+  instead of its ds_ table under the flag, so `tb data delete` misses the
+  table. Every chart pin is newer; an operator-set `images.ingestor.digest`
+  must be too.
 
   NIL-SAFE BOTH WAYS: an edge upgraded with plain `--reuse-values` from a chart
   that predates these keys has neither, and the gate resolves off -- legacy
@@ -2296,8 +2275,6 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- $byEnv := default dict .Values.perIngestionTablesByEnv -}}
 {{- if get $byEnv $env }}{{ $on = "true" }}{{ end -}}
 {{- end -}}
-{{- $pin := (default dict (index (default dict .Values.images) "ingestor")).prodDigest | default "" -}}
-{{- if and $on $pin (eq (include "tracebloc.ingestorDigest" .) $pin) }}{{ $on = "" }}{{ end -}}
 {{- $on -}}
 {{- end }}
 
@@ -2305,7 +2282,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   Whether jobs-manager mints a throwaway MySQL account per experiment
   for THIS edge.
 
-  Resolves identically to tracebloc.serviceDbAccounts / bootstrapDbReparent /
+  Resolves identically to tracebloc.bootstrapDbReparent /
   tracebloc.rotateMysqlRoot -- operator override first, else the
   per-environment default -- and shares the CLIENT_ENV normalization
   so a documented alias like `staging` cannot silently miss its
@@ -2333,7 +2310,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 
 {{/*
   Whether to re-parent the account-minting bootstrap off edgeuser onto MySQL
-  root. Resolves identically to tracebloc.serviceDbAccounts —
+  root. Resolves identically to tracebloc.perExperimentDbCreds —
   operator override first, else the per-environment default — so the fleet's S3
   posture reads out of one place the same way, and the CLIENT_ENV normalization
   is shared. This is the LAST, edgeuser-retiring step. dev has run
@@ -2368,7 +2345,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- end }}
 
 {{/*
-  Whether to narrow edgeuser to USAGE only at jobs-manager startup. Resolves identically to its three siblings -- operator override
+  Whether to narrow edgeuser to USAGE only at jobs-manager startup. Resolves identically to its siblings -- operator override
   first, else the per-environment default -- sharing the CLIENT_ENV normalization.
 
   WHAT IT IS FOR. mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants
@@ -2405,7 +2382,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
     BAKED DEFAULT: tracks the posture instead of asserting over it.
     A default says "a retired fleet narrows", and narrowing is a CONSEQUENCE of
     being retired, not an independent choice. So the default is conditional on
-    the three predecessors, and an operator who steps back from the posture on one
+    the two predecessors, and an operator who steps back from the posture on one
     edge -- `perExperimentDbCreds=false` while debugging, say -- simply stops
     narrowing. They do not have to discover a second flag they never set.
     A flat `true` here made every single-gate override on a baked environment a
@@ -2418,7 +2395,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- $env := include "tracebloc.clientEnv" . -}}
 {{- $byEnv := default dict .Values.narrowEdgeuserByEnv -}}
 {{- if get $byEnv $env -}}
-{{-   if and (include "tracebloc.bootstrapDbReparent" .) (include "tracebloc.serviceDbAccounts" .) (include "tracebloc.perExperimentDbCreds" .) -}}
+{{-   if and (include "tracebloc.bootstrapDbReparent" .) (include "tracebloc.perExperimentDbCreds" .) -}}
 true
 {{-   end -}}
 {{- end -}}
@@ -2457,14 +2434,11 @@ true
 {{-   if not (include "tracebloc.bootstrapDbReparent" .) -}}
 {{-     $missing = append $missing "bootstrapDbReparent is off, so the account-minting bootstrap still authenticates AS edgeuser -- the REVOKE would strip the privileges of the connection issuing it, mid-flight" -}}
 {{-   end -}}
-{{-   if not (include "tracebloc.serviceDbAccounts" .) -}}
-{{-     $missing = append $missing "serviceDbAccounts is off, so the metadata and dataset data plane still connects as edgeuser" -}}
-{{-   end -}}
 {{-   if not (include "tracebloc.perExperimentDbCreds" .) -}}
 {{-     $missing = append $missing "perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential" -}}
 {{-   end -}}
 {{-   if $missing -}}
-{{-     fail (printf "narrowEdgeuser is on but this fleet is not ready to narrow edgeuser. Blocking reasons: %s. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off." (join "; " $missing)) -}}
+{{-     fail (printf "narrowEdgeuser is on but this fleet is not ready to narrow edgeuser. Blocking reasons: %s. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off." (join "; " $missing)) -}}
 {{-   end -}}
 {{- end -}}
 {{- end }}
@@ -2501,7 +2475,7 @@ true
   at startup, but the render happens before the Deployment is patched, so an
   operator who forces `dropEdgeuser: true` on an unready posture gets a refused
   `helm upgrade` rather than a CrashLoop. The baked default cannot reach here with
-  an incomplete posture (it requires narrowEdgeuser, which requires all three
+  an incomplete posture (it requires narrowEdgeuser, which requires both
   predecessors), so like its narrow sibling this fires in practice only for an
   explicit override -- kept resolved-value-scoped for the same reason.
 */}}
@@ -2514,14 +2488,11 @@ true
 {{-   if not (include "tracebloc.bootstrapDbReparent" .) -}}
 {{-     $missing = append $missing "bootstrapDbReparent is off, so the account-minting bootstrap still authenticates AS edgeuser -- dropping it would strip the identity issuing the mint" -}}
 {{-   end -}}
-{{-   if not (include "tracebloc.serviceDbAccounts" .) -}}
-{{-     $missing = append $missing "serviceDbAccounts is off, so the metadata and dataset data plane still connects as edgeuser" -}}
-{{-   end -}}
 {{-   if not (include "tracebloc.perExperimentDbCreds" .) -}}
 {{-     $missing = append $missing "perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential" -}}
 {{-   end -}}
 {{-   if $missing -}}
-{{-     fail (printf "dropEdgeuser is on but this fleet is not ready to retire edgeuser. Blocking reasons: %s. Dropping now would break a live consumer still authenticating as edgeuser, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent), narrow it, then drop. A DROP is NOT reversible from the S0 snapshot." (join "; " $missing)) -}}
+{{-     fail (printf "dropEdgeuser is on but this fleet is not ready to retire edgeuser. Blocking reasons: %s. Dropping now would break a live consumer still authenticating as edgeuser, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error. Complete the posture first (perExperimentDbCreds, then bootstrapDbReparent), narrow it, then drop. A DROP is NOT reversible from the S0 snapshot." (join "; " $missing)) -}}
 {{-   end -}}
 {{- end -}}
 {{- end }}
@@ -2834,7 +2805,7 @@ true
 {{- $resolved = get $aliases $raw -}}
 {{- end -}}
 {{- if not (has $resolved (list "dev" "stg" "prod")) -}}
-{{- fail (printf "env.%s: %q is not a recognized environment. Accepted: dev, stg, prod (canonical) or development, staging, production (aliases); empty/unset means prod. This value is the tag for the jobs-manager, pods-monitor and resource-monitor images, and it keys images.ingestor.channelTags, serviceDbAccountsByEnv and the prod digest pin -- an unrecognized value would pull unpublished tags, miss every one of those lookups and silently drop the pin. Note dev/stg are abbreviated: `develop` and `production` differ, and only the six listed spellings resolve." $source $raw) -}}
+{{- fail (printf "env.%s: %q is not a recognized environment. Accepted: dev, stg, prod (canonical) or development, staging, production (aliases); empty/unset means prod. This value is the tag for the jobs-manager, pods-monitor and resource-monitor images, and it keys images.ingestor.channelTags, the per-environment gate defaults and the prod digest pin -- an unrecognized value would pull unpublished tags, miss every one of those lookups and silently drop the pin. Note dev/stg are abbreviated: `develop` and `production` differ, and only the six listed spellings resolve." $source $raw) -}}
 {{- end -}}
 {{- $resolved -}}
 {{- end }}
@@ -2858,22 +2829,12 @@ true
 
   WHY THE FALLBACK IS KEYED ON THE ENVIRONMENT, not a single literal.
 
-  This used to be a bare `"0.8"` for every environment, which made a dev or
-  staging edge whose `channelTags` are absent — the `--reuse-values` replay
-  this branch exists for — spawn the PROD line. That inverts the entire point
-  of the channel scheme: dev/stg channels exist so an ingestor change can be
+  A single literal for every environment would make a dev or staging edge
+  whose `channelTags` are absent — the `--reuse-values` replay this branch
+  exists for — spawn the PROD line. That inverts the entire point of the
+  channel scheme: dev/stg channels exist so an ingestor change can be
   validated on a real edge without a prod release, and an edge silently
-  validating prod's image reports on the wrong artifact. It also crosses the
-  signing boundary in the safe direction only by accident.
-
-  It is worse than a wrong tag today. The prod float has moved past the
-  ordering ceiling documented at values.yaml `prodDigest`: the
-  0.8 line no longer carries the ingestor's `edgeuser` DB_USER default that
-  an ingestor release removed. `serviceDbAccountsByEnv` supplies DB_USER on
-  dev/stg, so those two survive it — but the coupling is accidental, and the
-  same literal is what an out-of-vocabulary CLIENT_ENV lands on, where
-  `serviceDbAccountsByEnv` misses too and nothing supplies DB_USER. That is
-  the same failure reconstructed from a typo.
+  validating prod's image reports on the wrong artifact.
 
   KEEP THE `prod` ENTRY IN SYNC with values.yaml `channelTags.prod`. It is a
   second copy of the same float and there is no way to read the first from
@@ -2894,8 +2855,8 @@ true
 {{- if $channel -}}
 {{- $channel -}}
 {{- else -}}
-{{- $fallbacks := dict "dev" "dev" "stg" "stg" "prod" "0.8" -}}
-{{- get $fallbacks $clientEnv | default "0.8" -}}
+{{- $fallbacks := dict "dev" "dev" "stg" "stg" "prod" "0.12" -}}
+{{- get $fallbacks $clientEnv | default "0.12" -}}
 {{- end -}}
 {{- end -}}
 {{- end }}
@@ -2912,20 +2873,7 @@ true
 {{- end -}}
 {{- $clientEnv := include "tracebloc.clientEnv" . -}}
 {{- if and $prodPin (eq $clientEnv "prod") -}}
-{{- /*
-  Two prod pins, chosen by whether this edge has service DB accounts. Ingestors from v0.8.8 on require
-  DB_USER, which jobs-manager injects (TB_INGEST_USER) only when
-  tracebloc.serviceDbAccounts is on. An edge with it OFF must stay on
-  `prodDigest`, inside the safe set {v0.8.0 … v0.8.4} (docs/SECURITY.md §4.1.1).
-  An edge with it ON — every fresh install — gets `prodDigestServiceDb`, a
-  current build, instead of being held two months back for a fallback it never
-  uses. Empty `prodDigestServiceDb` keeps the old single-pin behaviour.
-*/ -}}
-{{- if and (include "tracebloc.serviceDbAccounts" .) $ing.prodDigestServiceDb -}}
-{{- $ing.prodDigestServiceDb -}}
-{{- else -}}
-{{- $ing.prodDigest | default "" -}}
-{{- end -}}
+{{- $ing.prodDigestServiceDb | default "" -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

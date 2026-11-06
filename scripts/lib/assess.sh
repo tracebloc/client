@@ -222,7 +222,7 @@ _assess_release_client_env() {
 # curl's trust (curl reads the user's CURL_CA_BUNDLE itself, see cluster.sh).
 #
 # verify_credentials asks the backend of THIS run's stage (the shell's
-# TRACEBLOC_ENV/CLIENT_ENV, default prod), and a `--reissue` would mint against
+# TRACEBLOC_ENV, default prod), and a `--reissue` would mint against
 # that same stage. So the probe only judges a release installed for that stage: a
 # dev or staging client re-checked from a shell without its env would read
 # `invalid` on prod and have a working credential rotated.

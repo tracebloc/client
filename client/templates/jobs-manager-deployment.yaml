@@ -622,13 +622,10 @@ spec:
               name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
               key: TRACEBLOC_CREDMGR_PASSWORD
         {{- end }}
-        {{- if (include "tracebloc.serviceDbAccounts" .) }}
-        # Dedicated MySQL service
-        # identities that replace the root-equivalent edgeuser. jobs-manager
-        # mints tb_meta (owns the metadata DB) and tb_ingest (writes the dataset
-        # DB) at startup from these generated Secrets. Additive — nothing
-        # consumes the accounts until S2 — so this is rendered only when enabled
-        # and a default install stays byte-identical.
+        # Dedicated MySQL service identities that replace the root-equivalent
+        # edgeuser, always on. jobs-manager mints tb_meta (owns the metadata DB)
+        # and tb_ingest (writes the dataset DB) at startup from these generated
+        # Secrets, and hands tb_ingest to every ingestion Job as DB_USER.
         - name: TRACEBLOC_SERVICE_DB_ACCOUNTS
           value: "1"
         - name: TRACEBLOC_META_USER
@@ -645,7 +642,6 @@ spec:
             secretKeyRef:
               name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
               key: TRACEBLOC_INGEST_PASSWORD
-        {{- end }}
         # Give each ingestion Job its own short-lived, ingest-scoped
         # backend token instead of the edge's shared one.
         # Resolved by tracebloc.ingestRunToken; why each fleet has its default:
@@ -687,7 +683,7 @@ spec:
         # "non-numeric" report). The image-refresh CronJob no longer touches the
         # ingestor — its class-2 pass was retired in favour of this.
         #
-        # Prod: DIGEST renders `images.ingestor.prodDigest`, a CHART DEFAULT, so
+        # Prod: DIGEST renders `images.ingestor.prodDigestServiceDb`, a CHART DEFAULT, so
         # prod is reproducible with no per-edge action and a republished pin
         # reaches installed edges via the auto-upgrade's
         # `--reset-then-reuse-values`. `prodPin: false` opts a

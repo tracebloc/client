@@ -2283,11 +2283,12 @@ _native_k3s_ensure_firewall_tool() {
 # Best-effort, like nftables: a refusal names what to install.
 # TRACEBLOC_K3S_MODULES_DIR is the TEST SEAM: the running kernel's module directory.
 _native_k3s_ensure_bridge_module() {
-  local dir="${TRACEBLOC_K3S_MODULES_DIR:-/lib/modules/$(uname -r 2>/dev/null)}" ext ko rc=0
+  local dir="${TRACEBLOC_K3S_MODULES_DIR:-/lib/modules/$(uname -r 2>/dev/null)}" ext ko pm rc=0
   [[ -r "${dir}/modules.dep" ]] || return 0
   if grep -qE '(^|/)br_netfilter\.ko' "${dir}/modules.dep" "${dir}/modules.builtin" 2>/dev/null; then return 0; fi
   case " ${PM_INSTALL:-} " in
-    *" dnf "*|*" yum "*) ;;
+    *" dnf "*) pm=dnf ;;
+    *" yum "*) pm=yum ;;
     *) log "step b: native k3s: this kernel has no br_netfilter module, and this package manager cannot be asked for it by path"; return 0 ;;
   esac
   # The compression this kernel's modules carry, read from the bridge module's own
@@ -2311,7 +2312,7 @@ _native_k3s_ensure_bridge_module() {
   if (( rc == 124 )) && [[ -n "${_TB_SPIN_SURVIVORS:-}" ]]; then
     error "Installing the br_netfilter kernel module did not finish within 10 minutes, and the package manager is still running and holding the package lock. Wait for it to finish, check your network/proxy, then re-run prepare-host or the installer."
   elif (( rc != 0 )); then
-    warn "This kernel has no br_netfilter module, and installing it failed, so pods may not reach the cluster. Run 'sudo dnf install ${ko}' (after a kernel update, reboot first), then re-run the installer."
+    warn "This kernel has no br_netfilter module, and installing it failed, so pods may not reach the cluster. Run 'sudo ${pm} install kernel-modules-${dir##*/} kernel-modules-extra-${dir##*/}' (after a kernel update, reboot first), then re-run the installer."
   elif ! tb_root_planning; then
     # --print installed nothing: its plan lists the install, so nothing is claimed here.
     log "step b: native k3s: installed ${ko}; k3s loads it when it starts"

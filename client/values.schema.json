@@ -19,7 +19,7 @@
             "staging",
             "production"
           ],
-          "description": "CANONICAL name. Environment identifier and image tag. Canonical values are `dev`, `stg`, `prod`; the documented aliases `development`/`staging`/`production` are accepted and normalized (matching client-runtime proxy_config.ENV_ALIASES). Empty means 'unset' and resolves to prod. THE LIST IS CLOSED (enum above): anything else is rejected at install/upgrade time rather than passed through as a literal image tag. Read alias-first against the legacy `CLIENT_ENV` (a non-empty TRACEBLOC_ENV wins; otherwise a non-empty CLIENT_ENV; a blank value on either name is 'unset', same as CLIENT_ENV alone always meant); remove_by 2026-12-31, after which CLIENT_ENV stops being read. Load-bearing in four places (control-plane image tags, images.ingestor.channelTags, serviceDbAccountsByEnv, the prod digest pin), validated in none but tracebloc.clientEnv."
+          "description": "CANONICAL name. Environment identifier and image tag. Canonical values are `dev`, `stg`, `prod`; the documented aliases `development`/`staging`/`production` are accepted and normalized (matching client-runtime proxy_config.ENV_ALIASES). Empty means 'unset' and resolves to prod. THE LIST IS CLOSED (enum above): anything else is rejected at install/upgrade time rather than passed through as a literal image tag. Read alias-first against the legacy `CLIENT_ENV` (a non-empty TRACEBLOC_ENV wins; otherwise a non-empty CLIENT_ENV; a blank value on either name is 'unset', same as CLIENT_ENV alone always meant); remove_by 2026-12-31, after which CLIENT_ENV stops being read. Load-bearing in four places (control-plane image tags, images.ingestor.channelTags, the per-environment gate defaults, the prod digest pin), validated in none but tracebloc.clientEnv."
         },
         "CLIENT_ENV": {
           "type": "string",
@@ -704,7 +704,7 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from narrowEdgeuserByEnv keyed on the resolved CLIENT_ENV. REVOKE the root-equivalent edgeuser to USAGE only at every jobs-manager boot, so a fleet that completed the retirement STAYS retired. mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants edgeuser its broad privileges at every FRESH datadir init and cannot branch on a runtime flag — it is baked into a digest-frozen image and the mysql entrypoint runs it before jobs-manager exists — so without this a reinstall or a datadir loss silently hands the fleet a root-equivalent account again. It REVOKEs, never DROPs: the account keeps existing with USAGE only, reversible from the S0 SHOW GRANTS snapshot, and DROP USER stays an operator step. ONLY LEGAL WITH ALL THREE PREDECESSORS ON (bootstrapDbReparent, serviceDbAccounts, perExperimentDbCreds), and that pairing is ENFORCED rather than documented — the render FAILS on a mis-paired combination and jobs-manager refuses it again at startup. Verify a fleet with docs/migration-tools/edgeuser-drop-readiness.sh before flipping it."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from narrowEdgeuserByEnv keyed on the resolved CLIENT_ENV. REVOKE the root-equivalent edgeuser to USAGE only at every jobs-manager boot, so a fleet that completed the retirement STAYS retired. mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants edgeuser its broad privileges at every FRESH datadir init and cannot branch on a runtime flag — it is baked into a digest-frozen image and the mysql entrypoint runs it before jobs-manager exists — so without this a reinstall or a datadir loss silently hands the fleet a root-equivalent account again. It REVOKEs, never DROPs: the account keeps existing with USAGE only, reversible from the S0 SHOW GRANTS snapshot, and DROP USER stays an operator step. ONLY LEGAL WITH BOTH PREDECESSORS ON (bootstrapDbReparent, perExperimentDbCreds; the tb_meta/tb_ingest service accounts are always on), and that pairing is ENFORCED rather than documented — the render FAILS on a mis-paired combination and jobs-manager refuses it again at startup. Verify a fleet with docs/migration-tools/edgeuser-drop-readiness.sh before flipping it."
     },
     "narrowEdgeuserByEnv": {
       "type": "object",
@@ -718,7 +718,7 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from dropEdgeuserByEnv keyed on the resolved CLIENT_ENV. the terminal step past narrowEdgeuser — DROP USER 'edgeuser'@'%' and @'localhost' at every jobs-manager boot, so an inaccessible customer secure environment retires the default-credential account itself (we never reach those secure environments to run the DDL by hand). STRICTLY STRONGER THAN narrowEdgeuser AND GATED ON IT, enforced two ways: the BAKED default (dropEdgeuserByEnv) resolves on only where narrowEdgeuser also resolves on (tracebloc.dropEdgeuser returns empty otherwise), and an explicit dropEdgeuser:true override is honored by the helper but then REFUSED at render by tracebloc.assertDropEdgeuserIsSafe — and again by jobs-manager at startup — when narrowEdgeuser is not on. So the effect is the same whichever path you take: a secure environment is never dropped before it is narrowed. It therefore inherits narrowEdgeuser's full predecessor requirement (bootstrapDbReparent, serviceDbAccounts, perExperimentDbCreds all on), checked in the same assert. The DROP is IF EXISTS and idempotent: once the account is gone each subsequent boot is a no-op. Unlike narrow (reversible from the S0 SHOW GRANTS snapshot) this is NOT reversible — only flip it where the fleet's posture is verified and narrowEdgeuser has already soaked."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from dropEdgeuserByEnv keyed on the resolved CLIENT_ENV. the terminal step past narrowEdgeuser — DROP USER 'edgeuser'@'%' and @'localhost' at every jobs-manager boot, so an inaccessible customer secure environment retires the default-credential account itself (we never reach those secure environments to run the DDL by hand). STRICTLY STRONGER THAN narrowEdgeuser AND GATED ON IT, enforced two ways: the BAKED default (dropEdgeuserByEnv) resolves on only where narrowEdgeuser also resolves on (tracebloc.dropEdgeuser returns empty otherwise), and an explicit dropEdgeuser:true override is honored by the helper but then REFUSED at render by tracebloc.assertDropEdgeuserIsSafe — and again by jobs-manager at startup — when narrowEdgeuser is not on. So the effect is the same whichever path you take: a secure environment is never dropped before it is narrowed. It therefore inherits narrowEdgeuser's full predecessor requirement (bootstrapDbReparent and perExperimentDbCreds on), checked in the same assert. The DROP is IF EXISTS and idempotent: once the account is gone each subsequent boot is a no-op. Unlike narrow (reversible from the S0 SHOW GRANTS snapshot) this is NOT reversible — only flip it where the fleet's posture is verified and narrowEdgeuser has already soaked."
     },
     "dropEdgeuserByEnv": {
       "type": "object",
@@ -736,7 +736,8 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from serviceDbAccountsByEnv keyed on the resolved CLIENT_ENV. Set true/false to force one answer on this secure environment regardless of environment. Provision the dedicated MySQL service identities tb_meta (metadata DB) and tb_ingest (dataset DB) that replace the root-equivalent edgeuser. S2 has shipped, so wherever this is on the consumers authenticate as the dedicated identities; only an explicit override-off renders the shared-edgeuser path byte-for-byte. Flip per environment, dev first."
+      "description": "DEPRECATED and ignored: the dedicated MySQL service identities tb_meta (metadata DB) and tb_ingest (dataset DB) are always on, in every environment, and every ingestion Job gets DB_USER=tb_ingest. Accepted only so a release that stored it still renders. An explicit false is ignored: the secure environment is migrated on its next upgrade (jobs-manager mints both accounts at boot) and NOTES.txt names the value it ignored.",
+      "deprecated": true
     },
     "tbMetaPassword": {
       "type": "string",
@@ -751,14 +752,14 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from ingestRunTokenByEnv keyed on the resolved CLIENT_ENV, mirroring serviceDbAccounts. Set true/false to force one answer on this secure environment regardless of environment. When on, jobs-manager gives each ingestion Job its own per-run, ingest-scoped, 24h backend token minted through the backend's POST /ingest-token/ instead of the secure environment's shared token; rendered as TRACEBLOC_INGEST_RUN_TOKEN \"true\"/\"false\". A 404 from the endpoint falls back to the shared token; any other mint failure fails the ingestion submit with 502. Forcing it on needs an ingestor that reads TRACEBLOC_INGESTOR_ID / BACKEND_TOKEN_SCHEME: an older ingestor breaks under a bound token, so a secure environment whose ingestor resolves to images.ingestor.prodDigest resolves off even when this is true."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from ingestRunTokenByEnv keyed on the resolved CLIENT_ENV, mirroring narrowEdgeuser. Set true/false to force one answer on this secure environment regardless of environment. When on, jobs-manager gives each ingestion Job its own per-run, ingest-scoped, 24h backend token minted through the backend's POST /ingest-token/ instead of the secure environment's shared token; rendered as TRACEBLOC_INGEST_RUN_TOKEN \"true\"/\"false\". A 404 from the endpoint falls back to the shared token; any other mint failure fails the ingestion submit with 502. Forcing it on needs an ingestor that reads TRACEBLOC_INGESTOR_ID / BACKEND_TOKEN_SCHEME: an older ingestor breaks under a bound token. Every chart pin reads them; an operator-set images.ingestor.digest must too."
     },
     "bootstrapDbReparent": {
       "type": [
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from bootstrapDbReparentByEnv keyed on the resolved CLIENT_ENV, mirroring serviceDbAccounts. Re-parent the account-minting bootstrap DDL off the root-equivalent edgeuser onto MySQL root (the runtime reads DB_BOOTSTRAP_USER/PASSWORD), the prerequisite for REVOKE/DROP of edgeuser. Off everywhere by default; flip per environment dev-first, only after serviceDbAccounts + perExperimentDbCreds are verified on the fleet and the S0 SHOW GRANTS snapshot is captured. When on, bootstrapDbPassword is REQUIRED."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from bootstrapDbReparentByEnv keyed on the resolved CLIENT_ENV, mirroring narrowEdgeuser. Re-parent the account-minting bootstrap DDL off the root-equivalent edgeuser onto MySQL root (the runtime reads DB_BOOTSTRAP_USER/PASSWORD), the prerequisite for REVOKE/DROP of edgeuser. Off everywhere by default; flip per environment dev-first, only after perExperimentDbCreds is verified on the fleet and the S0 SHOW GRANTS snapshot is captured. When on, bootstrapDbPassword is REQUIRED."
     },
     "bootstrapDbPassword": {
       "type": "string",
@@ -769,7 +770,7 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from rotateMysqlRootByEnv keyed on the resolved CLIENT_ENV, mirroring serviceDbAccounts. chart-manage the mysql-client root password (generated Secret + MYSQL_ROOT_PASSWORD env) so a FRESH datadir is born rotated off the image's baked literal. Off everywhere by default. Only rotates a fresh datadir; an existing secure environment needs the one-time ALTER USER 'root' rollout DDL (reads the same Secret), or selfRotateMysqlRoot, which has mysqld run it at every start. Turning it on rolls the mysql pod."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from rotateMysqlRootByEnv keyed on the resolved CLIENT_ENV, mirroring narrowEdgeuser. chart-manage the mysql-client root password (generated Secret + MYSQL_ROOT_PASSWORD env) so a FRESH datadir is born rotated off the image's baked literal. Off everywhere by default. Only rotates a fresh datadir; an existing secure environment needs the one-time ALTER USER 'root' rollout DDL (reads the same Secret), or selfRotateMysqlRoot, which has mysqld run it at every start. Turning it on rolls the mysql pod."
     },
     "mysqlRootPassword": {
       "type": "string",
@@ -862,7 +863,7 @@
     },
     "perIngestionTablesByEnv": {
       "type": "object",
-      "description": "Per-environment default for perIngestionTables, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). Mirrors ingestRunTokenByEnv. On for dev since a run on a dev secure environment showed the whole D16 path (physical_table on the backend row, training reads ds_<hex>, tb data delete drops the table, the salt and the journal). Off for stg and prod until tb data list names a ds_ table by its dataset; stg's journey checks what users see and gates every promotion. A secure environment whose ingestor resolves to images.ingestor.prodDigest (v0.8.2, before the data-ingestors v0.8.16 ds_ handle fix) resolves off whatever this map or the override says. A secure environment upgraded with plain --reuse-values from a chart without this key resolves off; --reset-then-reuse-values picks it up.",
+      "description": "Per-environment default for perIngestionTables, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). Mirrors ingestRunTokenByEnv. On for dev since a run on a dev secure environment showed the whole D16 path (physical_table on the backend row, training reads ds_<hex>, tb data delete drops the table, the salt and the journal). Off for stg and prod until tb data list names a ds_ table by its dataset; stg's journey checks what users see and gates every promotion. A secure environment upgraded with plain --reuse-values from a chart without this key resolves off; --reset-then-reuse-values picks it up.",
       "additionalProperties": {
         "type": "boolean"
       }
@@ -1348,7 +1349,7 @@
         },
         "ingestor": {
           "type": "object",
-          "description": "Image used for spawned ingestion Jobs. jobs-manager resolves one effective digest from these keys (see the tracebloc.ingestorDigest helper) and builds the reference from it (client-runtime submit_ingestion_run): digest set -> repo@digest + IfNotPresent, digest empty -> repo:tag + Always. Prod pins `prodDigest` (a chart default, so a republished pin propagates through the fleet auto-upgrade); dev/staging float on `tag`, resolving the current published digest at every spawn.",
+          "description": "Image used for spawned ingestion Jobs. jobs-manager resolves one effective digest from these keys (see the tracebloc.ingestorDigest helper) and builds the reference from it (client-runtime submit_ingestion_run): digest set -> repo@digest + IfNotPresent, digest empty -> repo:tag + Always. Prod pins `prodDigestServiceDb` (a chart default, so a republished pin propagates through the fleet auto-upgrade); dev/staging float on `tag`, resolving the current published digest at every spawn.",
           "properties": {
             "repository": {
               "type": "string",
@@ -1396,12 +1397,13 @@
             "prodDigest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",
-              "description": "Prod reproducibility pin (sha256:<64 hex>), applied when `prodPin` resolves true (i.e. CLIENT_ENV resolves to prod). A CHART DEFAULT by design: `helm upgrade --reset-then-reuse-values` (the fleet auto-upgrade) adopts new chart defaults but re-applies stored user-supplied values, so only a default can update an installed secure environment. Must be a multi-arch index; regenerate with scripts/resolve-ingestor-digest.sh --write and bump Chart.yaml."
+              "description": "DEPRECATED and ignored: the retired v0.8.2 prod pin for secure environments with service DB accounts off. Service DB accounts are always on now, so every prod secure environment runs `prodDigestServiceDb`. Accepted only so a release that stored it still renders.",
+              "deprecated": true
             },
             "prodDigestServiceDb": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",
-              "description": "Prod pin for secure environments whose `serviceDbAccounts` resolves on (every fresh install) — they get DB_USER, so they can run a current ingestor. Applied instead of `prodDigest` when `prodPin` resolves true and service DB accounts are on; empty = use `prodDigest` for every prod secure environment. Must be a multi-arch index; resolve with scripts/resolve-ingestor-digest.sh and bump Chart.yaml."
+              "description": "Prod reproducibility pin (sha256:<64 hex>), applied when `prodPin` resolves true (i.e. CLIENT_ENV resolves to prod) on every prod secure environment. A CHART DEFAULT by design: `helm upgrade --reset-then-reuse-values` (the fleet auto-upgrade) adopts new chart defaults but re-applies stored user-supplied values, so only a default can update an installed secure environment. Must be a multi-arch index; resolve with scripts/resolve-ingestor-digest.sh --write. Empty = float on channelTags.prod."
             },
             "pinnedImageLabels": {
               "type": "object",
@@ -1426,11 +1428,11 @@
             },
             "prodPin": {
               "type": "boolean",
-              "description": "Whether `prodDigest` applies on this secure environment. Default true = pin on prod only; dev/staging carry env.CLIENT_ENV=dev|stg and keep floating on `tag`. Set false on a canary prod secure environment to float it while the rest of the fleet stays pinned."
+              "description": "Whether `prodDigestServiceDb` applies on this secure environment. Default true = pin on prod only; dev/staging carry env.CLIENT_ENV=dev|stg and keep floating on `tag`. Set false on a canary prod secure environment to float it while the rest of the fleet stays pinned."
             },
             "ackDrift": {
               "type": "object",
-              "description": "Acknowledged, expected drift for THIS pin. Present only when `prodDigest` is deliberately held behind the `channelTags.prod` float (docs/SECURITY.md §4.1.1). scripts/check-digest-drift.sh then treats the float resolving away from the pin as EXPECTED (job green, printed ACKNOWLEDGED) instead of a finding -- while still re-verifying the pin itself resolves to a healthy multi-arch index, and while ANY OTHER pin drifting still reds. Not consumed by any template; a CI/watch declaration that lives next to the pin and behind CODEOWNERS review. Acknowledge the CLASS, never a specific float digest. Remove this block in the same change that advances the pin off the boundary.",
+              "description": "DEPRECATED and ignored: the acknowledged-drift hold that kept the retired `prodDigest` pin behind the `channelTags.prod` float. Nothing reads it; accepted only so a release that stored it still renders.",
               "additionalProperties": false,
               "required": [
                 "line",
@@ -1450,12 +1452,13 @@
                   "minLength": 1,
                   "description": "Human justification for holding the pin behind its float, surfaced verbatim in the ACKNOWLEDGED report. State WHY, so a reader sees when it no longer applies."
                 }
-              }
+              },
+              "deprecated": true
             },
             "digest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",
-              "description": "Optional explicit per-secure-environment pin (sha256:<64 hex>). Empty (default) = let prodPin/CLIENT_ENV decide. When set it wins over `prodDigest` and over `prodPin: false` in ANY environment, and every ingestion Job runs this exact image with imagePullPolicy=IfNotPresent (reproducibility). Must be a multi-arch index. Surfaces as INGESTOR_IMAGE_DIGEST."
+              "description": "Optional explicit per-secure-environment pin (sha256:<64 hex>). Empty (default) = let prodPin/CLIENT_ENV decide. When set it wins over `prodDigestServiceDb` and over `prodPin: false` in ANY environment, and every ingestion Job runs this exact image with imagePullPolicy=IfNotPresent (reproducibility). Must be a multi-arch index. Surfaces as INGESTOR_IMAGE_DIGEST."
             }
           }
         },
@@ -2246,22 +2249,23 @@
       ]
     },
     "serviceDbAccountsByEnv": {
-      "type": "object",
-      "description": "Per-environment default for the dedicated tb_meta/tb_ingest identities, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). It lets the fleet flip per environment, dev first, with the posture readable in one place.",
+      "type": ["object", "null"],
+      "description": "DEPRECATED and ignored: service DB accounts are always on in every environment (see serviceDbAccounts). Accepted only so a release that stored it still renders; an entry set to false is ignored and NOTES.txt names it.",
       "additionalProperties": {
         "type": "boolean"
-      }
+      },
+      "deprecated": true
     },
     "ingestRunTokenByEnv": {
       "type": "object",
-      "description": "Per-environment default for the per-run ingest token, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). Mirrors serviceDbAccountsByEnv. dev is true: the :dev ingestor channel carries the per-run token support and the dev API serves /ingest-token/. stg is true: the :stg ingestor channel publishes from data-ingestors staging, which carries the per-run token support, and backend staging serves /ingest-token/. prod is true: images.ingestor.prodDigestServiceDb carries the per-run token support and backend main serves /ingest-token/. A secure environment whose ingestor resolves to images.ingestor.prodDigest (a prod secure environment with serviceDbAccounts off, a pin held behind the per-run token support) resolves off whatever this map or the override says. A secure environment upgraded with plain --reuse-values from a chart without this key has no fleet default to read, so it keeps the shared token it already had, and the render does not fail; --reset-then-reuse-values picks this map up.",
+      "description": "Per-environment default for the per-run ingest token, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). Mirrors narrowEdgeuserByEnv. dev is true: the :dev ingestor channel carries the per-run token support and the dev API serves /ingest-token/. stg is true: the :stg ingestor channel publishes from data-ingestors staging, which carries the per-run token support, and backend staging serves /ingest-token/. prod is true: images.ingestor.prodDigestServiceDb carries the per-run token support and backend main serves /ingest-token/. A secure environment upgraded with plain --reuse-values from a chart without this key has no fleet default to read, so it keeps the shared token it already had, and the render does not fail; --reset-then-reuse-values picks this map up.",
       "additionalProperties": {
         "type": "boolean"
       }
     },
     "bootstrapDbReparentByEnv": {
       "type": "object",
-      "description": "Per-environment default for the bootstrap re-parent (edgeuser -> root for the account-minting DDL), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). Mirrors serviceDbAccountsByEnv. This is the LAST, edgeuser-retiring step. Baked ON for dev, stg and prod, but on the baked path it re-parents ONLY a fresh or already-rotated secure environment (see rotateMysqlRoot) so an existing un-rotated secure environment is left alone rather than wedged; an accessible existing secure environment is rotated by the explicit override plus the one-time ALTER USER 'root'.",
+      "description": "Per-environment default for the bootstrap re-parent (edgeuser -> root for the account-minting DDL), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). Mirrors narrowEdgeuserByEnv. This is the LAST, edgeuser-retiring step. Baked ON for dev, stg and prod, but on the baked path it re-parents ONLY a fresh or already-rotated secure environment (see rotateMysqlRoot) so an existing un-rotated secure environment is left alone rather than wedged; an accessible existing secure environment is rotated by the explicit override plus the one-time ALTER USER 'root'.",
       "additionalProperties": {
         "type": "boolean"
       }

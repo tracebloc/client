@@ -159,6 +159,16 @@ data:
         }'
     }
 
+    # What is not ready in the release's PENDING upgrade revision, or nothing when
+    # the release is not mid-upgrade. Same reads and table as not_ready_workloads.
+    pending_not_ready() {
+      _pn="$(helm status "$TRACEBLOC_RELEASE_NAME" -n "$TRACEBLOC_RELEASE_NAMESPACE" --show-resources 2>/dev/null \
+        || helm status "$TRACEBLOC_RELEASE_NAME" -n "$TRACEBLOC_RELEASE_NAMESPACE" 2>/dev/null || true)"
+      case "$_pn" in
+        *"STATUS: pending-upgrade"*) printf '%s\n' "$_pn" | not_ready_workloads ;;
+      esac
+    }
+
     # One `helm upgrade --atomic`, run as given ($3...), with its outcome read.
     # $1/$2 are the from/to chart versions the log names. Output still streams
     # (tee), so a Job killed mid-op keeps what helm printed. Returns 0 on
@@ -169,7 +179,21 @@ data:
       _au_from="$1"; _au_to="$2"; shift 2
       _au_out="$(mktemp "${TMPDIR:-/tmp}/auto-upgrade-helm-out.XXXXXX")"
       _au_rcf="$(mktemp "${TMPDIR:-/tmp}/auto-upgrade-helm-rc.XXXXXX")"
+      # `--atomic` rolls back before this function reads helm status, and the rolled-back
+      # revision is healthy, so what was not ready is gone by then. A sampler reads
+      # the pending revision while helm still waits and keeps its last non-empty answer.
+      _au_samp="$(mktemp "${TMPDIR:-/tmp}/auto-upgrade-helm-seen.XXXXXX")"
+      ( while :; do
+          sleep "${TRACEBLOC_STATUS_SAMPLE_SECONDS:-30}"
+          _au_s="$(pending_not_ready || true)"
+          if [ -n "$_au_s" ]; then printf '%s\n' "$_au_s" >"$_au_samp.new" && mv -f "$_au_samp.new" "$_au_samp"; fi
+        done ) >/dev/null 2>&1 &
+      _au_sampler=$!
       { "$@" 2>&1 && echo 0 >"$_au_rcf" || echo "$?" >"$_au_rcf"; } | tee "$_au_out"
+      kill "$_au_sampler" 2>/dev/null || true
+      wait "$_au_sampler" 2>/dev/null || true
+      _au_seen="$(cat "$_au_samp" 2>/dev/null || true)"
+      rm -f "$_au_samp" "$_au_samp.new"
       _au_rc="$(cat "$_au_rcf" 2>/dev/null || true)"
       rm -f "$_au_rcf"
       case "$_au_rc" in ''|*[!0-9]*) _au_rc=1 ;; esac
@@ -220,6 +244,7 @@ data:
       if [ "$_au_kind" = timeout ]; then
         _au_res="$( { helm status "$TRACEBLOC_RELEASE_NAME" -n "$TRACEBLOC_RELEASE_NAMESPACE" --show-resources 2>/dev/null \
           || helm status "$TRACEBLOC_RELEASE_NAME" -n "$TRACEBLOC_RELEASE_NAMESPACE" 2>/dev/null; } | not_ready_workloads || true)"
+        [ -n "$_au_res" ] || { [ -z "$_au_seen" ] || _au_res="$_au_seen (seen while helm waited)"; }
         log "ERROR: UPGRADE TIMEOUT $_au_from -> $_au_to: helm's wait did not see the release ready within --timeout $TRACEBLOC_UPGRADE_TIMEOUT; rollback: $_au_rb (release status: ${_au_status:-unreadable}); not ready: ${_au_res:-none named by helm status, check: kubectl -n $TRACEBLOC_RELEASE_NAMESPACE get pods}"
       fi
       case "$_au_rb" in

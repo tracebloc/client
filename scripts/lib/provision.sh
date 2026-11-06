@@ -208,11 +208,16 @@ _login_tty_ok() { { : </dev/tty; } 2>/dev/null; }
 # the command, wrong here, where a bare login would leave the client mint and the
 # Helm install undone. _device_sign_in below owns the recovery advice.
 # It is a command prefix, not an export — no later CLI call should inherit it.
+#
+# The login is handed this run's stage as TRACEBLOC_ENV, prod when it is unset,
+# because the session it opens is the backend every later CLI call mints on. A
+# CLI reads stage names this installer does not, so left to the shell it could
+# sign in to another backend than the one the client is installed against.
 _run_device_login() {
   if _login_tty_ok; then
-    TRACEBLOC_INSTALLER=1 tracebloc login </dev/tty >/dev/tty 2>/dev/tty
+    TRACEBLOC_INSTALLER=1 TRACEBLOC_ENV="${TRACEBLOC_ENV:-prod}" tracebloc login </dev/tty >/dev/tty 2>/dev/tty
   else
-    TRACEBLOC_INSTALLER=1 tracebloc login </dev/null
+    TRACEBLOC_INSTALLER=1 TRACEBLOC_ENV="${TRACEBLOC_ENV:-prod}" tracebloc login </dev/null
   fi
 }
 

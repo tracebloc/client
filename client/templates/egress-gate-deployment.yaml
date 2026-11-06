@@ -211,14 +211,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
                   key: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
-            {{- if (include "tracebloc.serviceDbAccounts" .) }}
             # Authenticate the gate's
             # metadata-DB access as the dedicated tb_meta identity instead of
             # the root-equivalent edgeuser. Only the metadata identity is wired
             # here -- the gate never touches the dataset DB. jobs-manager mints
             # tb_meta at its startup; the gate's bootstrap retries until it
-            # lands. Rendered only when enabled, so a default install stays
-            # byte-identical (mirrors the jobs-manager block).
+            # lands.
             - name: TRACEBLOC_SERVICE_DB_ACCOUNTS
               value: "1"
             - name: TRACEBLOC_META_USER
@@ -228,7 +226,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
                   key: TRACEBLOC_META_PASSWORD
-            {{- end }}
           volumeMounts:
             - name: egress-record
               mountPath: /var/lib/tracebloc/egress-record

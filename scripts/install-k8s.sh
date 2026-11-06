@@ -42,9 +42,7 @@
 #                                required for a TRACEBLOC_HOST_DATASET_DIR network mount).
 #    TRACEBLOC_HOST_DATASET_DIR=/data01/tracebloc  optional separate dataset dir (hostpath)
 #                                Linux/k3s path only.
-#    TRACEBLOC_ENV=dev           optional, canonical name; if neither this nor the
-#                                legacy CLIENT_ENV is set, no stage var is added to values
-#    CLIENT_ENV=dev              legacy alias for TRACEBLOC_ENV, remove_by 2026-12-31
+#    TRACEBLOC_ENV=dev           optional; if unset, no stage var is added to values
 #    TRACEBLOC_FORCE_REINSTALL=1  skip the "already set up" stop-and-check gate
 #                                and re-run every step (same as --force/--reinstall)
 #    TRACEBLOC_LEFTOVER_ACTION=reuse|wipe  non-interactive answer to the leftover-data

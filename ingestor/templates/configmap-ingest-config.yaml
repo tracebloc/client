@@ -38,7 +38,7 @@ data:
   #
   # `image_digest` is OPTIONAL in the POST body:
   # when omitted, jobs-manager uses whatever the client chart resolved
-  # for the cluster — the prod pin `images.ingestor.prodDigest` on prod,
+  # for the cluster — the prod pin `images.ingestor.prodDigestServiceDb` on prod,
   # the floating `images.ingestor.tag` off-prod — both kept current by
   # the auto-upgrade flow. Including it here only when the customer
   # explicitly pinned via `--set image.digest=...` means the dominant

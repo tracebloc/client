@@ -1465,59 +1465,62 @@ images:
   training:
     pinned: ""
     digestRegistry: "ghcr.io"
-    engineCommit: "b29e36b0b02532b39da031e0b4cab5c673f5ea1b"
+    engineCommit: "cee664f1d1b551ef4c9fddfad80dd71dcbbc9c62"
     digests:
       causal_language_modeling:
-        cpu: "sha256:2df991969a270ab47c64644b7e6cdf4dd076f01b80aba3ff8c07c46d0c3bc8ec"
-        gpu: "sha256:01c5ffda197e504bda958ce6d241938bc41f5e217f9bb9d7ef1f0198c5584381"
+        cpu: "sha256:0b7c850289da05c350be0f95680c5288c6d863b1824c8ccf25488e81e299d58e"
+        gpu: "sha256:24b506fa9edd769c6385ec3b0e2f4da7784ec09d58897e7df5acdf608ed358bf"
       embeddings:
-        cpu: "sha256:5de52fd116d323d81d9775df87fcc4f67eda5ecf05798de4783f0eab1e833bd3"
-        gpu: "sha256:2a19f87f80c0b1a4811fc621823b7e890e0360b0e598f6e1b1c824ac69258c62"
+        cpu: "sha256:c09dbbaf13dc291bf40c0acb41f4178050113e5daee8fca51d6de95a30cf0f02"
+        gpu: "sha256:985d71d942c3db58748619c95830e1ae1ffb881a1ae29195bb9dbd34bdf4ae28"
       image_classification:
-        cpu: "sha256:5af8193f20330c82a0385647eb2f1dd5dd1f45cda799ec36f4deb4eb36763a01"
-        gpu: "sha256:02c0e63bf7e5fe3af6113bafd22b2c382d3d2d182e4d6eb79a04debab78a7745"
+        cpu: "sha256:f8520aaaac52a09e072deeae05e479f51b1a6e7d4ac6381503c8b7ec3c983ab3"
+        gpu: "sha256:9af12d34da9c39b70e70ab783af5b64203da712d511d13a750ec36a5b991845f"
       keypoint_detection:
-        cpu: "sha256:6af102f2bb797a86200f059c6e4b1487f30bc79220737d15ae0e90cbac6a3180"
-        gpu: "sha256:ba53b929df2f29b52afa0319d99f3ea7a503b9f2e11e5b73f170fd8c4fdc34f1"
+        cpu: "sha256:f3e75ce601275ec39a6e9f2319c5f06d57fc07612d6bca20a8e7c99aafcbf53c"
+        gpu: "sha256:9e7e4ee31fbc8485ecde612a25e90ca23384921431b38b48cd521285edbb06ec"
       masked_language_modeling:
-        cpu: "sha256:a388844e40779d70220b6457aa5458a536c533ae486c6e9f3a4e181c97c28a43"
-        gpu: "sha256:efb567f3972db3c74f4ef7ed123e2fd46db36324474ed64056b210580a00550e"
+        cpu: "sha256:1953c12efd5cc5718794de4ac920a0504ead81a2106acb24ec1a5420539944e4"
+        gpu: "sha256:2c4817631cfab52f47ea35a84866e7270ae34608ecc5476cadf871d9103abed7"
       multi_label_text_classification:
-        cpu: "sha256:92e479c2d0242cebecb22d4733bbfc895506545543ab0a09568ebcd016254f2d"
-        gpu: "sha256:8362f9d4743aa68b06f028ba834315880b69ea7271affd4feb0b6ee715ad4703"
+        cpu: "sha256:a0220c58356b32ebff2f21faa7407edc4978d253777cb354f0486e0a4584aa0c"
+        gpu: "sha256:b9dd1c40097ceee88fbc8d0d43e58698237f74bc15defc1e70d92b26520c559b"
       object_detection:
-        cpu: "sha256:6bd4fca8a1ea5101832e095ca507d38e3ad580d4dda12088a7b34b22fca5ef92"
-        gpu: "sha256:164011764b07f72a67657bd23ebc27b99e2dadd2c053a2544318eff7cf4f56bb"
+        cpu: "sha256:27042cfb51600ff49492df35e40363939c94ff5400fcd67ea7b107d9dc6f7ddd"
+        gpu: "sha256:3df3de4239419eab66c3a607e0e0caf5b22926d77a39218891c7ecf1bece4e1a"
       semantic_segmentation:
-        cpu: "sha256:32720d9c44a1bc857ef53575762dba63276c787edd6c15c810a48df7bb8b7cdb"
-        gpu: "sha256:55fd2c671bf2830686ced32ea2bcab688e4efac78419ad9f19fbf03973a859f2"
+        cpu: "sha256:d67c6218fbd54d7a1dab69c629940b02838e48866c536942acf91e86eeba9959"
+        gpu: "sha256:da7fadff9c8398e0161e31bb1aa53e2f574d3335a128f668cab5a4be1d70defb"
       sentence_pair_classification:
-        cpu: "sha256:9373b0e1548cbeda9a7261c06360bf0d7d373bc6f9e5aaf424960ffee37f03cf"
-        gpu: "sha256:3976fdca43428cb772d41fbcc926db9ec4e9185a6f572fd5db1f11d61f9e6c41"
+        cpu: "sha256:e6906408f9db426742dc308f3912bd417ecc2c28bf51ee150f477b2ae44b6569"
+        gpu: "sha256:f7669dc015223843a6625af9635afa6dd339331aaecf0edac6b194a8fe143f8d"
       seq2seq:
-        cpu: "sha256:44f9057ef4553745497cbb03f9522864095dc04be338b766038c1cce8a2586c7"
-        gpu: "sha256:cbab48b6c6d5cf3165e3354ff8c26de6f029e0c48e8c232e1c5d73b64fdc6e73"
+        cpu: "sha256:b7278da1df5a4d2fd25347801aa8f3de5fd7091ab36311d27904aa9cc12192d6"
+        gpu: "sha256:a679f9c47f4d35da459968aa4715aca26fea5a06185ebc2a28384848e97512e6"
       tabular_classification:
-        cpu: "sha256:a9db1749edf3d4a10ce90dc05757ba61648a45ce3bfcaed4db84330603783e50"
-        gpu: "sha256:aa5455fea8022e295fa4d5ff7e829b263effd2d17cc7f17a0f25c6f8691fdcf8"
+        cpu: "sha256:1a7065bdb8fd985a297957a7a7464ffa0964f06db1feb75169079dac220639a2"
+        gpu: "sha256:58889ac6c23c08c289a222d48846fd0f7b7055368edc1429d7d4e8dbbc7b4ba1"
       tabular_regression:
-        cpu: "sha256:f48ddd9a4e22f204a76b24c72af13a32f9228e0e3ea2d192c63a46f52f4244b2"
-        gpu: "sha256:5a0f9a97e65a3ae613a30e9d6e5ff797555405173898cea738cd5f1323ef4571"
+        cpu: "sha256:b09b7d1410d3404cb9fbb90416f0653df2f70bcc02c7202afab2955258cb4902"
+        gpu: "sha256:0fb79af30279b413fb6665eb5ec5916c5dbfc5b6580ab91587abfffe1120b403"
       text_classification:
-        cpu: "sha256:3cbec3308c89d410ab98524b174c1f048362525b5803b6c493f6ace3dc15c0ae"
-        gpu: "sha256:6344cfe235d943822a5acb476a32b7f0d9b45a372775d5257467e4c9422e8288"
+        cpu: "sha256:2b5b66b64ad0157794d3b1a2329c40eb575992df8e63681b0f1b62cbc913cff3"
+        gpu: "sha256:0abd0dfac28292284065d06643893fa51e5a38ea95f53b6707f128d7c613fa77"
+      text_regression:
+        cpu: "sha256:d2d6202071a0de9ccbd6d68942a2790cf250bb454ad4252e551c897d41a06e14"
+        gpu: "sha256:5201f52a16bfaad8b85bcd35df931155766b578e6a8b3c2a3f74d830e073b15b"
       time_series_classification:
-        cpu: "sha256:a34239e9464b5432f04390c5a3df67d139f7b436d70f993d2be4ebf5eb2d21d0"
-        gpu: "sha256:a5d588b69025a7a44fd93f0f97bfd18dbfbc7ac194d4085a3a16ff39fd19809a"
+        cpu: "sha256:eec1027086d5d5d5cae604c27dc8b0a17a08983be09f2e05d21aa2c67ff07ca7"
+        gpu: "sha256:7789a540941b321dae8706160510c8773f396b867443b982a7ec3dc4308337d0"
       time_series_forecasting:
-        cpu: "sha256:ff54b0d854fb9b762a8612be6732753ed6cad7e3239720bae62b1c41ef02e507"
-        gpu: "sha256:b88d91329020ab9dd7391ad1f16b4e0179c3ec01232a71cd7aac61ae6946916f"
+        cpu: "sha256:af2ab51d22cd88a04280f5c1798e210d6b24e888258579a0e94db0e76acc2411"
+        gpu: "sha256:f746e75731cbf247f724b9f185fe99bfcbb4c871296287916d2f473a47646f20"
       time_to_event_prediction:
-        cpu: "sha256:929221a24d61444138434019e691024ad49b0c974bad6239f12e3e5d08ce984b"
-        gpu: "sha256:b52fada63b9bf64439e7a1389a6accc5965eb2c4db7893f8142271d5c6bf0aca"
+        cpu: "sha256:11dffd4440e2eb561f4723b3ff52dc4f8ecdfa568bbda556cee77e734f1d103d"
+        gpu: "sha256:16e118758efd2ba165ea349bb7d12789ff1993e5ae86d6d51b909f513c808842"
       token_classification:
-        cpu: "sha256:39ea9881f4b0f7727d24a62659f5d500352962782d6824bf27be0998dd304851"
-        gpu: "sha256:05fd462f540733464e5140f1076409b7702d39b8c6abbf91a825bd84f17b31c6"
+        cpu: "sha256:469c16e51fcc985612e93bea0a83be3859229d11fe1a2c5b9eebe1de9144f086"
+        gpu: "sha256:353c8c8336959ae772df411f841f70709c0aaf7f728a18462b31eff5a851e327"
     capabilities: "ddp,loss-coupled:embeddings,loss-coupled:time_to_event_prediction,min-micro-batch:2,no-backend-token,per_rank_split"
     parents:
       gpu:
@@ -1526,8 +1529,8 @@ images:
         platforms:
           - "linux/amd64"
     macosBundle:
-      digest: "sha256:f695915b34b17bccd85b98412cf232c0239265ee3a16d2f0f7905c13333640a5"
-      location: "ghcr.io/tracebloc/engine-macos-arm64@sha256:431d0612fe12a2ae39e6478a9fa63529c5bfe5b901b35c9a18d9e5c9139c315b"
+      digest: "sha256:cc9a7f95edf69cdccc8a668cc6473aac2e8aac584192e38ca21ce4226edc1500"
+      location: "ghcr.io/tracebloc/engine-macos-arm64@sha256:4723171e97b2e019d5cf8172dea48258e1cdaad64d20a0e41fe0ea59f0f25838"
   # The ingestor image is spawned by
   # jobs-manager at ingestion-submission time, not as a long-lived pod.
   # jobs-manager resolves ONE effective digest from the keys below and spawns
@@ -1550,10 +1553,11 @@ images:
   #     jobs-manager pod.
   #
   # Prod — pinned, reproducible:
-  #   * `prodDigest` below is a CHART DEFAULT and applies whenever the resolved
-  #     CLIENT_ENV is "prod", so a standard prod install is reproducible with no
-  #     per-edge action and a republished pin reaches installed edges through the
-  #     auto-upgrade the fleet already runs. See `prodDigest`/`prodPin`.
+  #   * `prodDigestServiceDb` below is a CHART DEFAULT and applies whenever the
+  #     resolved CLIENT_ENV is "prod", so a standard prod install is reproducible
+  #     with no per-edge action and a republished pin reaches installed edges
+  #     through the auto-upgrade the fleet already runs. See
+  #     `prodDigestServiceDb`/`prodPin`.
   #   * An earlier attempt distributed this pin through an install-time
   #     `-f values-prod.yaml` overlay. That reached no edge: the installer never
   #     passed the overlay, and `helm upgrade --reset-then-reuse-values` (the
@@ -1562,7 +1566,7 @@ images:
   #     updated either. Chart defaults propagate; user-supplied values freeze.
   #     Hence the pin lives here.
   #
-  # Any pinned digest — `prodDigest` or `digest` — MUST be a multi-arch index
+  # Any pinned digest — `prodDigestServiceDb` or `digest` — MUST be a multi-arch index
   # (linux/amd64 + linux/arm64): an amd64-only pin breaks ingestion on arm64
   # hosts (Apple Silicon, Graviton) with "no match for platform" /
   # ImagePullBackOff (the amd64-only v0.3.1 pin was the original
@@ -1582,12 +1586,7 @@ images:
     # `latest` is rejected by the schema.
     #
     # THIS FIELD IS EMPTY BY DEFAULT — see `tag: ""` below. The per-environment
-    # floats in `channelTags` are what actually select a tag, and prod's is
-    # `"0.8"`. An earlier revision of this comment said `0.7` was the default
-    # and that the chart was "pinned to the 0.7 line"; both stopped being true
-    # when tag selection moved into `channelTags`, and the stale
-    # text survived long enough to disagree with the `prodDigest` note 90 lines
-    # down.
+    # floats in `channelTags` are what actually select a tag.
     #
     # The line the fleet tracks carries the ingestion correctness fixes and task
     # catalogue accumulated to date — case/whitespace
@@ -1615,7 +1614,7 @@ images:
     # PyPI publish plus an FR-gate override (2026-07-30).
     #
     # `prod` deliberately stays a semver float, NOT a `:prod` channel — no
-    # such tag is published; prod normally runs `prodDigest` anyway and this is
+    # such tag is published; prod normally runs `prodDigestServiceDb` and this is
     # only the fallback when pinning is disabled. Keep the prod entry tracking
     # the current release line for the same submit-vs-run reasons noted above.
     #
@@ -1629,161 +1628,73 @@ images:
     channelTags:
       dev: "dev"
       stg: "stg"
-      # 0.8 line: carries the ds_<hex> per-ingestion write path
-      # (first released as v0.8.0 on 2026-07-30). THIS FLOAT
-      # MOVES WITHOUT US: it was at v0.8.4 on 2026-08-12 and is at **v0.8.8**
-      # (sha256:4beb85da…) later the same day. `prodDigest` below deliberately
-      # pins v0.8.2 — see the ordering constraint noted there.
+      # 0.12 line: the first line that runs every task the CLI submits --
+      # FASTA folders (first in v0.11.1), multichannel images (v0.10.5),
+      # mixed image sizes (v0.10.0) and text-value stripping (v0.9.3). THIS
+      # FLOAT MOVES WITHOUT US: every 0.12.x patch lands on it.
       #
       # Do not restate the float's current version here. Any version written
       # into this comment is stale the moment the next release ships, and a
       # stale one reads as reassurance ("only two patches behind") for a gap
       # that may be much larger. scripts/check-digest-drift.sh is what tracks
-      # it; it compares the float against the pin on a schedule and says so
-      # when they part company. A prod edge left on 0.7
-      # spawns a pre-D16 ingestor
-      # and silently falls back to the legacy tables even with
-      # `perIngestionTables` on (found on staging). Verified multi-arch against
-      # ghcr.io 2026-08-04 (linux/amd64 + linux/arm64 OCI image index).
-      prod: "0.8"
+      # it; it compares the float against `prodDigestServiceDb` on a schedule,
+      # and the digest-drift watch opens the pin PR when they part company.
+      # Moving to a new line is a person's change: this value, the literal in
+      # `tracebloc.ingestorTag` and ingestor_channel_tag_test.yaml together.
+      prod: "0.12"
 
-    # -- PROD REPRODUCIBILITY PIN — the digest prod edges run.
+    # -- PROD REPRODUCIBILITY PIN — the digest every prod edge runs.
     #
     # This is a CHART DEFAULT on purpose. The fleet auto-upgrade
     # CronJob runs `helm upgrade --reset-then-reuse-values` with no `-f` and no
     # `--set`: it resets to the NEW chart's values.yaml defaults, then re-applies
     # only the release's stored user-supplied values. A default therefore reaches
     # every installed edge on the next auto-upgrade; an install-time overlay value
-    # freezes on its install-day value forever. The egress-proxy squid pin above
-    # is the in-chart precedent that already reaches installed edges.
+    # freezes on its install-day value forever.
     #
     # Applies only where `prodPin` resolves true (prod) — see `prodPin` below.
+    # It is the one prod pin: service DB accounts are always on, so every
+    # ingestion Job gets DB_USER=tb_ingest and no edge needs an ingestor that
+    # still carries the old edgeuser fallback (docs/SECURITY.md §4.1.1). The
+    # retired `prodDigest` key is accepted and ignored, so an edge that stored
+    # it cannot fail the render or run the build it named.
     #
-    # RELEASE CONVENTION — re-verify at each prod cut. Resolve it with the
-    # helper, never by hand (it reads `tag` above, checks the multi-arch index,
-    # and refuses to write a single-arch digest):
-    #   scripts/resolve-ingestor-digest.sh            # print the index digest
-    #   scripts/resolve-ingestor-digest.sh --write    # patch the value below
-    # then bump Chart.yaml — the chart only publishes on a version change, so an
-    # unbumped refresh reaches nobody — and commit. CI's `ingestor-multiarch`
-    # job validates this value on every PR.
+    # A canonical multi-arch index, resolved, never hand-typed:
+    # `scripts/resolve-ingestor-digest.sh` prints the `channelTags.prod` float's
+    # index and `--write` patches this line. No Chart.yaml bump: the release
+    # train numbers the client chart, so the next release publishes it. CI's
+    # `ingestor-multiarch` job checks it on every PR.
     #
-    # ghcr.io/tracebloc/ingestor multi-arch index for the 0.8 line, **v0.8.2** —
-    # VERIFIED against ghcr.io 2026-08-12 (linux/amd64 + linux/arm64 OCI image
-    # index; matches the v0.8.2 GitHub Release digest). The `VERIFIED` note is
-    # the audit trail: re-resolve it, do not trust a previous note's date.
-    #
-    # DELIBERATELY BEHIND the `channelTags.prod: "0.8"` float, and the float has
-    # CROSSED THE BOUNDARY. Do not "refresh" this to the float without reading
-    # the ordering constraint in docs/SECURITY.md §4.1.1: `serviceDbAccountsByEnv.prod`
-    # is now `true` by default, but an existing edge upgraded with plain
-    # `--reuse-values` keeps its stored `false` (the new default is never injected),
-    # so it still gets no DB_USER and still needs the fallback; and the boundary is not
-    # a version number — it is whether the release you move to was cut before
-    # the edgeuser fallback was dropped. `prodPin: true` means this digest, not the float, is
-    # what a prod edge with serviceDbAccounts OFF spawns, which is exactly the
-    # protection being relied on. Edges with serviceDbAccounts ON spawn
-    # `prodDigestServiceDb` below instead.
-    #
-    # WHERE THE BOUNDARY IS, stated so it cannot go stale with the next release:
-    # The change that drops the edgeuser fallback merged 2026-08-11 10:48.
-    # v0.8.4 was cut 08-10 and does NOT contain it; **v0.8.8 (2026-08-12) is the
-    # FIRST release that does**, and every 0.8.x after it therefore does too.
-    # Verified by ancestry against the tags, not by reading a changelog.
-    #
-    # So the safe set is exactly {v0.8.0 … v0.8.4}, and this pin (v0.8.2) is in
-    # it. Naming the first UNSAFE release rather than "the current float" is the
-    # point: an earlier revision of this note said the fix was "NOT yet in any 0.8
-    # release" and that "the next 0.8 release is the dangerous one" — true when
-    # written on 2026-08-12, false hours later when v0.8.8 shipped, and by then
-    # it contradicted the paragraph directly above it in this same comment.
-    # A boundary is a fact; "the latest release" is a moving target.
-    #
-    # -- ACKNOWLEDGED DRIFT. Because `prodDigest` is deliberately
-    # held behind the `channelTags.prod` float above, scripts/check-digest-drift.sh
-    # sees `ghcr.io/tracebloc/ingestor:0.8` resolve away from this pin every
-    # night. That divergence is EXPECTED. Left unhandled it made the daily watch
-    # RED forever, which trained everyone to ignore it AND masked any NEW,
-    # actionable drift on another pin (squid, mysql-client) behind the standing
-    # red -- the known failure mode. This block tells the watcher the
-    # divergence is acknowledged, so the job goes GREEN and prints ACKNOWLEDGED,
-    # while ANY OTHER pin drifting still reds it.
-    #
-    # It is NOT a blanket mute. The watcher still re-verifies, every run, that
-    # THIS pin resolves to a healthy multi-arch index; a pin that stopped
-    # resolving or went single-arch reds regardless of this block. And the
-    # acknowledgement is declared HERE, not in the script, on purpose: acknowledging
-    # a security-relevant drift belongs next to the pin and behind this file's
-    # CODEOWNERS review, so lifting it is a reviewed chart change rather than a
-    # silent script edit.
-    #
-    #   line   — the channel line this acknowledgement was reasoned about. It
-    #            MUST equal channelTags.prod above. If the prod float is ever moved
-    #            to a new line, these stop matching, the acknowledgement LAPSES,
-    #            and the watch reds until someone re-derives the boundary for the
-    #            new line and updates both. Do not paste a digest here: the float
-    #            legitimately roams every 0.8.x patch, so a digest would re-alarm
-    #            on each one — acknowledge the CLASS, never a specific float.
-    #   reason — surfaced verbatim in the ACKNOWLEDGED report. Keep it a factual
-    #            statement of WHY the pin is held back, so a reader (or an operator
-    #            about to flip serviceDbAccountsByEnv.prod) sees when it no longer
-    #            applies. When the boundary is resolved, delete this whole block in
-    #            the same change that advances the pin.
-    ackDrift:
-      line: "0.8"
-      reason: "prodDigest pins v0.8.2 deliberately behind the 0.8 float: the float has crossed the boundary (edgeuser DB_USER fallback dropped, first present in v0.8.8). serviceDbAccountsByEnv.prod is now true by default, so a fresh 1.9.98+ install injects DB_USER=tb_ingest and needs no fallback -- but the durable un-migrated population still does: an edge upgraded with plain --reuse-values, or carrying an operator-set serviceDbAccountsByEnv.prod: false (which --reset-then-reuse-values replays verbatim forever), keeps that flag off, gets no DB_USER, and genuinely still needs the v0.8.2 fallback. (A prod edge merely still on a pre-1.9.98 chart self-heals within ~1h of publish via the auto-upgrade CronJob's --reset-then-reuse-values; the two above do not -- see scripts/tests/e2e-auto-upgrade.sh.) Holding the pin inside the safe set {v0.8.0..v0.8.4} is the protection being relied on until those edges adopt serviceDbAccounts=true (or a prod-safe 0.8.x is cut) -- NOT until edgeuser is narrowed/dropped, which is the moment the fallback stops working too."
-    prodDigest: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
-
-    # -- PROD PIN FOR EDGES WITH SERVICE DB ACCOUNTS.
-    #
-    # `prodDigest` above is held at v0.8.2 only for edges whose
-    # `serviceDbAccounts` resolves OFF: they get no DB_USER, and every ingestor
-    # from v0.8.8 on requires it. An edge with service DB accounts ON — every
-    # fresh install, since `serviceDbAccountsByEnv.prod` defaults to true — has
-    # TB_INGEST_USER injected and is safe on any current build. Holding those
-    # edges on v0.8.2 too made new prod users run an ingestor that can't do
-    # manifest-less object detection (v0.8.17+): the CLI and
-    # docs submit a config the spawned image rejects (the submit-vs-run drift
-    # class noted at `tag` above).
-    #
-    # So `tracebloc.ingestorDigest` picks THIS digest on prod when service DB
-    # accounts are on, and `prodDigest` when they are off. Empty = fall back to
-    # `prodDigest` for every prod edge.
-    #
-    # Same rules as `prodDigest`: a canonical multi-arch index, resolved, never
-    # hand-typed (`scripts/resolve-ingestor-digest.sh <version>` prints it). No
-    # Chart.yaml bump: the release train numbers the client chart,
-    # so the next release publishes it. CI's `ingestor-multiarch` job checks it.
-    #
-    # The digest-drift watch moves THIS pin, and only this one, by pull request:
+    # The digest-drift watch moves this pin by pull request, within its line:
     # when the `channelTags.prod` float names a newer release on its line,
     # scripts/verify-ingestor-release.sh re-verifies it and
     # scripts/ingestor-auto-pin.sh rewrites the pin, the paragraph below and its
     # `pinnedImageLabels` entry. A check that fails keeps the watch red and
     # opens nothing (docs/SECURITY.md §4.1.1).
     #
-    # ghcr.io/tracebloc/ingestor multi-arch index, **v0.8.96** — VERIFIED
-    # against ghcr.io 2026-10-28 by scripts/verify-ingestor-release.sh in the
-    # digest-drift watch: a linux/amd64 + linux/arm64 OCI image index, the
-    # digest the `0.8` float, the `0.8.96` tag and the v0.8.96 GitHub Release
+    # ghcr.io/tracebloc/ingestor multi-arch index, **v0.12.2** — VERIFIED
+    # against ghcr.io 2026-11-06 by scripts/verify-ingestor-release.sh, every
+    # check but scope (a new line is a person's pin, so scope refuses it by
+    # design): a linux/amd64 + linux/arm64 OCI image index, the
+    # digest the `0.12` float, the `0.12.2` tag and the v0.12.2 GitHub Release
     # name, with one version and revision label on both platforms; revision
-    # 82b180e, on main and named by refs/tags/v0.8.96; SLSA provenance and a
+    # a7c214c, on main and named by refs/tags/v0.12.2; SLSA provenance and a
     # cosign keyless signature from data-ingestors' release-image.yml at
-    # refs/tags/v0.8.96. What the release changes is in its GitHub Release
-    # notes and in the pin PR, which the watch opened.
-    prodDigestServiceDb: "sha256:7a0c4f9973383a424871ffd05976adcc253a772021be197840f803e1c1dcf5af"
+    # refs/tags/v0.12.2. What the release changes is in its GitHub Release
+    # notes.
+    prodDigestServiceDb: "sha256:d33e6845bae45a8ea084e3cb37d8fe04b95fe26ceffea62a8ea042284f1e6ddf"
 
     # -- What each chart-pinned ingestor image says about itself, keyed by its
     # digest. When the digest `tracebloc.ingestorDigest`
     # picks for this edge has an entry here, jobs-manager carries it as
     # TRACEBLOC_INGESTOR_IMAGE_VERSION / TRACEBLOC_INGESTOR_CAPABILITIES, and the
     # CLI reads those BEFORE it copies any data: an edge whose ingestor can't
-    # run what the CLI is about to submit (manifest-less object detection on
-    # v0.8.2, say) is refused up front in plain words, instead of failing a
+    # run what the CLI is about to submit (a FASTA folder on a release before
+    # v0.11.1, say) is refused up front in plain words, instead of failing a
     # schema check after the whole upload.
     #
     # Keyed by digest, not by pin name, so an entry can only ever describe the
-    # image it was read from: an operator-set `digest` / `prodDigest` that is
+    # image it was read from: an operator-set `digest` / `prodDigestServiceDb` that is
     # not listed here renders neither var (the CLI then treats the ingestor as
     # unknown and does not block), and a floating tag never renders them.
     #
@@ -1796,17 +1707,15 @@ images:
     #
     # READ OFF THE IMAGE, NEVER TYPED: `scripts/ingestor-pin-labels.sh <digest>`
     # prints the entry, and CI's `ingestor-multiarch` job fails when a chart pin
-    # (prodDigest, prodDigestServiceDb, digest) has no entry, when an entry
+    # (prodDigestServiceDb, digest) has no entry, when an entry
     # disagrees with its image's labels, or when an entry names a digest no
     # chart pin uses. Moving a pin therefore means re-running the script.
     pinnedImageLabels:
-      "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873":
-        version: "0.8.2"
-      "sha256:7a0c4f9973383a424871ffd05976adcc253a772021be197840f803e1c1dcf5af":
-        version: "0.8.96"
-        capabilities: "ingest:v1,layout:4,object_detection:manifestless,option:example,task:causal_language_modeling,task:embeddings,task:image_classification,task:keypoint_detection,task:masked_language_modeling,task:object_detection,task:semantic_segmentation,task:sentence_pair_classification,task:seq2seq,task:tabular_classification,task:tabular_regression,task:text_classification,task:time_series_classification,task:time_series_forecasting,task:time_to_event_prediction,task:token_classification"
+      "sha256:d33e6845bae45a8ea084e3cb37d8fe04b95fe26ceffea62a8ea042284f1e6ddf":
+        version: "0.12.2"
+        capabilities: "ingest:v1,layout:4,multi_label_text_classification:fasta,object_detection:manifestless,option:example,tabular_classification:wide-table,tabular_regression:wide-table,task:causal_language_modeling,task:embeddings,task:image_classification,task:keypoint_detection,task:masked_language_modeling,task:multi_label_text_classification,task:object_detection,task:semantic_segmentation,task:sentence_pair_classification,task:seq2seq,task:tabular_classification,task:tabular_regression,task:text_classification,task:time_series_classification,task:time_series_forecasting,task:time_to_event_prediction,task:token_classification,text_classification:fasta,time_series_forecasting:named-time-column,token_classification:fasta"
 
-    # -- Whether `prodDigest` applies on this edge. Default true, which means
+    # -- Whether `prodDigestServiceDb` applies on this edge. Default true, which means
     # "pin on prod only": it takes effect when the resolved CLIENT_ENV is "prod"
     # (that is, `env.CLIENT_ENV` unset or empty — the template defaults it to
     # prod). Dev and staging installs carry `env.CLIENT_ENV: dev|stg` in their
@@ -1822,14 +1731,14 @@ images:
     # -- Explicit per-edge pin. Empty (default) = let `prodPin`/CLIENT_ENV
     # decide. Set to a canonical multi-arch digest to lock every ingestion Job on
     # THIS edge to that exact image in ANY environment; it takes precedence over
-    # `prodDigest` and over `prodPin: false` (so for a hard float, clear this to
+    # `prodDigestServiceDb` and over `prodPin: false` (so for a hard float, clear this to
     # "" as well). Use for debugging a release before rollout, certification, or
     # air-gapped repro. A single request can also be pinned via the submit
     # endpoint's `image_digest` body field, independent of this value.
     #
     # Set at install time this becomes a user-supplied value, so it freezes
     # across auto-upgrades — intended for a deliberate per-edge pin, and exactly
-    # why the fleet-wide prod pin lives in `prodDigest` instead.
+    # why the fleet-wide prod pin lives in `prodDigestServiceDb` instead.
     #
     # Last known-good baseline, for easy manual pinning: v0.3.6 (cumulative
     # NULL / empty-value ingestion fixes):
@@ -2886,10 +2795,8 @@ perIngestionTables:
 # TODO: turn stg, then prod, on once `tb data list` names ds_ tables.
 #
 # An ingestor older than data-ingestors v0.8.16 reports the dataset's --name
-# instead of its ds_ handle and its delete misses the table. A
-# prod secure environment with service DB accounts off runs prodDigest (v0.8.2), so
-# tracebloc.perIngestionTables resolves off on that pin whatever this map or the
-# override says.
+# instead of its ds_ handle and its delete misses the table. Every chart pin is
+# newer; an operator-set `images.ingestor.digest` must be too before this is on.
 #
 # An edge upgraded with plain `--reuse-values` from a chart without these keys
 # has neither: the gate resolves off there and the render does not fail. The
@@ -3008,7 +2915,7 @@ stopKindSignal:
 # path. Where an operator overrides it off, behaviour is the old shared-credential
 # path, byte-for-byte. Needs no per-edge action — the tb_credmgr password is a
 # generated, upgrade-stable Secret value.
-# LEFT NULL ON PURPOSE, matching serviceDbAccounts. The helper distinguishes
+# LEFT NULL ON PURPOSE, matching narrowEdgeuser. The helper distinguishes
 # "unset" from "explicitly false" with `kindIs "invalid"`, so a literal
 # `false` here is an OPERATOR OVERRIDE that wins over every fleet default and
 # makes the map below dead. Measured: with `perExperimentDbCreds: false` left in
@@ -3019,7 +2926,7 @@ perExperimentDbCreds:
 #
 # An operator `--set perExperimentDbCreds` still wins; with it unset, the fleet
 # default below applies, resolved through the same CLIENT_ENV normalization as
-# serviceDbAccountsByEnv (so `staging` maps to `stg` and cannot miss its entry).
+# narrowEdgeuserByEnv (so `staging` maps to `stg` and cannot miss its entry).
 #
 # WHY THIS EXISTS. Every other gate in this rollout had a `…ByEnv` map; this one
 # did not, so the flag the LAST step is gated on was the one whose
@@ -3068,16 +2975,17 @@ perExperimentDbCredsByEnv:
 # to connect, able to do nothing -- which is reversible from the S0
 # `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot. `DROP USER` stays an operator step.
 #
-# ONLY LEGAL WITH ALL THREE PREDECESSORS ON: bootstrapDbReparent (else the REVOKE
-# strips the privileges of the connection issuing it), serviceDbAccounts and
-# perExperimentDbCreds (else a live consumer is still authenticating as edgeuser).
+# ONLY LEGAL WITH BOTH PREDECESSORS ON: bootstrapDbReparent (else the REVOKE
+# strips the privileges of the connection issuing it) and perExperimentDbCreds
+# (else a training pod is still authenticating as edgeuser). The third, the
+# tb_meta/tb_ingest service accounts, is always on.
 # Enforced, not documented: the render FAILS on a mis-paired combination, and
 # jobs-manager refuses it again at startup. Verify a fleet is ready with
 # docs/migration-tools/edgeuser-drop-readiness.sh before flipping this.
 #
 # UNSET by default: the effective value comes from narrowEdgeuserByEnv below,
 # keyed on the resolved CLIENT_ENV. Set this to force one answer on an edge
-# regardless of environment. Mirrors serviceDbAccounts.
+# regardless of environment. Mirrors perExperimentDbCreds.
 narrowEdgeuser:
 
 narrowEdgeuserByEnv:
@@ -3122,67 +3030,17 @@ dropEdgeuserByEnv:
 # jobs-manager rejects other characters.
 credmgrPassword: ""
 
-# S1: provision the dedicated MySQL
-# service identities tb_meta (owns the metadata DB) and tb_ingest (writes the
-# dataset DB) that replace the root-equivalent edgeuser for jobs-manager,
-# requests-proxy and the ingestor. jobs-manager mints both at startup from the
-# generated Secret below (SERVICE_DB_ACCOUNTS). S2 has SHIPPED, so wherever this
-# flag is on the consumers authenticate as these dedicated identities; only where
-# an operator overrides it off does the old shared-edgeuser path render byte-for-byte.
+# S1: the dedicated MySQL service identities tb_meta (owns the metadata DB)
+# and tb_ingest (writes the dataset DB) that replace the root-equivalent edgeuser
+# for jobs-manager, the egress gate and the ingestor. jobs-manager mints both at
+# startup from the generated Secret below, and every ingestion Job it spawns gets
+# DB_USER=tb_ingest. ALWAYS ON, in every environment: the shared-edgeuser path is
+# gone, and with it the ingestor pin that path needed (docs/SECURITY.md §4.1.1).
 #
-# Flipped per environment, dev first; now ON for dev, stg and prod (see
-# serviceDbAccountsByEnv below) — where an operator overrides it off, behaviour is
-# the old shared-edgeuser path, byte-for-byte. Needs no per-edge action — the passwords are
-# generated, upgrade-stable Secret values.
-# UNSET by default: the effective value comes from `serviceDbAccountsByEnv`
-# below, keyed on the resolved CLIENT_ENV. Set this to force one answer on an
-# edge regardless of environment (an operator override — DR, a fleet held back
-# deliberately, or a customer opt-out).
-serviceDbAccounts:
-
-# -- PER-ENVIRONMENT ROLLOUT
-#
-# The plan is recorded as "flip per environment, dev first". Until now there
-# was no mechanism for that — one global boolean meant "per environment" was
-# hand-editing every edge's values and remembering which fleet was where.
-#
-# That gap had teeth. The ingestor's edgeuser
-# fallback was removed on the stated precondition that this flag was "on fleet-wide"; it
-# was on nowhere. dev and staging edges float on the :dev/:stg ingestor
-# channels, took the change the same day, and every ingestion Job now fails at
-# Config() before reading a byte. Prod escaped only because its ingestor is
-# digest-pinned — `prodDigest` is v0.8.2, cut 2026-08-04, a week before the ingestor change
-# merged — a caution engineered for something else and spent on this instead.
-#
-# (An earlier revision of
-# this paragraph said "the 0.7 line" and "one is about to spend";
-# the first was already wrong and the second described the future. Line 1091
-# below said "past 0.8.2" the whole time, so the file disagreed with itself
-# about which release prod actually runs.)
-#
-# dev/stg: TRUE. Both are already running the ingestor that requires the
-# per-Job credentials, so this is what makes them work again — and it exercises
-# the S2 path where it is supposed to be exercised, before prod.
-#
-# prod: TRUE. Staging and prod both completed the full rollout and DROPped
-# edgeuser (2026-08-31, 2026-09-01), so the retired
-# posture is a thing to bake: a fresh prod install (or a values-reset) comes up
-# on the per-Job tb_meta/tb_ingest identities rather than relying on the operator
-# override the live edges carry (a default cannot record
-# per-fleet migration state).
-#
-# Flipping serviceDbAccounts ON is the SAFE direction of the ingestor coupling.
-# The danger is repinning a fleet's ingestor PAST 0.8.2 — where the edgeuser
-# fallback is gone (v0.8.8 first dropped it; safe set v0.8.0…v0.8.4) — while this
-# is OFF, which strands ingestion with no credential. With it ON, jobs-manager
-# injects DB_USER=tb_ingest into ingestion Jobs, so `prodDigest` (v0.8.2, still in
-# the safe set) keeps working and a later repin past 0.8.2 is safe. On an existing
-# un-migrated edge the mint runs as edgeuser (re-parent stays off by default), so
-# turning this on auto-provisions tb_meta/tb_ingest without a manual step.
-serviceDbAccountsByEnv:
-  dev: true
-  stg: true
-  prod: true
+# `serviceDbAccounts` and `serviceDbAccountsByEnv` are retired. The schema still
+# accepts them, so a release that stored them renders, but an explicit `false`
+# is ignored: the edge is migrated on its next upgrade, when jobs-manager mints
+# the two accounts at boot, and NOTES.txt names the value it ignored.
 
 # Optional operator pins for the tb_meta / tb_ingest account passwords (each
 # mirrors credmgrPassword's 3-tier resolution). Leave "" to generate-and-persist
@@ -3207,7 +3065,7 @@ tbIngestPassword: ""
 #
 # UNSET by default: the effective value comes from ingestRunTokenByEnv below,
 # keyed on the resolved CLIENT_ENV. Set true/false to force one answer on this
-# edge regardless of environment. Mirrors serviceDbAccounts -- and LEFT NULL ON
+# edge regardless of environment. Mirrors narrowEdgeuser -- and LEFT NULL ON
 # PURPOSE for the same reason: a literal `false` here is an OPERATOR OVERRIDE
 # that wins over the map and makes it dead.
 ingestRunToken:
@@ -3228,11 +3086,8 @@ ingestRunToken:
 # data-ingestors `staging` and carries it, and backend staging serves
 # /ingest-token/.
 #
-# prod: TRUE. A prod edge with service DB accounts on spawns
-# images.ingestor.prodDigestServiceDb, which carries it, and backend main serves
-# /ingest-token/. A prod edge with them off spawns images.ingestor.prodDigest,
-# held behind it (docs/SECURITY.md §4.1.1): there the gate resolves off whatever
-# this map says, see tracebloc.ingestRunToken.
+# prod: TRUE. Every prod edge spawns images.ingestor.prodDigestServiceDb, which
+# carries it, and backend main serves /ingest-token/.
 #
 # An edge upgraded with plain `--reuse-values` from a chart without these keys
 # has neither: the gate resolves off there, the shared-token behaviour it already
@@ -3266,7 +3121,7 @@ ingestRunTokenByEnv:
 # UNSET by default: the effective value comes from bootstrapDbReparentByEnv
 # below, keyed on the resolved CLIENT_ENV. Set this to force one answer on an
 # edge regardless of environment (an operator override — DR, a fleet held back
-# deliberately, or a customer opt-out). Mirrors serviceDbAccounts.
+# deliberately, or a customer opt-out). Mirrors narrowEdgeuser.
 #
 # BAKING THIS ON REQUIRES THE ROTATION ON TOO. The re-parent needs
 # root's password pinned as DB_BOOTSTRAP_PASSWORD, and of the three tiers that can
@@ -3352,7 +3207,7 @@ bootstrapDbPassword: ""
 #
 # UNSET by default: the effective value comes from rotateMysqlRootByEnv below,
 # keyed on the resolved CLIENT_ENV. Set this to force one answer on an edge
-# regardless of environment. Mirrors serviceDbAccounts / bootstrapDbReparent.
+# regardless of environment. Mirrors bootstrapDbReparent.
 rotateMysqlRoot:
 
 rotateMysqlRootByEnv:

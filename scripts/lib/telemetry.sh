@@ -410,9 +410,9 @@ telemetry_error_class() {
 telemetry_environment() {
   local env
   if declare -F tb_client_env >/dev/null 2>&1; then
-    env="$(tb_client_env "${TRACEBLOC_ENV:-${CLIENT_ENV:-prod}}")"
+    env="$(tb_client_env "${TRACEBLOC_ENV:-prod}")"
   else
-    env="${TRACEBLOC_ENV:-${CLIENT_ENV:-prod}}"
+    env="${TRACEBLOC_ENV:-prod}"
   fi
   case "$env" in
     dev|stg|prod) printf '%s' "$env" ;;

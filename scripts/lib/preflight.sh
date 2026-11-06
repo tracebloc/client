@@ -667,15 +667,14 @@ _pf_runtime_mem_status() {
   return 0
 }
 
-# Backend host per TRACEBLOC_ENV/CLIENT_ENV (mirrors
+# Backend host per TRACEBLOC_ENV (mirrors
 # install-client-helm.sh::_backend_url; inlined so preflight is
 # self-contained + unit-testable in isolation).
 _pf_backend_host() {
   # Same alias reduction as _backend_url — an egress preflight
   # that probes the wrong backend passes while the real path is unreachable.
-  # Bare call: tb_client_env's own ambient-env path is already alias-first,
-  # and the *) branch below is the prod-equivalent for any unset/unrecognised
-  # result, so there's nothing for an explicit fallback here to add.
+  # Bare call: tb_client_env reads the ambient TRACEBLOC_ENV, and the *)
+  # branch below is the prod-equivalent for any unset/unrecognised result.
   case "$(tb_client_env)" in
     dev) echo "dev-api.tracebloc.io" ;;
     stg) echo "stg-api.tracebloc.io" ;;
