@@ -574,8 +574,8 @@ _tb_live_tick() {
     frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏'); i=0; seen=""
     _TB_DL_TAIL=""; _TB_DL_RING=""; _TB_DL_PREV=0
     while kill -0 "$parent" 2>/dev/null; do
-      # The downloads are read once a second, the frame drawn every tick.
-      if [[ -n "$dl" && "$SECONDS" != "$seen" ]]; then seen=$SECONDS; _tb_dl_tick "$dl" "$SECONDS"; fi
+      # The downloads are read once a second once one has started, every tick until then.
+      if [[ -n "$dl" ]] && { [[ "$SECONDS" != "$seen" ]] || (( ! ${_TB_DL_STARTED:-0} )); }; then seen=$SECONDS; _tb_dl_tick "$dl" "$SECONDS"; fi
       _tb_tty _tb_live_frame "${frames[i]}" "$msg" "$detail" "$(_tb_elapsed $(( SECONDS - t0 )))${_TB_DL_TAIL}"
       i=$(( (i + 1) % 10 ))
       sleep 0.12
