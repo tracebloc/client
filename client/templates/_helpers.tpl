@@ -3138,6 +3138,33 @@ enabled
 {{- end -}}
 
 {{/*
+  tracebloc.telemetryOptOutEnv — the opt-out env entry for a control-plane
+  container whose image reads TRACEBLOC_SKIP_TELEMETRY. Renders nothing unless
+  `tracebloc.telemetryCollectorState` is disabled-by-operator. Include it in
+  every container of `tracebloc.controlPlaneImages` (not wait-for-mysql, which
+  sends no telemetry). A container that also renders the `.Values.env`
+  passthrough includes `tracebloc.telemetryOptOutEnvUnlessPassthrough` instead.
+*/}}
+{{- define "tracebloc.telemetryOptOutEnv" -}}
+{{- if eq (include "tracebloc.telemetryCollectorState" .) "disabled-by-operator" -}}
+- name: TRACEBLOC_SKIP_TELEMETRY
+  value: "1"
+{{- end -}}
+{{- end -}}
+
+{{/*
+  tracebloc.telemetryOptOutEnvUnlessPassthrough — as `tracebloc.telemetryOptOutEnv`,
+  for a container that renders the `.Values.env` passthrough: when the operator's
+  own `env.TRACEBLOC_SKIP_TELEMETRY` sets it, the entry is skipped (a duplicate
+  env name is ambiguous to apply tooling).
+*/}}
+{{- define "tracebloc.telemetryOptOutEnvUnlessPassthrough" -}}
+{{- if not (hasKey (default dict .Values.env) "TRACEBLOC_SKIP_TELEMETRY") -}}
+{{- include "tracebloc.telemetryOptOutEnv" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
   tracebloc.backendUrl — the tracebloc API base URL for this CLIENT_ENV, with a
   trailing slash.
 

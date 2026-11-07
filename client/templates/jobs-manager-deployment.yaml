@@ -468,6 +468,7 @@ spec:
           {{- end }}
         env:
         {{- include "tracebloc.proxyEnv" . | nindent 8 }}
+        {{- include "tracebloc.telemetryOptOutEnvUnlessPassthrough" . | nindent 8 }}
         {{- /*
           The telemetry-token Secret's coordinates. Nothing reads
           that Secret any more: the Collector sends through the egress gate with
@@ -1143,6 +1144,7 @@ spec:
           mountPath: "/data/logs"
         env:
         {{- include "tracebloc.proxyEnv" . | nindent 8 }}
+        {{- include "tracebloc.telemetryOptOutEnvUnlessPassthrough" . | nindent 8 }}
         {{- /* The client identity under its canonical names, TRACEBLOC_CLIENT_ID /
              TRACEBLOC_CLIENT_PASSWORD, the names jobs-manager reads. Both read
              the CANONICAL Secret key, the only key secrets.yaml writes. */}}

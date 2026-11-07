@@ -164,6 +164,7 @@ spec:
               memory: {{ $rpLim.memory | default "512Mi" | quote }}
           env:
           {{- include "tracebloc.proxyEnv" . | nindent 12 }}
+          {{- include "tracebloc.telemetryOptOutEnv" . | nindent 12 }}
           {{- with include "tracebloc.egressGateProxyPassthrough" . }}
           {{- . | nindent 12 }}
           {{- end }}
@@ -273,6 +274,7 @@ spec:
               cpu: {{ $rrLim.cpu | default "200m" | quote }}
               memory: {{ $rrLim.memory | default "128Mi" | quote }}
           env:
+            {{- include "tracebloc.telemetryOptOutEnv" . | nindent 12 }}
             - name: TRACEBLOC_EGRESS_RECORD_DIR
               value: "/var/lib/tracebloc/egress-record"
           volumeMounts:

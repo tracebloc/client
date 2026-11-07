@@ -216,6 +216,7 @@ spec:
               readOnly: true
             {{- end }}
           env:
+            {{- include "tracebloc.telemetryOptOutEnv" . | nindent 12 }}
             - name: NVIDIA_VISIBLE_DEVICES
               value: "all"
             - name: NVIDIA_DRIVER_CAPABILITIES
