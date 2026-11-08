@@ -2387,9 +2387,10 @@
         "mode": {
           "type": "string",
           "enum": [
-            "report"
+            "report",
+            "enforce"
           ],
-          "description": "TRACEBLOC_EGRESS_GATE_MODE. report: a message the declaration does not allow is sent and recorded as would-refuse. enforce is not offered until the client stores the owner's data mark: until then the gate checks every run as patient data, so enforce would refuse every open-data run's losses and scores."
+          "description": "TRACEBLOC_EGRESS_GATE_MODE: what the outbound gate does with a message that is not on the list of what may leave. A training's messages are checked under the mark its dataset was given at ingest (patient data, open data or synthetic data). report, the default: the message leaves, and the outbound record marks it as would be refused. enforce: the message is refused and nothing of it leaves. On patient data, enforce refuses the preprocessing file a training uploads with its weights, so that upload is refused and the training fails; and it refuses the pooled preprocessing statistics of a federated training, which stops at its first cycle. Turn it on with --set egressGate.mode=enforce, or with mode: enforce under egressGate in a values file."
         },
         "record": {
           "type": "object",

@@ -2,6 +2,28 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## The outbound gate can refuse what is not on the list
+
+**What changed.** `egressGate.mode` takes `enforce` as well as `report`. With
+`enforce`, the outbound gate refuses a message that is not on the list of what
+may leave: nothing of it leaves, and the outbound record lists it as refused.
+The gate checks a training's messages under the mark its dataset was given at
+ingest. Any other value is refused when the chart renders.
+
+On patient data, `enforce` refuses:
+- the preprocessing file a training uploads with its weights, so that upload is
+  refused and the training fails;
+- the pooled preprocessing statistics of a federated training, which stops at
+  its first cycle.
+
+**What you have to do: nothing.** The default stays `report`. To have the gate
+refuse, set the mode on the release; the hourly auto-upgrade keeps it:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> \
+  --reset-then-reuse-values --set egressGate.mode=enforce
+```
+
 ## Service database accounts are always on, and prod ingests with ingestor 0.12
 
 **What changed.** jobs-manager creates the two service database accounts,

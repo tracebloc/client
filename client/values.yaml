@@ -3416,10 +3416,13 @@ ingestionAuthz:
 # pin and size its `gate` container, so an override stored by --reuse-values
 # keeps applying. requests-proxy-service is an alias of it.
 egressGate:
-  # `report`: a message the declaration does not allow is sent and recorded as
-  # would-refuse. The only value the chart takes: enforce waits until the client
-  # stores the owner's data mark, because until then every run is checked as
-  # patient data and enforce would refuse every open-data run's losses and scores.
+  # What the gate does with a message not on the list of what may leave; a
+  # training's messages are checked under the mark its dataset was given at
+  # ingest. `report`: it leaves, and the outbound record marks it as would be
+  # refused. `enforce`: it is refused and nothing of it leaves. On patient data,
+  # enforce refuses the preprocessing file a training uploads with its weights,
+  # so the training fails, and the pooled preprocessing statistics of a federated
+  # training, which stops at its first cycle.
   mode: report
   record:
     # The `record` container serves the record read-only, to the owner, through
