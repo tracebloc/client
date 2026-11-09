@@ -169,7 +169,7 @@ on the live cluster when the corresponding check runs.*
 
 | Guarantee | EKS | AKS | OpenShift | bare metal |
 |---|---|---|---|---|
-| Training egress blocked (NetworkPolicy) | **Verified** — the dev/staging/prod tracebloc template fleets are sealed and `egress-enforcement`-probe-verified (2026-09-08; see [EKS fleet enforcement](#eks-fleet-enforcement--dev--staging--prod-client-runtime199) below). The VPC CNI netpol agent enforces egress on both `tb-client-dev-templates` (v1.2.7) and `tracebloc-clients-prod` (v1.1.6, hosting the staging + prod fleets), `--enable-network-policy=true`, mode `standard`. Deny-by-default is the chart default as of 1.9.96. Other EKS CNIs (Calico / Cilium) — **verified** by `egress-enforcement` (renders by default as of 1.9.96; opt-out with `allowExternalHttps=true`) | Conditional on CNI (Azure NPM / Calico) — **verified** by `egress-enforcement` (renders by default as of 1.9.96; opt-out with `allowExternalHttps=true`) | OVN-Kubernetes enforces by default — still **verified** by `egress-enforcement` | Conditional on CNI (Flannel alone does not enforce) — **verified** by `egress-enforcement` |
+| Training egress blocked (NetworkPolicy) | **Verified** — the dev/staging/prod tracebloc template fleets are sealed and `egress-enforcement`-probe-verified (2026-09-08; see [EKS fleet enforcement](#eks-fleet-enforcement--dev--staging--prod-client-runtime199) below). The VPC CNI netpol agent enforces egress on `tracebloc-clients-prod` (v1.1.6, hosting the staging + prod fleets), as it did on the retired dev cluster `tb-client-dev-templates` (v1.2.7), `--enable-network-policy=true`, mode `standard`. Deny-by-default is the chart default as of 1.9.96. Other EKS CNIs (Calico / Cilium) — **verified** by `egress-enforcement` (renders by default as of 1.9.96; opt-out with `allowExternalHttps=true`) | Conditional on CNI (Azure NPM / Calico) — **verified** by `egress-enforcement` (renders by default as of 1.9.96; opt-out with `allowExternalHttps=true`) | OVN-Kubernetes enforces by default — still **verified** by `egress-enforcement` | Conditional on CNI (Flannel alone does not enforce) — **verified** by `egress-enforcement` |
 | Backend reachability (required egress) | **Verified** | **Verified** | **Verified** | **Verified** |
 | Storage on the declared class, bound | **Verified** | **Verified** | **Verified** (PV scan degraded if `clusterScope=false`) | **Verified** |
 | No unmanaged hostPath backing (dynamic mode) | **Verified** | **Verified** | **Verified** with `clusterScope=true`; partial (name check + explicit WARNING) otherwise | n/a — hostPath *is* the declared model (SKIP) |
@@ -266,7 +266,7 @@ verified on k3d only — see the history note at the top of this section.
 
 | Fleet | Cluster / namespace | Sealed (netpol) | Probe (direct :443) | Real run |
 |---|---|---|---|---|
-| dev | `tb-client-dev-templates` / `tracebloc-templates` | ✅ no direct `0.0.0.0/0:443` | BLOCKED after ~≤16 s; HF 403 via squid | `image_classification` → COMPLETED |
+| dev (**retired**: its cluster has since been deleted; this row is the 2026-09-08 record) | `tb-client-dev-templates` / `tracebloc-templates` | ✅ no direct `0.0.0.0/0:443` | BLOCKED after ~≤16 s; HF 403 via squid | `image_classification` → COMPLETED |
 | staging | `tracebloc-clients-prod` / `tracebloc-templates-stg` | ✅ | BLOCKED; HF 403 via squid | `image_classification` → COMPLETED |
 | prod | `tracebloc-clients-prod` / `tracebloc-templates-prod` | ✅ | BLOCKED; HF 403 via squid | `image_classification` → COMPLETED |
 
@@ -285,7 +285,7 @@ substrate verification record.
 
 **Substrate (read-only inspection; the enforcement rests on this):**
 
-- dev cluster `tb-client-dev-templates`: `kube-system/aws-node` runs
+- dev cluster `tb-client-dev-templates` (retired and since deleted): `kube-system/aws-node` ran
   `amazon-k8s-cni:v1.20.5-eksbuild.1` +
   `aws-network-policy-agent:v1.2.7-eksbuild.2`, `--enable-network-policy=true`,
   `NETWORK_POLICY_ENFORCING_MODE=standard`.

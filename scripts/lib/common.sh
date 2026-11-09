@@ -2062,9 +2062,9 @@ TB_K3S_IMAGE_ARM64_DIGEST="sha256:4ceb591dd1e592b98b7c51ff3bdb7143914e1bee0677e7
 # no digest here. TRACEBLOC_-named (TB_ is a banned prefix), and
 # assigned outright, so an exported TRACEBLOC_APPLE_* never reaches a reader.
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-TRACEBLOC_APPLE_CONTAINER_VERSION="1.4.1"
+TRACEBLOC_APPLE_CONTAINER_VERSION="1.6.1"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-TRACEBLOC_APPLE_CONTAINER_PKG_SHA256="c0d2716afefbb194c93fae662e9cae7cc186bcbcf746816608ec673dd648a6a4"
+TRACEBLOC_APPLE_CONTAINER_PKG_SHA256="cd47846819f06478d067060efe21e516b562ac0a9af8eecad6d5fea0b556b200"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
 TRACEBLOC_APPLE_CONTAINER_TEAM_ID="UPBK2H6LZM"
 # The VM's init image and our kernel, each a repository and a digest (facts.env
@@ -2073,7 +2073,7 @@ TRACEBLOC_APPLE_CONTAINER_TEAM_ID="UPBK2H6LZM"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
 TRACEBLOC_APPLE_VMINIT_IMAGE="ghcr.io/tracebloc/apple-container-vminit"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-TRACEBLOC_APPLE_VMINIT_DIGEST="sha256:aa6ab59d0938f7fadb54ac27e80959bdd2f1dafa8050011086d5f8ab1350fd6c"
+TRACEBLOC_APPLE_VMINIT_DIGEST="sha256:526b1bf414a186ce6047e600830fb2981509f041cf4d4ce91653d97bd30d4700"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
 TRACEBLOC_MAC_KERNEL_IMAGE="ghcr.io/tracebloc/apple-container-kernel"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
@@ -3771,16 +3771,17 @@ Advanced settings (environment variables):
   TRACEBLOC_HELM_VERSION      Helm release (default: v4.2.3)
   TRACEBLOC_SKIP_EXAMPLE      Set to 1 to skip the example use case.
 
-Usage reporting:
-  Each run reports one event: the step it reached, how long each step
-  took, the exit code, an error class, your OS, architecture and the
-  installer version. Never your arguments, paths, file names, username,
-  hostname or credentials.
-  TRACEBLOC_SKIP_TELEMETRY=1  Turn it off.
-  TRACEBLOC_NO_TELEMETRY=1    Also turns it off (legacy name).
-  DO_NOT_TRACK=1              Also turns it off.
-  Any of them also keeps the logs of tracebloc's services in your
-  secure environment, and the hourly auto-upgrade keeps it that way.
+Usage events:
+  Each run reports one usage event: the step it reached, how long each
+  step took, the exit code, an error class, your OS, architecture and
+  the installer version. Never your arguments, paths, file names,
+  username, hostname or credentials.
+  TRACEBLOC_SKIP_TELEMETRY=1  Turn them off.
+  TRACEBLOC_NO_TELEMETRY=1    Also turns them off (legacy name).
+  DO_NOT_TRACK=1              Also turns them off.
+  Any of them also turns off the usage events of tracebloc's services,
+  and the hourly auto-upgrade keeps it that way. Every other log line
+  stays in your secure environment either way.
 
 Windows:
   irm https://tracebloc.io/i.ps1 | iex

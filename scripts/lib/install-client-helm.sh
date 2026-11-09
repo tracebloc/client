@@ -2841,11 +2841,12 @@ _mac_runner_set_args() {
   _TB_MAC_RUNNER_ARGS+=("${_TB_GPU_UNSUPPORTED_ARGS[@]}")  # set-u-safe: _gpu_unsupported_set_args always assigns six words
 }
 
-# What the log Collector's opt-out says on the terminal (_collector_set_args).
-_TB_COLLECTOR_OFF_LINE="Usage reporting is off, so the logs of tracebloc's services stay in your secure environment."
-_TB_COLLECTOR_UNREAD_LINE="Couldn't read the settings this secure environment was installed with. If you had turned off sending the logs of tracebloc's services, run the installer again with DO_NOT_TRACK=1 to keep them in."
-_TB_COLLECTOR_UNAPPLIED_LINE="Usage reporting is off, but the settings this secure environment was installed with couldn't be read, so this run leaves the logs of tracebloc's services as they were. Run the installer again to apply it."
-_TB_COLLECTOR_KEPT_ON_LINE="Usage reporting is off, but your Helm values set telemetryCollector.enabled: true, so the logs of tracebloc's services still leave your secure environment."
+# What the log Collector's opt-out says on the terminal (_collector_set_args), in the
+# copy catalog's words (scripts/testdata/golden/09-usage-events-off.golden).
+_TB_COLLECTOR_OFF_LINE="You turned off usage events, so tracebloc's services in your secure environment report none."
+_TB_COLLECTOR_UNREAD_LINE="Couldn't read the settings this secure environment was installed with. If you had turned off the usage events of tracebloc's services, run the installer again with DO_NOT_TRACK=1 to keep them off."
+_TB_COLLECTOR_UNAPPLIED_LINE="You turned off usage events, but the settings this secure environment was installed with couldn't be read, so this run leaves the usage events of tracebloc's services as they were. Run the installer again to turn them off."
+_TB_COLLECTOR_KEPT_ON_LINE="You turned off usage events, but your Helm values set telemetryCollector.enabled: true, so the usage events of tracebloc's services still leave your secure environment."
 
 # _values_collector_choice -- telemetryCollector.enabled in the values YAML on STDIN:
 # true or false (any case), `other` for any other value, nothing when the key is absent
@@ -2929,7 +2930,7 @@ _helm_release_listed() {
 # caller's values file (TRACEBLOC_VALUES_FILE), which reaches helm as it is, else the
 # release's stored bool, which MODE `reuse` (--reset-then-reuse-values) keeps by itself
 # and MODE `fresh` (a call that replaces the stored values) carries forward, so a re-run
-# never turns a choice back. With none made, a usage-reporting opt-out, by telemetry.sh's
+# never turns a choice back. With none made, an opt-out of usage events, by telemetry.sh's
 # own rule (telemetry_enabled), passes false; else nothing is passed and the chart decides.
 _collector_set_args() {
   local mode="$1" rel="$2" ns="$3" mine="" kept="" off=0 krc=0
@@ -2937,7 +2938,7 @@ _collector_set_args() {
   if declare -F telemetry_enabled >/dev/null 2>&1; then
     telemetry_enabled || off=1
   else
-    log "The log collector: telemetry.sh is not loaded, so no usage-reporting opt-out is read; the chart decides."
+    log "The log collector: telemetry.sh is not loaded, so no opt-out of usage events is read; the chart decides."
   fi
   if [[ -n "${TRACEBLOC_VALUES_FILE:-}" && -r "${TRACEBLOC_VALUES_FILE}" ]]; then
     mine="$(_values_collector_choice < "$TRACEBLOC_VALUES_FILE")"
@@ -2969,7 +2970,7 @@ _collector_set_args() {
   fi
   [[ "$off" == 1 ]] || return 0
   _TB_COLLECTOR_ARGS=(--set "telemetryCollector.enabled=false")
-  log "The log collector: off, as usage reporting is off."
+  log "The log collector: off, as usage events are turned off."
   info "$_TB_COLLECTOR_OFF_LINE"
 }
 
@@ -3519,7 +3520,7 @@ _reconcile_adopted_client() {
   # And whether k3s runs the pods confined: the chart's level must follow config.yaml.
   _selinux_set_args
   _args+=(${_TB_SELINUX_ARGS[@]+"${_TB_SELINUX_ARGS[@]}"})
-  # The log Collector: the stored choice stands, else a usage-reporting opt-out.
+  # The log Collector: the stored choice stands, else an opt-out of usage events.
   _collector_set_args reuse "$_rel" "$_ns"
   _args+=(${_TB_COLLECTOR_ARGS[@]+"${_TB_COLLECTOR_ARGS[@]}"})
   # The local API rides the same reconcile, for the same reason:
