@@ -1909,6 +1909,7 @@ retry() {
     fi
     warn "Attempt $attempt/$max_attempts failed. Retrying in ${delay}s..."
     sleep "$delay"
+    delay=$((delay * 2))  # a short outage outlasts a fixed delay; double it, like install.sh's fetch
     ((attempt++))
   done
 }

@@ -305,7 +305,7 @@ _native_k3s_fetch_binary() {
   # --print downloads nothing: it lists the install, which the run makes only after
   # the binary matched its pinned digest.
   if ! tb_root_planning; then
-    retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    retry 5 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
       "$url" -o "${tmpdir}/k3s" \
       || { rm -rf "$tmpdir"; error "Couldn't download the k3s binary from ${url}. Check that this machine can reach github.com and release-assets.githubusercontent.com, then re-run."; }
     _assert_download_size "${tmpdir}/k3s" 20000000 "k3s" "$tmpdir"

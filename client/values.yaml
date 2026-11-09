@@ -1459,6 +1459,11 @@ images:
   # from "whatever :prod points at right now" to a fixed engine, so it must be
   # advanced on every engine prod promotion or prod freezes on these bytes --
   # that is the release train's promotion step, which re-runs the same resolver.
+  # A PUBLISHED chart does not carry this map as written here: when a release
+  # is packaged, the map the release train resolved for that release (the
+  # staging engine for a pre-release, the prod engine for a release) replaces
+  # it, so every published chart pins the engine of its own release. This one
+  # is what a chart built from source carries.
   # dev and staging edges (auto) render none of it and keep floating; so do
   # pinned=false, a mirror and another registry of the operator's (see
   # digestRegistry above).
