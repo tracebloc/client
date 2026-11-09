@@ -1470,62 +1470,62 @@ images:
   training:
     pinned: ""
     digestRegistry: "ghcr.io"
-    engineCommit: "fb2c41f2c84116a5f8079ee9af34ce22a35e31b5"
+    engineCommit: "27831b3264a180ffcac6a6389b16dbd2f9a18916"
     digests:
       causal_language_modeling:
-        cpu: "sha256:b45f3ca1925263252708336b31883960639997febdf68daaacc5baad5b00f00a"
-        gpu: "sha256:d0b06a52cff8653facbb7b32a807d70d2d69215f1328a98ccbaa27c7cae8a313"
+        cpu: "sha256:f61a9564e8ab290f55660792f6a2dbed09e6ffbfff325c0243b2f63936f5e31a"
+        gpu: "sha256:bc0d2cd966e0a2b77efdd4d5e2291214250fad73a0bc283d80c54004eb59ac3a"
       embeddings:
-        cpu: "sha256:7b9cbc2ca49707fb9ae46cd76483f382a8596955bd5db4f5593c11e9aa224b6d"
-        gpu: "sha256:d986c7ba3882a5a6e0d8356e6b23118eab4bb69109360597da2a4666e5b14ca6"
+        cpu: "sha256:d5579467ed08eeb58d914ffe40165808357072105d8b9fafe0f8b9f54e90c877"
+        gpu: "sha256:f6907a942164e909409cc70bda15db5a8744757b6d71bff5957a68b661f2aab1"
       image_classification:
-        cpu: "sha256:c35e8170777e657750ef936dc914ca59733900eff4561bad287b5795476bf818"
-        gpu: "sha256:03ddc805999e3c01961868f7e9416dcfd955b961731147c14af045586392eea9"
+        cpu: "sha256:ecc3cc26ad91be772984ad0e84de83103aae3cecfffdef95737fdf128390a723"
+        gpu: "sha256:cea686d406010bc6a5d62c1a8a0b0e652bce3bb994893d84a4748001e54df0a5"
       keypoint_detection:
-        cpu: "sha256:6bca6372d3a991534fba4ddeddb76f7576748d1b3d968007ad1d7264e7034821"
-        gpu: "sha256:c99d147e14efebdb5875b6e3dafcc0245217685fb37e20b3617a350f9f23fae2"
+        cpu: "sha256:3530fa3ed68be3605c0665e9f143441ea05ef694f0d91840655d11501a17d349"
+        gpu: "sha256:7c88feb7e897ff4b8c4a1958057c5faa0f55bc4a91c70c4e49c5723bb57b5e5a"
       masked_language_modeling:
-        cpu: "sha256:0a9d73f44205b7681492afafb3c4d5c55c6058851bd7c5286e7c7a42d8917d33"
-        gpu: "sha256:1c6dd679fe6c72c502f3055a0f06f51b781a56ce87ccd2ae95f4ed60794b7326"
+        cpu: "sha256:404335a9fae29bcb51cf7859a4ab5cde8f34d06c572bdf6237030496b9095536"
+        gpu: "sha256:7fed29d7fbbb07cf8e119d779c40c9950095ef2f1ff619cf9d0864585f255846"
       multi_label_text_classification:
-        cpu: "sha256:d9660144b8207ca095c2f6cc4943b662bd0e821ecd634bc7de8ea998089112f7"
-        gpu: "sha256:89cef58d7a16429573142bf92f1e226de7e93e27182887112cb9fc1b750371a4"
+        cpu: "sha256:b38e8213fcb451e870be20644e4820c056bb019fdfcde2366ec83c56791e854b"
+        gpu: "sha256:76bc627c9a0e7fbc4c6161fd11fa0886c5d5735038a9ae651270399269868161"
       object_detection:
-        cpu: "sha256:e197cdb8890d1e994f38309b79f95259e248dc895e86331745f22d1de3864f71"
-        gpu: "sha256:6af8467ee0a2b1e9481b0820c1f22409f99ef2f9fb91c6c4fc4015a69ac48893"
+        cpu: "sha256:a21d0e473c05957c9bf3db1015b6489a5f37364cf3f64326a61ba7921e541c45"
+        gpu: "sha256:99171150a2f3de1501a1a39a93e5574baf610662f210eb52276c06f0039bc708"
       semantic_segmentation:
-        cpu: "sha256:7443418c7bf72f75ad8175b1fd488490ac9c27a45b5a601e4e9a5492a9f91a1d"
-        gpu: "sha256:f8353e5dfa3392318b659d3cc11382bf80f8fe7152fc5281e2acdb705163a01c"
+        cpu: "sha256:d95744f3615933476635f6c19c961a0c07c27c546b11ee10c54e7ead9c5e7ed0"
+        gpu: "sha256:055fcd73e98b8891ffe89ecddda3181b09c1474e51e328ac8140834601a989bf"
       sentence_pair_classification:
-        cpu: "sha256:40652edf1dae6b738e394816784c6556a04a0a9b46582e1f766100bba85a3f18"
-        gpu: "sha256:d335f7e5f11bec6da7bc1b80ab92b2e9eaae724bba4f0bb7dd07546aafd7b06e"
+        cpu: "sha256:c3f5adef6de26ebfa96034d07bcb86c2b6f5b1bf52b282c7383bef4128737053"
+        gpu: "sha256:0748333b54893d2b7625d53c85632ec52990ee1b8f4a1a4ef9d9087f029f46ff"
       seq2seq:
-        cpu: "sha256:2884ec5ab2bb5de06d6583b5106199525105cd5f946175237d0a9004d307fc17"
-        gpu: "sha256:7f7f291ce6e9f54bc57a38b34ba00d22b6c07fa868828c8b26bf21eefab3e201"
+        cpu: "sha256:4a337b8aaa5801e55bd5c9c5fa838da63cd7b85079efc6eb5b39c9f495f86498"
+        gpu: "sha256:d304cd1122b84033b5f482f4646fa18f1768af81bca7d93c19030c6222b3ea41"
       tabular_classification:
-        cpu: "sha256:583a3ed276e8c379029cc68fef2e2fb349276628ef7b8ccafacf0e4c63914f25"
-        gpu: "sha256:267206462fab55cfbf77c03552034451e15097713f9f71e9734b7d7d9f253f29"
+        cpu: "sha256:10381980710a31e1a0b8bc07a3f1e3d9fcd0ffc662f7695b20a291d9488e07c8"
+        gpu: "sha256:252994cc65c4a3fde4e1936ccc343cecd2d4e8eae0ac60f4cf5a746fd4a8d77f"
       tabular_regression:
-        cpu: "sha256:08d9884bbc99d8fa103fe28e8fe140b56a2ddb863bc60058766f81ff124e6a3c"
-        gpu: "sha256:823667226c057936a3347eb69b4a01ce5b727df86c5c27efc58d7445df6e82e2"
+        cpu: "sha256:aecec79277e24f38f861f752018838ef2afc0e724bd7d5eae32f9cff3d59a14b"
+        gpu: "sha256:d40fc18a7351382de0c5a6ee3dd314e73d5c5b483b00a6fe95008a52ea3424bf"
       text_classification:
-        cpu: "sha256:7b3fc7deb50f93f3e5d28810ddf87974a95be9d02c45e6f3a4762168ea699f30"
-        gpu: "sha256:5de52fd5a10ef8e773a7829ee70679911c233bd751862ed2f03efa92ad11a96c"
+        cpu: "sha256:20f16ae6db3d98b5ec394daeae3383c9172bdfa4850e7ba2cacf16cae69113c6"
+        gpu: "sha256:686cc2de5758114583b0915ccc30dff0f56268b353952d373ddffb0befaab5ea"
       text_regression:
-        cpu: "sha256:e95bc8e87a88ee75d4bc99322f6855af18cbc1426ef1452ecdad7ae0a2ceb5c8"
-        gpu: "sha256:0470c34176c4b7a182affdf6800b63020916535e34e104fd7265435df9749468"
+        cpu: "sha256:edfea8d786c498ca04414b902df37db05e0422b351ce6ba2711580768a79679b"
+        gpu: "sha256:6ee89ae093a2c0a4885f4542e2e97dd01b14691cbee782d3df9b1844ba29ec2e"
       time_series_classification:
-        cpu: "sha256:370be0a4fc41c0a39524e9965a6dac1dc29161617f2404ab91f03fb9ff4ca0f1"
-        gpu: "sha256:f8f1bdd380ac96784071c94349be94e5b969ff031055ebfd3fa882df5de175c5"
+        cpu: "sha256:5a5fa017ae05cc09e700029837403face41b06670d82ca811e6f8329172fc970"
+        gpu: "sha256:c118f0d7f34793e4773a7081da5296c6a65fe2c79045f946a2fd1d9f1ba07e7a"
       time_series_forecasting:
-        cpu: "sha256:3bdfbbd78173e0f9adba67c4e3b09804529670b70ab6b051568905b513daabcf"
-        gpu: "sha256:86c066cb13a313f5e9341688e04be4b18bb1f74cb5468b5ab47f634af5187f00"
+        cpu: "sha256:2d1dda371b425641058f6dc3ecd2d6d23ad53b7a0fc193342939da7d2a6b65dc"
+        gpu: "sha256:9e57fb988393ee0f560c5a6e9473f305ecf0cb17869020009c3372172280a7ac"
       time_to_event_prediction:
-        cpu: "sha256:6aa1795ef9b4573919fda84ce5e284ca8d2696e7c48b94cdafc231d97c5d1180"
-        gpu: "sha256:dd3c68167506645b25f387f62eb74dd8fd538b6f4122b87285f82b8f77c177ed"
+        cpu: "sha256:974b3ed36f5d1176586cfb84a5b2a2e8e15f8a2b23f013b48c40dcc95a582f1b"
+        gpu: "sha256:9985a06d64c1be181c94419b2431689956b2f56d207b59209fffb2795590cfe2"
       token_classification:
-        cpu: "sha256:fe03a71a54a4f874ab3aaba3cec58781135a3f3404412d485bb3a710dbe9b32e"
-        gpu: "sha256:f8ec888b55859172374b4e3c5d9c2d7c7098a2ba6836c0f1048359a228ef6142"
+        cpu: "sha256:5a98045152a136ff9b7b2d760b738d2c2e240066a4bc5750a5cc0ef7fd26c408"
+        gpu: "sha256:43e253bff70803f69bde0007930d43137eb27afaf5aa9d88caaff1742776110f"
     capabilities: "ddp,loss-coupled:embeddings,loss-coupled:time_to_event_prediction,min-micro-batch:2,no-backend-token,per_rank_split"
     parents:
       gpu:
@@ -1534,8 +1534,8 @@ images:
         platforms:
           - "linux/amd64"
     macosBundle:
-      digest: "sha256:64c1ab83b69d62a6a92ed89024e010ac3a26d8dc7ebae31b12dda371797a56a0"
-      location: "ghcr.io/tracebloc/engine-macos-arm64@sha256:543d14278752223762532a2bc19a99b9061fc94c20f290e0a14ba702e7b780f7"
+      digest: "sha256:597a33a3e24b0c5afe4d529d1b93ee1e430fcc4e30176ba5d98edf0d9b5709a7"
+      location: "ghcr.io/tracebloc/engine-macos-arm64@sha256:70fe02a75a35606f93740c878e024562f22da6259da9329c9f3ca983c677fe1d"
   # The ingestor image is spawned by
   # jobs-manager at ingestion-submission time, not as a long-lived pod.
   # jobs-manager resolves ONE effective digest from the keys below and spawns

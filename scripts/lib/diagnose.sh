@@ -191,6 +191,77 @@ _drop_termination_messages() {   # NS POD
     { print }'
 }
 
+# _diag_collect_kubectl DIR NS KT — run_diagnose's kubectl stage (KT: --request-timeout).
+_diag_collect_kubectl() {
+  local d="$1" ns="$2" kt="$3"
+  if has kubectl; then
+    {
+      echo "## nodes";        kubectl get nodes -o wide $kt 2>&1
+      echo; echo "## pods (all namespaces)"; kubectl get pods -A -o wide $kt 2>&1
+      echo; echo "## workloads"; kubectl get deploy,ds,sts -A $kt 2>&1
+      echo; echo "## recent events"; kubectl get events -A --sort-by=.lastTimestamp $kt 2>&1 | tail -120
+    } > "$d/02-kubectl.txt" 2>&1
+    {
+      echo "## describe of non-Running pods in namespace '$ns'"
+      for p in $(kubectl get pods -n "$ns" --no-headers $kt 2>/dev/null | awk '$3!="Running" && $3!="Completed"{print $1}'); do
+        echo; echo "### $p"; kubectl describe pod -n "$ns" "$p" $kt 2>&1 | _drop_termination_messages "$ns" "$p"
+      done
+    } > "$d/03-describe.txt" 2>&1
+    # workload logs (current + previous), Deployments READ from the release (a
+    # rebuilt name misses an overridden one); unresolved is said in a file of its own.
+    local w _role _wl_rows
+    if _wl_rows="$(_client_workloads "$ns" 5s)"; then
+      while read -r _role w; do
+        kubectl logs -n "$ns" "deploy/$w" --all-containers --tail=500 $kt           </dev/null 2>&1 \
+          | _drop_log_tails "kubectl logs -n $ns deploy/$w --all-containers" > "$d/logs/${w}.log" 2>&1
+        kubectl logs -n "$ns" "deploy/$w" --all-containers --previous --tail=500 $kt </dev/null 2>&1 \
+          | _drop_log_tails "kubectl logs -n $ns deploy/$w --all-containers --previous" > "$d/logs/${w}.previous.log" 2>&1
+      done <<<"$_wl_rows"
+    else
+      {
+        echo "## secure environment workload logs NOT collected"
+        echo "Could not list the secure environment's workload Deployments in namespace '$ns' by release label"
+        echo "(app.kubernetes.io/instance=$ns). Deployments carrying that label:"
+        kubectl get deployment -n "$ns" -l "app.kubernetes.io/instance=$ns" $kt 2>&1
+      } > "$d/logs/workloads-unresolved.txt" 2>&1
+    fi
+    # The resource-monitor DaemonSet is READ too: the chart puts it in the
+    # node-agents namespace as `<fullname>-resource-monitor`. Unresolved: own file.
+    local _rm
+    if _rm="$(_resource_monitor_daemonset "$ns" 5s)"; then
+      kubectl logs -n "${_rm%% *}" "daemonset/${_rm#* }" --tail=300 $kt </dev/null > "$d/logs/resource-monitor.log" 2>&1
+    else
+      {
+        echo "## resource-monitor logs NOT collected"
+        echo "Could not find exactly one DaemonSet of release '$ns' (app.kubernetes.io/instance=$ns, any namespace)"
+        echo "whose pods run the '$_TB_RESOURCE_MONITOR_CONTAINER' container. None is expected when the"
+        echo "chart runs with the resource-monitor disabled. DaemonSets carrying that label:"
+        kubectl get daemonset -A -l "app.kubernetes.io/instance=$ns" $kt 2>&1
+      } > "$d/logs/resource-monitor-unresolved.txt" 2>&1
+    fi
+  fi
+}
+
+# _diag_collect_helm DIR NS — run_diagnose's helm stage.
+_diag_collect_helm() {
+  local d="$1" ns="$2"
+  # helm has no --request-timeout: run it only when a BOUNDED probe reaches the API.
+  if has helm && { ! has kubectl || kubectl cluster-info --request-timeout=5s >/dev/null 2>&1; }; then
+    # NOTE: deliberately NOT collecting `helm get manifest` (base64 Secrets the
+    # redaction can't see); the values reach the bundle only via _diag_values_view.
+    local hrc
+    {
+      echo "## helm list -A";          helm list -A 2>&1
+      echo; echo "## helm get values $ns (values outside TB_DIAG_VALUES_KEEP: ${TB_DIAG_VALUE_HIDDEN})"
+      hrc=0
+      ( set -o pipefail; helm get values "$ns" -n "$ns" 2>/dev/null </dev/null | _diag_values_view ) || hrc=$?
+      [[ "$hrc" -eq 0 ]] || echo "(helm exit $hrc)"
+    } > "$d/04-helm.txt" 2>&1
+  elif has helm; then
+    echo "## helm skipped — API unreachable (bounded cluster-info probe failed)" > "$d/04-helm.txt" 2>&1
+  fi
+}
+
 run_diagnose() {
   set +e   # every step is best-effort — never abort the bundle mid-collection
 
@@ -204,10 +275,9 @@ run_diagnose() {
 
   # Namespace discovery — TB_NAMESPACE isn't set on a standalone diagnose run,
   # so find the namespace of the jobs-manager pod (falls back to "default").
-  # Every kubectl call below carries --request-timeout: run_diagnose runs `set +e`
-  # so a non-zero exit is harmless, but that does NOT bound an indefinite BLOCK —
-  # and --diagnose is exactly the "API may be wedged" path, where an unbounded
-  # call would freeze the bundle this function exists to produce.
+  # Every kubectl call below carries --request-timeout: `set +e` does NOT bound an
+  # indefinite BLOCK, and --diagnose is the "API may be wedged" path, where an
+  # unbounded call would freeze the bundle this function exists to produce.
   local kt="--request-timeout=5s"
   # tracebloc's cluster, by the context its install record names, as the CLI finds it:
   # the install adds that context and leaves the user's current one alone. With none
@@ -275,80 +345,10 @@ run_diagnose() {
   } > "$d/00-host.txt" 2>&1
 
   # ── kubectl overview + per-pod detail ──
-  if has kubectl; then
-    {
-      echo "## nodes";        kubectl get nodes -o wide $kt 2>&1
-      echo; echo "## pods (all namespaces)"; kubectl get pods -A -o wide $kt 2>&1
-      echo; echo "## workloads"; kubectl get deploy,ds,sts -A $kt 2>&1
-      echo; echo "## recent events"; kubectl get events -A --sort-by=.lastTimestamp $kt 2>&1 | tail -120
-    } > "$d/02-kubectl.txt" 2>&1
-    {
-      echo "## describe of non-Running pods in namespace '$ns'"
-      for p in $(kubectl get pods -n "$ns" --no-headers $kt 2>/dev/null | awk '$3!="Running" && $3!="Completed"{print $1}'); do
-        echo; echo "### $p"; kubectl describe pod -n "$ns" "$p" $kt 2>&1 | _drop_termination_messages "$ns" "$p"
-      done
-    } > "$d/03-describe.txt" 2>&1
-    # workload logs (current + previous). The Deployments are READ from the
-    # release: rebuilt as `<namespace>-jobs-manager` they named a
-    # Deployment that does not exist on an overridden release, and the bundle
-    # shipped empty jobs-manager logs. When the read cannot resolve them, the
-    # bundle says so in a file of its own instead of leaving the logs silently empty.
-    local w _role _wl_rows
-    if _wl_rows="$(_client_workloads "$ns" 5s)"; then
-      while read -r _role w; do
-        kubectl logs -n "$ns" "deploy/$w" --all-containers --tail=500 $kt           </dev/null 2>&1 \
-          | _drop_log_tails "kubectl logs -n $ns deploy/$w --all-containers" > "$d/logs/${w}.log" 2>&1
-        kubectl logs -n "$ns" "deploy/$w" --all-containers --previous --tail=500 $kt </dev/null 2>&1 \
-          | _drop_log_tails "kubectl logs -n $ns deploy/$w --all-containers --previous" > "$d/logs/${w}.previous.log" 2>&1
-      done <<<"$_wl_rows"
-    else
-      {
-        echo "## secure environment workload logs NOT collected"
-        echo "Could not list the secure environment's workload Deployments in namespace '$ns' by release label"
-        echo "(app.kubernetes.io/instance=$ns). Deployments carrying that label:"
-        kubectl get deployment -n "$ns" -l "app.kubernetes.io/instance=$ns" $kt 2>&1
-      } > "$d/logs/workloads-unresolved.txt" 2>&1
-    fi
-    # The resource-monitor DaemonSet is READ as well. The old
-    # literal looked in the CLIENT namespace for a fixed name, but the chart puts
-    # it in the node-agents namespace under `<fullname>-resource-monitor`, so the
-    # log was always a NotFound error. Unresolved (resourceMonitor disabled, or
-    # the read failed) is said in a file of its own, like the workloads above.
-    local _rm
-    if _rm="$(_resource_monitor_daemonset "$ns" 5s)"; then
-      kubectl logs -n "${_rm%% *}" "daemonset/${_rm#* }" --tail=300 $kt </dev/null > "$d/logs/resource-monitor.log" 2>&1
-    else
-      {
-        echo "## resource-monitor logs NOT collected"
-        echo "Could not find exactly one DaemonSet of release '$ns' (app.kubernetes.io/instance=$ns, any namespace)"
-        echo "whose pods run the '$_TB_RESOURCE_MONITOR_CONTAINER' container. None is expected when the"
-        echo "chart runs with the resource-monitor disabled. DaemonSets carrying that label:"
-        kubectl get daemonset -A -l "app.kubernetes.io/instance=$ns" $kt 2>&1
-      } > "$d/logs/resource-monitor-unresolved.txt" 2>&1
-    fi
-  fi
+  _diag_collect_kubectl "$d" "$ns" "$kt"
 
   # ── helm (redacted afterwards) ──
-  # helm has no --request-timeout; it talks to the same API. Only run it when a
-  # BOUNDED probe confirms the API is reachable, so a wedged API can't hang the
-  # bundle here (the kubectl output above already captured the degraded state).
-  if has helm && { ! has kubectl || kubectl cluster-info --request-timeout=5s >/dev/null 2>&1; }; then
-    # NOTE: deliberately NOT collecting `helm get manifest` — it renders the
-    # Secret objects with base64-encoded credentials (CLIENT_PASSWORD,
-    # .dockerconfigjson), which the text redaction can't see. The stored values
-    # hold the same secrets: they reach the bundle only through _diag_values_view,
-    # straight from helm's pipe, with helm's stderr dropped.
-    local hrc
-    {
-      echo "## helm list -A";          helm list -A 2>&1
-      echo; echo "## helm get values $ns (values outside TB_DIAG_VALUES_KEEP: ${TB_DIAG_VALUE_HIDDEN})"
-      hrc=0
-      ( set -o pipefail; helm get values "$ns" -n "$ns" 2>/dev/null </dev/null | _diag_values_view ) || hrc=$?
-      [[ "$hrc" -eq 0 ]] || echo "(helm exit $hrc)"
-    } > "$d/04-helm.txt" 2>&1
-  elif has helm; then
-    echo "## helm skipped — API unreachable (bounded cluster-info probe failed)" > "$d/04-helm.txt" 2>&1
-  fi
+  _diag_collect_helm "$d" "$ns"
 
   # ── install artifacts (copied, redacted afterwards) ──
   cp "$base"/install-*.log "$d/" 2>/dev/null

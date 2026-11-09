@@ -496,13 +496,56 @@ _telemetry_source_line() {
   printf '%s' "$line"
 }
 
+# _telemetry_failure_attrs CODE PHASE STATE — a failed run's error class and location.
+_telemetry_failure_attrs() {
+  local code="$1" phase="$2" state="$3" class src
+  # §8.4 — a failure MUST carry error.type, or it cannot be grouped. The
+  # classifier's answer is checked against the declared vocabulary before it
+  # is written, so a future branch that returns something unregistered lands
+  # as a countable `unclassified` rather than opening a namespace of its own.
+  # (The declaration is not proved correct by this check — the agreement test
+  # calls telemetry_error_class over every phase x state pair and compares.)
+  class="$(telemetry_error_class "$code" "$phase" "$state" "$_TB_TELEMETRY_RERUN_HANDOFF")"
+  _telemetry_in_set "$class" "$TB_TELEMETRY_ERROR_CLASSES" || class="unclassified"
+  _telemetry_attr "error.type" "$class"
+  # Where the shell died, to the file and line — never the path that reached
+  # them. There is deliberately no exception.* set: bash has no stack trace,
+  # and TB_ERR_CMD is unexpanded command text, which is free text.
+  #
+  # ONE GATE FOR BOTH HALVES, the source vocabulary's own answer: gated apart,
+  # a location not ours (`?:118` when BASH_SOURCE is empty) emitted `source_line`
+  # alone, a line number with no file, which is a confident wrong answer.
+  # DERIVED, not restated: the gate is _telemetry_source_basename's exit status,
+  # so TB_TELEMETRY_SOURCES stays the one declaration of what counts as ours.
+  # Deliberately NOT gated the other way (source kept, line missing): the one
+  # writer of TRACEBLOC_ERR_LOC, the ERR trap at install-k8s.sh:118, always
+  # appends `:${LINENO}`, and a file with no line is honest information anyway.
+  if [ -n "${TRACEBLOC_ERR_LOC:-}" ] && src="$(_telemetry_source_basename "$TRACEBLOC_ERR_LOC")"; then
+    _telemetry_attr "tracebloc.install.source" "$src"
+    _telemetry_attr "tracebloc.install.source_line" "$(_telemetry_source_line "$TRACEBLOC_ERR_LOC")" int
+  fi
+}
+
+# _telemetry_print_record ENV — print the resource block, then _TB_TELEMETRY_BUF.
+_telemetry_print_record() {
+  printf '{"resource":{'
+  printf '"service.name":"%s",' "$TB_TELEMETRY_SERVICE"
+  printf '"tracebloc.component":"%s",' "$TB_TELEMETRY_COMPONENT"
+  printf '"service.version":"%s",' "$(_telemetry_version)"
+  printf '"deployment.environment":"%s",' "$1"
+  printf '"os.type":"%s",' "$(_telemetry_os)"
+  printf '"host.arch":"%s",' "$(_telemetry_arch)"
+  printf '"service.instance.id":"%s"' "$(_telemetry_instance_id)"
+  printf '},"attributes":{%s}}' "$_TB_TELEMETRY_BUF"
+}
+
 # telemetry_render_event EXIT_CODE — echo one contract-shaped JSON object.
 #
 # Pure: reads the installer's state, writes nothing, touches no file. That is
 # what lets the tests assert on the real payload instead of on a re-implementation
 # of it. Returns 1 without printing when the environment is unrecognised (§3.2).
 telemetry_render_event() {
-  local IFS=$' \t\n' code="${1:-0}" env event state phase phase_ms name now total class src
+  local IFS=$' \t\n' code="${1:-0}" env event state phase phase_ms name now total
   env="$(telemetry_environment)" || return 1
 
   # §6.1 — three segments, a registered domain, a registered outcome verb. The
@@ -610,56 +653,10 @@ telemetry_render_event() {
   done
 
   if [ "$event" = "install.run.failed" ]; then
-    # §8.4 — a failure MUST carry error.type, or it cannot be grouped. The
-    # classifier's answer is checked against the declared vocabulary before it
-    # is written, so a future branch that returns something unregistered lands
-    # as a countable `unclassified` rather than opening a namespace of its own.
-    # (The declaration is not proved correct by this check — the agreement test
-    # calls telemetry_error_class over every phase x state pair and compares.)
-    class="$(telemetry_error_class "$code" "$phase" "$state" "$_TB_TELEMETRY_RERUN_HANDOFF")"
-    _telemetry_in_set "$class" "$TB_TELEMETRY_ERROR_CLASSES" || class="unclassified"
-    _telemetry_attr "error.type" "$class"
-    # Where the shell died, to the file and line — never the path that reached
-    # them. There is deliberately no exception.* set: bash has no stack trace,
-    # and TB_ERR_CMD is unexpanded command text, which is free text.
-    #
-    # ONE GATE FOR BOTH HALVES, and it is the source vocabulary's own answer.
-    # These were gated independently, so a location whose basename is not one of
-    # ours — but whose line is a number, which it always is (see below) — emitted
-    # `source_line` alone. A line number with no file is not a partial answer, it
-    # is a confident wrong one: it reads as information, sorts and groups like
-    # information, and points at line 9 of nothing. `?:118`, which the ERR trap
-    # produces whenever BASH_SOURCE is empty, rendered exactly that.
-    # (Reproduced — `"tracebloc.install.source_line":9`
-    # with no source key beside it.)
-    #
-    # DERIVED, not restated: the condition is _telemetry_source_basename's own
-    # exit status, so TB_TELEMETRY_SOURCES stays the single declaration of what
-    # counts as one of our files. A second copy of that list here — or a
-    # hand-written "is it ours" test — would agree with itself and drift from the
-    # set the renderer actually uses.
-    #
-    # Deliberately NOT gated the other way (source kept, line missing): that
-    # cannot happen, and a branch for it would be belt and braces no test could
-    # redden. TRACEBLOC_ERR_LOC has exactly one writer in the whole tree, the ERR trap at
-    # install-k8s.sh:118, which always appends `:${LINENO}` — so the line half is
-    # always a number. And a file with no line is honest information anyway; a
-    # line with no file is the only one of the two that lies.
-    if [ -n "${TRACEBLOC_ERR_LOC:-}" ] && src="$(_telemetry_source_basename "$TRACEBLOC_ERR_LOC")"; then
-      _telemetry_attr "tracebloc.install.source" "$src"
-      _telemetry_attr "tracebloc.install.source_line" "$(_telemetry_source_line "$TRACEBLOC_ERR_LOC")" int
-    fi
+    _telemetry_failure_attrs "$code" "$phase" "$state"
   fi
 
-  printf '{"resource":{'
-  printf '"service.name":"%s",' "$TB_TELEMETRY_SERVICE"
-  printf '"tracebloc.component":"%s",' "$TB_TELEMETRY_COMPONENT"
-  printf '"service.version":"%s",' "$(_telemetry_version)"
-  printf '"deployment.environment":"%s",' "$env"
-  printf '"os.type":"%s",' "$(_telemetry_os)"
-  printf '"host.arch":"%s",' "$(_telemetry_arch)"
-  printf '"service.instance.id":"%s"' "$(_telemetry_instance_id)"
-  printf '},"attributes":{%s}}' "$_TB_TELEMETRY_BUF"
+  _telemetry_print_record "$env"
 }
 
 # _telemetry_version — the release tag the bootstrap pinned. §4: unknown is a

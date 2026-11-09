@@ -4658,7 +4658,10 @@ install_client_helm() {
   # prompt, no verify, no duplicate. Only if there's no live release to reconcile do
   # we fall through to the normal connect flow below.
   if [[ "${TRACEBLOC_CLIENT_ADOPTED:-}" == 1 ]] && _reconcile_adopted_client; then
-    success "tracebloc installed"
+    # What helm did, as the fresh path says it below; no "installed" claim here,
+    # whether the install succeeded is step f's.
+    tb_live "Installing services..."
+    _installed_services_line "$TB_NAMESPACE"
     log "Reconciled adopted client in namespace '$TB_NAMESPACE'"
     return 0
   fi
@@ -5279,16 +5282,15 @@ EOF
 
   tb_live "Installing services..."
   _installed_services_line "$TB_NAMESPACE"
-  echo ""
-  success "tracebloc installed"
   log "Values file: $values_file"
 }
 
 # _installed_services_line NS -- step e's "Installing services..." ends with how many
 # services the release installed, the count its "Downloaded" line gave
-# (_release_service_count). With no count it stays "· Installing services...", and
-# "✔ tracebloc installed" below says what happened. Whether they run is step f's
-# (wait_for_client_ready): nothing here says ready.
+# (_release_service_count). With no count it stays "· Installing services...".
+# Step e ends on this line: it says what helm did, never that tracebloc is installed.
+# Whether the install succeeded is step f's (wait_for_client_ready), and the summary
+# says it: a refused install must never have said "installed" first.
 _installed_services_line() {
   local n
   if n="$(_release_service_count "$1" 10s)"; then

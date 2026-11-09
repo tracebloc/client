@@ -880,11 +880,74 @@ _summary_footer() {
   _reboot_note
 }
 
+# _summary_connected NS MODE TRAINING CVER MACHINE LOGDIR LOGDISP — print_summary's online screen.
+_summary_connected() {
+  local ns="$1" mode="$2" training="$3" cver="$4" machine="$5" logdir="$6" logdisp="$7" kc=""
+  tb_rule
+  echo ""
+  echo -e "  ${TB_GO}✔${RESET} ${BOLD}tracebloc is ready${RESET}"
+  echo ""
+  echo -e "  Your secure environment is running and online."
+  echo ""
+  _summary_row "Environment" "$ns"
+  [[ -z "$machine" ]] || _summary_row "Machine" "$machine"
+  [[ -z "${_TB_COMPUTE_SHOWN:-}" ]] || _summary_row "Compute" "$_TB_COMPUTE_SHOWN"
+  _summary_row "Training" "${training:-$mode}"
+  _summary_row "Status" "Online"
+  _prepull_summary_line
+  [[ -z "$logdir" ]] || _summary_row "Logs" "$logdir"
+  # What machines read off this screen (e2e's summary questions): see tb_machine_lines.
+  tb_machine_lines _summary_machine_rows "$ns" "${cver:-unknown}" "$mode"
+  echo ""
+  echo ""
+  # The first-install steps are for a first install only (tb_upgrade_run).
+  if tb_upgrade_run; then
+    echo -e "  ${BOLD}Upgrade complete${RESET} — ${TB_DESC}your data and use cases are unchanged.${RESET}"
+  else
+    echo -e "  ${TB_HEADING}What's next?${RESET}"
+    echo ""
+    # Opened already (open_dashboard_link), or for the person to open (no browser here).
+    if [[ -n "${_TB_DASHBOARD_OPENED:-}" ]]; then
+      echo -e "  1. Your dashboard (opened in your browser)"
+    else
+      echo -e "  1. Open your dashboard"
+    fi
+    echo -e "     ${TB_LINK}$(_dashboard_url)${RESET}"
+    echo ""
+    echo -e "  2. Ingest your own data"
+    echo -e "     ${TB_CMD}tracebloc data ingest${RESET}"
+    echo ""
+    echo -e "  3. Create a use case"
+    echo -e "     ${TB_LINK}$(_dashboard_url 'use-cases?create=1')${RESET}"
+    echo ""
+    echo -e "  4. Invite peers"
+    echo -e "     ${TB_DESC}Let others train models on your data${RESET}"
+    echo -e "     ${TB_DESC}without sharing your datasets.${RESET}"
+  fi
+  echo ""
+  echo ""
+  if _cli_runnable_now; then
+    echo -e "  Run ${TB_CMD}\`tracebloc\`${RESET} to manage your secure environment."
+  elif [[ "${TRACEBLOC_CLI_ON_FRESH_PATH:-}" == "0" ]]; then
+    # Case B: install-cli.sh RAN, set 0 and printed the EXACT PATH fix above. The
+    # explicit "0" matters: UNSET (CLI step skipped/failed) printed nothing above.
+    echo -e "  Add tracebloc to your PATH (see above), then run ${TB_CMD}\`tracebloc\`${RESET} to manage your secure environment."
+  else
+    # Case A (flag=1: a new terminal resolves ~/.local/bin) or UNSET: the safe,
+    # honest default is "open a new terminal".
+    echo -e "  Open a new terminal, then run ${TB_CMD}\`tracebloc\`${RESET} to manage your secure environment."
+  fi
+  echo ""
+  kc="$(_summary_kubeconfig_lines)"
+  if [[ -n "$kc" ]]; then tb_machine_lines printf '%s\n\n' "$kc"; fi
+  tb_rule
+  # Where the logs and data are, and how it comes back after a restart: the log's.
+  _summary_footer "$logdisp" "$ns" >>"${LOG_FILE:-/dev/null}" 2>&1
+}
+
 print_summary() {
-  # NVIDIA "GPU mode" only when the GPU was actually WIRED into the cluster
-  # (_gpu_wired) — a detected-but-not-wired GPU runs CPU-only, and printing
-  # "NVIDIA GPU" there is exactly the false claim the CPU-fallback rule removes. AMD keys on
-  # detection.
+  # NVIDIA "GPU mode" only when the GPU was WIRED into the cluster (_gpu_wired): a
+  # detected-but-not-wired GPU runs CPU-only. AMD keys on detection.
   # training: the summary's Training row, the device a person reads; mode: the Mode line
   # a machine reads (tb_machine_lines), which says when the Apple GPU takes a job.
   local mode="CPU" training=""
@@ -920,70 +983,7 @@ print_summary() {
   echo ""
   case "$TRACEBLOC_CLIENT_STATE" in
     connected)
-      tb_rule
-      echo ""
-      echo -e "  ${TB_GO}✔${RESET} ${BOLD}tracebloc is ready${RESET}"
-      echo ""
-      echo -e "  Your secure environment is running and online."
-      echo ""
-      _summary_row "Environment" "$ns"
-      [[ -z "$machine" ]] || _summary_row "Machine" "$machine"
-      [[ -z "${_TB_COMPUTE_SHOWN:-}" ]] || _summary_row "Compute" "$_TB_COMPUTE_SHOWN"
-      _summary_row "Training" "${training:-$mode}"
-      _summary_row "Status" "Online"
-      _prepull_summary_line
-      [[ -z "$logdir" ]] || _summary_row "Logs" "$logdir"
-      # What machines read off this screen (e2e's summary questions): see tb_machine_lines.
-      tb_machine_lines _summary_machine_rows "$ns" "${cver:-unknown}" "$mode"
-      echo ""
-      echo ""
-      # The first-install steps are for a first install only (tb_upgrade_run).
-      if tb_upgrade_run; then
-        echo -e "  ${BOLD}Upgrade complete${RESET} — ${TB_DESC}your data and use cases are unchanged.${RESET}"
-      else
-        echo -e "  ${TB_HEADING}What's next?${RESET}"
-        echo ""
-        # Opened already (open_dashboard_link, before this summary), or for the person
-        # to open: no browser here (SSH, a headless machine) or nobody at a terminal.
-        if [[ -n "${_TB_DASHBOARD_OPENED:-}" ]]; then
-          echo -e "  1. Your dashboard (opened in your browser)"
-        else
-          echo -e "  1. Open your dashboard"
-        fi
-        echo -e "     ${TB_LINK}$(_dashboard_url)${RESET}"
-        echo ""
-        echo -e "  2. Ingest your own data"
-        echo -e "     ${TB_CMD}tracebloc data ingest${RESET}"
-        echo ""
-        echo -e "  3. Create a use case"
-        echo -e "     ${TB_LINK}$(_dashboard_url 'use-cases?create=1')${RESET}"
-        echo ""
-        echo -e "  4. Invite peers"
-        echo -e "     ${TB_DESC}Let others train models on your data${RESET}"
-        echo -e "     ${TB_DESC}without sharing your datasets.${RESET}"
-      fi
-      echo ""
-      echo ""
-      if _cli_runnable_now; then
-        echo -e "  Run ${TB_CMD}\`tracebloc\`${RESET} to manage your secure environment."
-      elif [[ "${TRACEBLOC_CLI_ON_FRESH_PATH:-}" == "0" ]]; then
-        # Case B: install-cli.sh RAN and set the flag to 0 — it printed the EXACT
-        # PATH fix above and a new terminal won't help. The explicit "0" test matters:
-        # an UNSET flag (CLI step skipped/failed → nothing printed above) must NOT
-        # land here, or "see above" points at nothing.
-        echo -e "  Add tracebloc to your PATH (see above), then run ${TB_CMD}\`tracebloc\`${RESET} to manage your secure environment."
-      else
-        # Case A (flag=1: installed to ~/.local/bin, persisted — a new terminal
-        # resolves it, only this shell doesn't) OR the flag is UNSET (the CLI step
-        # was skipped/failed): the safe, honest default is "open a new terminal".
-        echo -e "  Open a new terminal, then run ${TB_CMD}\`tracebloc\`${RESET} to manage your secure environment."
-      fi
-      echo ""
-      kc="$(_summary_kubeconfig_lines)"
-      if [[ -n "$kc" ]]; then tb_machine_lines printf '%s\n\n' "$kc"; fi
-      tb_rule
-      # Where the logs and data are, and how it comes back after a restart: the log's.
-      _summary_footer "$logdisp" "$ns" >>"${LOG_FILE:-/dev/null}" 2>&1
+      _summary_connected "$ns" "$mode" "$training" "$cver" "$machine" "$logdir" "$logdisp"
       ;;
     starting)
       # A first boot past TB_MYSQL_FIRST_BOOT_STALL_S is a stall, and the run fails on it.
