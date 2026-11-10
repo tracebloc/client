@@ -141,13 +141,12 @@ _client_name_default() {
   printf '%s' "$s"
 }
 
-# _machine_labels REUSE_NS PLAN_ACTION — the machine name and provider `client
-# create` sets, into _TB_MACHINE_NAME / _TB_CLIENT_PROVIDER: TRACEBLOC_MACHINE_NAME /
-# TRACEBLOC_CLIENT_PROVIDER, else the host's name and no provider, never asked
-# (`tracebloc machine set` changes them later). Only a run that mints a client defaults
-# (PLAN_ACTION, else `client create --plan`): a reused client keeps what `tracebloc
-# machine set` stored, and gets only what the caller set. The CLI sends a value only
-# when it is given.
+# _machine_labels REUSE_NS PLAN_ACTION — the machine name and provider `client create`
+# sets, into _TB_MACHINE_NAME / _TB_CLIENT_PROVIDER: TRACEBLOC_MACHINE_NAME /
+# TRACEBLOC_CLIENT_PROVIDER, else the host's name and no provider, never asked (`tracebloc
+# machine set` changes them later). Only a run that mints a client defaults (PLAN_ACTION,
+# else `client create --plan`): a reused client keeps what `tracebloc machine set` stored,
+# and gets only what the caller set. The CLI sends a value only when it is given.
 _machine_labels() {
   local reuse="$1" action="$2" host
   _TB_MACHINE_NAME="$(_trim_label "${TRACEBLOC_MACHINE_NAME:-}")"
@@ -196,12 +195,11 @@ _login_tty_ok() { { : </dev/tty; } 2>/dev/null; }
 
 # _run_device_login: one `tracebloc login`, given the user's REAL terminal.
 #
-# This runs after setup_log_file (`exec > >(tee …) 2>&1`), so the shell's
-# stdout/stderr are a pipe and — under `curl … | bash` — stdin is the install
-# pipe; a bare `tracebloc login` would then have no tty on any stream and can
-# misrender or fail (same class assess.sh's hand-off handles). Redirect all three
-# to /dev/tty when openable, else </dev/null (unattended reaches the dual-mode
-# credential path, not here).
+# This runs after setup_log_file (`exec > >(tee …) 2>&1`), so the shell's stdout/stderr
+# are a pipe and — under `curl … | bash` — stdin is the install pipe; a bare `tracebloc
+# login` would then have no tty on any stream and can misrender or fail (same class
+# assess.sh's hand-off handles). Redirect all three to /dev/tty when openable, else
+# </dev/null (unattended reaches the dual-mode credential path, not here).
 #
 # TRACEBLOC_INSTALLER tells the CLI it is not being run by hand, so it suppresses
 # its own "run `tracebloc login`" recovery line: correct for someone who typed
@@ -323,12 +321,11 @@ _report_create_failure() {
     fi
     return 0
   fi
-  # `head -4` closes the pipe once grep has produced 4 matches; under pipefail
-  # the substitution then yields 141 and errexit aborts _report_create_failure
-  # before warn/hint print why provisioning failed -- its entire purpose.
-  # The CLI ends a failure on "  ✖ <reason>"; older CLIs wrote "Error: <reason>".
-  # Read both, and hand the lines below the older shape (sed reads to the end,
-  # so nothing closes the pipe early).
+  # `head -4` closes the pipe once grep has produced 4 matches; under pipefail the
+  # substitution then yields 141 and errexit aborts _report_create_failure before
+  # warn/hint print why provisioning failed -- its entire purpose. The CLI ends a failure
+  # on "  ✖ <reason>"; older CLIs wrote "Error: <reason>". Read both, and hand the lines
+  # below the older shape (sed reads to the end, so nothing closes the pipe early).
   errmatches="$(grep -aE 'Error:|✖|HTTP [0-9][0-9][0-9]|refused|timed? ?out|unauthorized|forbidden|denied' "$out" 2>/dev/null | LC_ALL=C sed -E 's/^[[:space:]]*✖ /Error: /' || true)"
   errline="$(head -4 <<<"$errmatches")"
   # A person reads what tracebloc answered, under one ✖ line; machines the whole lines.
@@ -486,13 +483,12 @@ provision_client() {
   export PATH="${HOME}/.local/bin:${PATH}"
   has tracebloc || error "The tracebloc CLI is required to provision this machine but isn't available. Install it (curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh), open a new shell, and re-run."
 
-  # The browser-auth mint path needs a CLI new enough to ship `login` + `client
-  # create`. The installed CLI comes from the latest RELEASE, which may
-  # predate this installer — so if it's too old, fall back to the proven manual-
-  # credential path (install_client_helm prompts for an existing client's
-  # credentials, exactly as before) instead of hard-failing on an unknown
-  # `tracebloc login`. Once the CLI release lands, the probe passes and the
-  # one-step browser flow takes over automatically.
+  # The browser-auth mint path needs a CLI new enough to ship `login` + `client create`.
+  # The installed CLI comes from the latest RELEASE, which may predate this installer — so
+  # if it's too old, fall back to the proven manual-credential path (install_client_helm
+  # prompts for an existing client's credentials, exactly as before) instead of
+  # hard-failing on an unknown `tracebloc login`. Once the CLI release lands, the probe
+  # passes and the one-step browser flow takes over automatically.
   if ! _cli_supports_provisioning; then
     warn "This tracebloc CLI is too old to provision a secure environment from the installer — falling back to manual sign-in."
     hint "Connect an existing secure environment below, or upgrade the CLI later for one-step browser sign-in:"
@@ -500,34 +496,60 @@ provision_client() {
     return 0
   fi
 
-  # Sign in (device flow). `tracebloc login` PRINTS a URL + one-time code and
-  # waits for approval — it does NOT auto-open a browser. The Open/Enter code lines
-  # + the wait are the CLI's own output; unattended installs use the dual-mode
-  # credential path above.
+  # Sign in (device flow). `tracebloc login` PRINTS a URL + one-time code and waits for
+  # approval — it does NOT auto-open a browser. The Open/Enter code lines + the wait are
+  # the CLI's own output; unattended installs use the dual-mode credential path above.
   echo -e "  Sign in to connect this machine to tracebloc."
   _device_sign_in
   # shellcheck disable=SC2034  # consumed cross-file by install-cli.sh (setup_example_use_case)
   TB_CLI_SIGNED_IN=1
 
-  # Namespace of a client installed here that the signed-in account owns, when
-  # the pre-flight below finds one: this run reconnects it rather than naming a
-  # new one.
+  # Namespace of a client installed here that the signed-in account owns, when the
+  # pre-flight below finds one: this run reconnects it rather than naming a new one.
   local _reuse_ns=""
-
-  # ── One-client-per-machine pre-flight ─────────────────────────────
-  # `client create` below mints a fresh client whenever the backend can't match
-  # THIS cluster to a client in the signed-in account — e.g. a pre-anchor client
-  # whose cluster_id is still null, or one owned by a DIFFERENT account. If a
-  # client is already installed here and the signed-in account doesn't own it,
-  # that mint registers a brand-new client that never installs (the Helm-step
-  # guard then refuses) — an orphan left on the dashboard. Catch it BEFORE minting.
+  _provision_preflight_installed
+  # Mint the client + derive the namespace. --credential-file writes the secret to
+  # a 0600 file (never printed); we source it, hand it to Helm, then delete it (the
+  # secret's durable home is the Helm/cluster secret — RFC §7.9).
+  local cred_file="${HOST_DATA_DIR}/client-credential.env"
+  # Register the path so install_cleanup removes it on ANY exit (error/signal)
+  # between mint and the explicit removal below — the secret must never linger.
+  _PROVISION_CRED_FILE="$cred_file"
+  rm -f "$cred_file"
+  # Name this client, then provision. `client create` would prompt for the name
+  # itself, but we redirect its output to the log below (the credential must never
+  # reach the terminal), so it can't — collect the name here and pass it explicitly.
+  # Precedence: TRACEBLOC_CLIENT_NAME (unattended) > interactive prompt on /dev/tty
+  # (works under `curl | bash`, whose stdin isn't the terminal) > fail closed.
   #
-  # Only fires when a local release exists AND we can positively confirm the
-  # account does NOT own it. A fresh machine (no release), an account that DOES
-  # own the local client (create cleanly adopts), or an inconclusive list read all
-  # fall through to `client create`'s own idempotent adopt/conflict handling — so
-  # this never regresses the same-account re-run/upgrade path. Guarded on the
-  # shared probe being present (a stale bootstrap may not have sourced it).
+  # Location is NEVER prompted. The CLI's `client create` now treats --location as
+  # optional, so we auto-derive the carbon zone from the system timezone below (silent, no
+  # network) and, when detection yields nothing, provision with NO location rather than
+  # asking. A pinned TRACEBLOC_CLIENT_LOCATION still overrides for unattended installs.
+  local client_name="${TRACEBLOC_CLIENT_NAME:-}" client_location="${TRACEBLOC_CLIENT_LOCATION:-}"
+  # The blank line before the first thing the name step says on the terminal.
+  local _name_lead=$'\n'
+  local _plan _plan_action _plan_ns _plan_name client_location_source="auto"   # stages below; source: "env" or "auto"
+  _provision_name_client
+  _provision_mint
+}
+
+# One-client-per-machine pre-flight.
+# `client create` below mints a fresh client whenever the backend can't match
+# THIS cluster to a client in the signed-in account — e.g. a pre-anchor client
+# whose cluster_id is still null, or one owned by a DIFFERENT account. If a
+# client is already installed here and the signed-in account doesn't own it,
+# that mint registers a brand-new client that never installs (the Helm-step
+# guard then refuses) — an orphan left on the dashboard. Catch it BEFORE minting.
+#
+# Only fires when a local release exists AND we can positively confirm the
+# account does NOT own it. A fresh machine (no release), an account that DOES
+# own the local client (create cleanly adopts), or an inconclusive list read all
+# fall through to `client create`'s own idempotent adopt/conflict handling — so
+# this never regresses the same-account re-run/upgrade path. Guarded on the
+# shared probe being present (a stale bootstrap may not have sourced it).
+# It sets _reuse_ns when the signed-in account owns the client installed here.
+_provision_preflight_installed() {
   if declare -F detect_installed_client >/dev/null 2>&1; then
     detect_installed_client
     # Fail CLOSED when we couldn't enumerate what's here (helm/API failure): the
@@ -572,29 +594,10 @@ provision_client() {
       fi
     fi
   fi
+}
 
-  # Mint the client + derive the namespace. --credential-file writes the secret to
-  # a 0600 file (never printed); we source it, hand it to Helm, then delete it (the
-  # secret's durable home is the Helm/cluster secret — RFC §7.9).
-  local cred_file="${HOST_DATA_DIR}/client-credential.env"
-  # Register the path so install_cleanup removes it on ANY exit (error/signal)
-  # between mint and the explicit removal below — the secret must never linger.
-  _PROVISION_CRED_FILE="$cred_file"
-  rm -f "$cred_file"
-  # Name this client, then provision. `client create` would prompt for the name
-  # itself, but we redirect its output to the log below (the credential must never
-  # reach the terminal), so it can't — collect the name here and pass it explicitly.
-  # Precedence: TRACEBLOC_CLIENT_NAME (unattended) > interactive prompt on /dev/tty
-  # (works under `curl | bash`, whose stdin isn't the terminal) > fail closed.
-  #
-  # Location is NEVER prompted. The CLI's
-  # `client create` now treats --location as optional, so we auto-derive the carbon
-  # zone from the system timezone below (silent, no network) and, when detection
-  # yields nothing, provision with NO location rather than asking. A pinned
-  # TRACEBLOC_CLIENT_LOCATION still overrides for unattended installs.
-  local client_name="${TRACEBLOC_CLIENT_NAME:-}" client_location="${TRACEBLOC_CLIENT_LOCATION:-}"
-  # The blank line before the first thing the name step says on the terminal.
-  local _name_lead=$'\n'
+# client_name and client_location to register under, or the reused client's _reuse_ns.
+_provision_name_client() {
   # A TRACEBLOC_CLIENT_NAME that can't be used is asked for on a terminal, as a typed
   # one is below; with no terminal it stops the run further down.
   client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
@@ -613,7 +616,6 @@ provision_client() {
     # registered for this cluster (its install was removed), or this machine's own
     # client from a cluster that was rebuilt. Ask it (`client create --plan`,
     # side-effect free) and ask the user for a name only before a real mint.
-    local _plan _plan_action _plan_ns _plan_name
     _plan="$(_create_plan)"
     if [[ -n "$_plan" ]]; then
       # -s: a line with no tab is no plan line. Without it `cut -f3` prints the
@@ -636,9 +638,6 @@ provision_client() {
       fi
     fi
   fi
-  # Track where the location came from so a rejected-zone hint can name the real
-  # source ("env" = pinned via TRACEBLOC_CLIENT_LOCATION, "auto" = timezone-derived).
-  local client_location_source="auto"
   if [[ -z "$client_name" ]] && _prompt_tty; then
     # Read the name from the terminal, the `?` prompt `tracebloc delete` asks with:
     # Enter takes the default in brackets (_client_name_default, this host's name).
@@ -656,15 +655,14 @@ provision_client() {
     while :; do
       printf '%s%s' "$_name_lead" "$_name_ask" >/dev/tty 2>/dev/null || true; _name_lead=""
       _name_read_ok=1; IFS= read -r client_name <"$TRACEBLOC_TTY" || _name_read_ok=0
-      # Plain `read` (NOT `read -e`): setup_log_file has already redirected this
-      # process's stdout+stderr through `exec > >(tee …) 2>&1`, and readline
-      # (`read -e`) echoes typed characters to stderr — so under the tee pipe the
-      # live echo is delayed/garbled on exactly this interactive path. Kernel-tty
-      # echo (plain read) is immune to that redirection. The actual garble fix is
-      # the strip below: arrow keys inject ESC[D/ESC[A byte sequences that would
-      # otherwise slug-ify into a garbage name like "d-d-d-a-a-a" when passed to
-      # `client create` (customer-reported 2026-07-20). Same helper the credential
-      # path uses.
+      # Plain `read` (NOT `read -e`): setup_log_file has already redirected this process's
+      # stdout+stderr through `exec > >(tee …) 2>&1`, and readline (`read -e`) echoes
+      # typed characters to stderr — so under the tee pipe the live echo is
+      # delayed/garbled on exactly this interactive path. Kernel-tty echo (plain read) is
+      # immune to that redirection. The actual garble fix is the strip below: arrow keys
+      # inject ESC[D/ESC[A byte sequences that would otherwise slug-ify into a garbage
+      # name like "d-d-d-a-a-a" when passed to `client create` (customer-reported
+      # 2026-07-20). Same helper the credential path uses.
       client_name="$(_strip_paste_garbage "$client_name")"
       client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
       if [[ -n "$client_name" ]] && ! _name_has_letter "$client_name"; then
@@ -688,12 +686,11 @@ provision_client() {
   # read so far); anything set below is timezone-derived, so the default stands.
   [[ -n "$client_location" ]] && client_location_source="env"
 
-  # No location from TRACEBLOC_CLIENT_LOCATION: derive the carbon zone from the
-  # system timezone silently — never prompted, matching the target spec. The
-  # detected code is already whitespace-free. If detection also comes up empty we
-  # leave client_location unset and provision with NO --location (the CLI makes it
-  # optional); a rejected zone still surfaces via _report_create_failure below
-  # rather than failing blind here.
+  # No location from TRACEBLOC_CLIENT_LOCATION: derive the carbon zone from the system
+  # timezone silently — never prompted, matching the target spec. The detected code is
+  # already whitespace-free. If detection also comes up empty we leave client_location
+  # unset and provision with NO --location (the CLI makes it optional); a rejected zone
+  # still surfaces via _report_create_failure below rather than failing blind here.
   if [[ -z "$client_location" ]]; then
     client_location="$(_detect_location_zone)"; client_location="${client_location%% *}"
   fi
@@ -712,6 +709,10 @@ provision_client() {
     fi
     error_said "No name was given" "A name for this secure environment is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME (and optionally TRACEBLOC_CLIENT_LOCATION) for an unattended install."
   fi
+}
+
+# `client create` with what the stages above chose, then the credential handed over.
+_provision_mint() {
   _machine_labels "$_reuse_ns" "${_plan_action:-}"
   # --name is required; pass --location only when we have one (the CLI defaults it
   # otherwise). Build as an array so values with spaces survive intact.
@@ -735,14 +736,13 @@ provision_client() {
     fi
   fi
   [[ -n "$client_location" ]] && _create_args+=(--location "$client_location")
-  # umask 077 so the credential file lands 0600 even if a future CLI build
-  # regresses on its explicit chmod — defense in depth (the CLI already sets 0600).
-  # Capture the create's output so we can surface the ACTUAL failure reason on the
-  # terminal (not just "see the log"). On success it's appended to the log and the
-  # credential stays in its 0600 file, never on stdout; on failure nothing was
-  # minted, so the captured text is safe to show.
-  # Prefer mktemp; if it's unavailable, fall back INSIDE the install dir (which we
-  # own and just wrote the 0600 credential into) rather than a predictable
+  # umask 077 so the credential file lands 0600 even if a future CLI build regresses on
+  # its explicit chmod — defense in depth (the CLI already sets 0600). Capture the
+  # create's output so we can surface the ACTUAL failure reason on the terminal (not just
+  # "see the log"). On success it's appended to the log and the credential stays in its
+  # 0600 file, never on stdout; on failure nothing was minted, so the captured text is
+  # safe to show. Prefer mktemp; if it's unavailable, fall back INSIDE the install dir
+  # (which we own and just wrote the 0600 credential into) rather than a predictable
   # world-writable /tmp path — that path is a symlink-clobber target under sudo.
   local _create_out; _create_out="$(mktemp 2>/dev/null)" || _create_out="${HOST_DATA_DIR}/.client-create.$$.out"
   # Where this machine runs and what it is called (_machine_labels above), handed to

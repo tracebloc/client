@@ -702,18 +702,17 @@ TB_MAC_CT_NODE_IFACE="eth0"
 # The port the node's API listens on, published on this Mac's 127.0.0.1 only
 # (_mac_ct_node_argv), and a port the node's packet filter lets this Mac reach.
 TB_MAC_CT_NODE_API_PORT="6443"
-# The node's packet filter: a chain in the mangle
-# table of both IP families, which PREROUTING sends everything arriving on
-# TB_MAC_CT_NODE_IFACE through, before kube-proxy's NodePort DNAT can see it. Every VM on
-# this Mac shares the node's network, and the node listens on every address (the
-# kubelet's 10250, the API, every NodePort), so without it any of them reaches the
-# cluster. The chain lets back what answers the node's own connections, and this Mac,
-# the network's gateway, to the API port and, when the node publishes it
-# (TRACEBLOC_MAC_CT_LOCAL_API), the local API's NodePort, over IPv4 (the runtime's 127.0.0.1
-# forwards arrive from it); it drops the rest. The local API's NodePort is the one
-# NodePort this Mac reaches (a decision of 2026-10-19); no other VM reaches it. The entrypoint sets the chain
-# before k3s starts, on every start (the VM's kernel keeps no rule across one), and
-# _mac_ct_node_walled reads it back.
+# The node's packet filter: a chain in the mangle table of both IP families, which
+# PREROUTING sends everything arriving on TB_MAC_CT_NODE_IFACE through, before
+# kube-proxy's NodePort DNAT can see it. Every VM on this Mac shares the node's network,
+# and the node listens on every address (the kubelet's 10250, the API, every NodePort), so
+# without it any of them reaches the cluster. The chain lets back what answers the node's
+# own connections, and this Mac, the network's gateway, to the API port and, when the node
+# publishes it (TRACEBLOC_MAC_CT_LOCAL_API), the local API's NodePort, over IPv4 (the
+# runtime's 127.0.0.1 forwards arrive from it); it drops the rest. The local API's
+# NodePort is the one NodePort this Mac reaches (a decision of 2026-10-19); no other VM
+# reaches it. The entrypoint sets the chain before k3s starts, on every start (the VM's
+# kernel keeps no rule across one), and _mac_ct_node_walled reads it back.
 TB_MAC_CT_NODE_WALL="TRACEBLOC-WALL"
 # The volume's size: a sparse ext4 image, so it takes only what is written.
 TB_MAC_CT_NODE_VOLUME_SIZE="64g"
@@ -1519,40 +1518,9 @@ _mac_ct_node_drop_local_api() {
   TRACEBLOC_MAC_CT_LOCAL_API=""
 }
 
-# _mac_ct_ensure_node -- the node on the running system (part 2), Ready, its packet
-# filter read back (_mac_ct_node_walled), recorded, and its kubeconfig copied to
-# _mac_ct_node_dir/k3s.yaml. Reuses a running node created with this argv, starts a
-# stopped one, recreates one created with another argv on its volume, and refuses a
-# container or a volume of its name that nothing shows this installer made.
-# _mac_ct_ensure_node runs with bash -x held off, the secret it holds out of the trace (common.sh);
-# _tb_untraced__mac_ct_ensure_node below is the function itself.
-_mac_ct_ensure_node() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__mac_ct_ensure_node "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
-_tb_untraced__mac_ct_ensure_node() {
-  local root ct name dir image cfgfile cidrs node cfg kubelet size want have="" rc since start="" mkvol="" state casum running=""
-  local penv pold="" pchanged=""
-  _native_k3s_check_version
-  TB_K3S_ON_MAC=1
-  root="$(_mac_ct_install_root)" && dir="$(_mac_ct_node_dir)" \
-    || error "Apple container: cannot tell where the runtime lives (above)."
-  ct="${root}/bin/container"
-  name="$(_mac_ct_node_name)" || error "$name"
-  image="$(_mac_ct_node_image)" || error "$image"
-  size="$(_mac_ct_node_size)" || error "$size"
-  mkdir -p "$dir" || error "Apple container: could not create ${dir}."
-  cfgfile="${dir}/config.yaml"
-  cidrs="$(_mac_ct_node_cidrs "$cfgfile")" || exit 1
-  node="$(_native_k3s_node_name "$cfgfile")" || _native_k3s_node_name_stop "$?" "$cfgfile"
-  cfg="$(_mac_ct_node_config "$node" "$cidrs")" || error "Apple container: could not render the node's k3s config (above)."
-  # The node is k3s whatever this run resolved, so it gets darwin_k3s's reservation.
-  kubelet="$(TRACEBLOC_SUBSTRATE_RESOLVED=k3s _render_kubelet_config)" || error "Apple container: could not render the node's kubelet drop-in."
-  if [[ -e "${dir}/run-args" ]]; then
-    have="$(cat "${dir}/run-args")" || error "Apple container: ${dir}/run-args cannot be read, so this run cannot tell how the node was created."
-  fi
-  # The config is frozen before the node first reads it, as on Linux.
-  printf '%s\n' "$cfg" > "${cfgfile}.tmp" && mv "${cfgfile}.tmp" "$cfgfile" \
-    || { rm -f "${cfgfile}.tmp"; error "Apple container: could not write ${cfgfile}."; }
-  # What is there of the node, settled before its token is read from it: a container
-  # or a volume nothing shows this installer made is refused before anything runs in it.
+# _mac_ct_node_settle -- what is there of the node, settled before its token is read from
+# it, then the token, CA, mounts, proxy and local API it runs with (_mac_ct_ensure_node).
+_mac_ct_node_settle() {
   rc=0; _mac_ct_node_exists "$ct" "$name" || rc=$?
   [[ "$rc" != 2 ]] \
     || error "Apple container: the container system did not answer whether a container named ${name} exists, so this run cannot tell. It's safe to re-run this installer."
@@ -1611,6 +1579,41 @@ _tb_untraced__mac_ct_ensure_node() {
     esac
   fi
   _mac_ct_local_api "${running:+$have}"
+}
+
+# _mac_ct_ensure_node -- the node on the running system (part 2), Ready, its packet
+# filter read back (_mac_ct_node_walled), recorded, and its kubeconfig copied to
+# _mac_ct_node_dir/k3s.yaml. Reuses a running node created with this argv, starts a
+# stopped one, recreates one created with another argv on its volume, and refuses a
+# container or a volume of its name that nothing shows this installer made.
+# _mac_ct_ensure_node runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _tb_untraced__mac_ct_ensure_node below is the function itself.
+_mac_ct_ensure_node() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__mac_ct_ensure_node "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
+_tb_untraced__mac_ct_ensure_node() {
+  local root ct name dir image cfgfile cidrs node cfg kubelet size want have="" rc since start="" mkvol="" state casum running=""
+  local penv pold="" pchanged=""
+  _native_k3s_check_version
+  TB_K3S_ON_MAC=1
+  root="$(_mac_ct_install_root)" && dir="$(_mac_ct_node_dir)" \
+    || error "Apple container: cannot tell where the runtime lives (above)."
+  ct="${root}/bin/container"
+  name="$(_mac_ct_node_name)" || error "$name"
+  image="$(_mac_ct_node_image)" || error "$image"
+  size="$(_mac_ct_node_size)" || error "$size"
+  mkdir -p "$dir" || error "Apple container: could not create ${dir}."
+  cfgfile="${dir}/config.yaml"
+  cidrs="$(_mac_ct_node_cidrs "$cfgfile")" || exit 1
+  node="$(_native_k3s_node_name "$cfgfile")" || _native_k3s_node_name_stop "$?" "$cfgfile"
+  cfg="$(_mac_ct_node_config "$node" "$cidrs")" || error "Apple container: could not render the node's k3s config (above)."
+  # The node is k3s whatever this run resolved, so it gets darwin_k3s's reservation.
+  kubelet="$(TRACEBLOC_SUBSTRATE_RESOLVED=k3s _render_kubelet_config)" || error "Apple container: could not render the node's kubelet drop-in."
+  if [[ -e "${dir}/run-args" ]]; then
+    have="$(cat "${dir}/run-args")" || error "Apple container: ${dir}/run-args cannot be read, so this run cannot tell how the node was created."
+  fi
+  # The config is frozen before the node first reads it, as on Linux.
+  printf '%s\n' "$cfg" > "${cfgfile}.tmp" && mv "${cfgfile}.tmp" "$cfgfile" \
+    || { rm -f "${cfgfile}.tmp"; error "Apple container: could not write ${cfgfile}."; }
+  _mac_ct_node_settle
   _mac_ct_node_argv "$name" "$image" "$cfg" "$kubelet" "$size" "$TB_MAC_CT_NODE_TOKEN" "${dir}/ca" "$casum"
   want="$(printf '%s\n' "${TB_MAC_CT_NODE_ARGV[@]}")"  # set-u-safe: _mac_ct_node_argv seeds it with the run verb
   if [[ "$state" == container ]]; then
@@ -1746,8 +1749,7 @@ TB_MAC_CT_AGENT_LABEL="io.tracebloc.node"
 TB_MAC_CT_AGENT_INTERVAL=60
 
 # _mac_ct_agent_home -- the home the install record is written under: tb_record_path
-# without the record's user path. It is the agent's HOME, and its plist and log live
-# under it.
+# without the record's user path: the agent's HOME, where its plist and log live.
 _mac_ct_agent_home() {
   local rec home
   rec="$(tb_record_path)"
@@ -2344,17 +2346,15 @@ _mac_ct_expect_downloads() {
   return 0
 }
 
-# _mac_ct_create_cluster -- step c on the macOS node: the k3s node in Apple's VM, Ready,
-# its kubeconfig merged as a kube-context, NO_PROXY for this process (before the Local
-# Network gate's first curl of the API), and the login item that keeps it running. As
-# on Linux, the host is refused first, and a Mac with no node yet meets the fit gate
-# before one is created, sized from the node (preflight's readers, 2.1 part 5a). A node
-# of this installer's keeps its volume and its data, and a container or volume nothing
-# shows this installer made is refused (_mac_ct_ensure_node): that is this path's
-# leftover guard (D5).
+# _mac_ct_create_cluster -- step c on the macOS node: the k3s node in Apple's VM, Ready, its
+# kubeconfig merged as a kube-context, NO_PROXY for this process (before the Local Network
+# gate's first curl of the API), and the login item that keeps it running. As on Linux, the
+# host is refused first, and a Mac with no node yet meets the fit gate before one is
+# created, sized from the node (preflight's readers, 2.1 part 5a). A node of this
+# installer's keeps its volume and its data, and a container or volume nothing shows this
+# installer made is refused (_mac_ct_ensure_node): that is this path's leftover guard (D5).
 # The login item runs the CLI step b installed (TRACEBLOC_CLI_BIN, install-cli.sh). Without it
-# the node would not come back after a restart, so a run without it stops before the
-# node is touched.
+# the node would not come back after a restart, so a run without it stops first.
 _mac_ct_create_cluster() {
   local dir
   log "Setting up the macOS node for '${CLUSTER_NAME}'"

@@ -81,12 +81,11 @@ LIB_DIR="${SCRIPT_DIR}/lib"
 
 # ── Source modules ───────────────────────────────────────────────────────────
 source "${LIB_DIR}/common.sh"
-# telemetry.sh is sourced right after common.sh so the install
-# clock starts before any work does, and so common.sh's step_header /
-# install_cleanup hooks find their functions. Guarded like the other late
-# additions: an older bootstrap (e.g. a not-yet-updated tracebloc.io/i.sh, whose
-# FILES list is hand-maintained) may not have fetched it, and an installer that
-# aborted because it could not report on itself would be a poor trade.
+# telemetry.sh is sourced right after common.sh so the install clock starts before any
+# work does, and so common.sh's step_header / install_cleanup hooks find their functions.
+# Guarded like the other late additions: an older bootstrap (e.g. a not-yet-updated
+# tracebloc.io/i.sh, whose FILES list is hand-maintained) may not have fetched it, and an
+# installer that aborted because it could not report on itself would be a poor trade.
 if [[ -f "${LIB_DIR}/telemetry.sh" ]]; then
   source "${LIB_DIR}/telemetry.sh"
 fi
@@ -115,16 +114,13 @@ source "${LIB_DIR}/install-client-helm.sh"
 if [[ -f "${LIB_DIR}/install-cli.sh" ]]; then
   source "${LIB_DIR}/install-cli.sh"
 fi
-# provision.sh (the sign-in + client-create-before-Helm step) likewise may be
-# absent under a stale bootstrap — guard so the installer degrades to the dual-mode
-# credential path rather than aborting under `set -e`.
+# provision.sh (the sign-in + client-create-before-Helm step) likewise: absent under a
+# stale bootstrap, the installer degrades to the dual-mode credential path.
 if [[ -f "${LIB_DIR}/provision.sh" ]]; then
   source "${LIB_DIR}/provision.sh"
 fi
-# assess.sh (the stop-and-check gate) may likewise be absent under a stale
-# bootstrap that didn't fetch it — guard the source so the installer simply runs
-# the full flow (no gate) instead of aborting under `set -e`. An `if` block, not
-# `[[ -f … ]] && source`, so a false test doesn't trip `set -e`.
+# assess.sh (the stop-and-check gate) likewise: absent under a stale bootstrap, the
+# installer simply runs the full flow (no gate).
 if [[ -f "${LIB_DIR}/assess.sh" ]]; then
   source "${LIB_DIR}/assess.sh"
 fi
@@ -134,9 +130,8 @@ fi
 if [[ -f "${LIB_DIR}/reinstall.sh" ]]; then
   source "${LIB_DIR}/reinstall.sh"
 fi
-# probe.sh (host capability/privilege audit) may likewise be absent
-# under a stale bootstrap that didn't fetch it — guard the source so `--diagnose`
-# simply omits the install-tier section instead of aborting under `set -e`.
+# probe.sh (host capability/privilege audit) likewise: absent under a stale bootstrap,
+# `--diagnose` simply omits the install-tier section.
 if [[ -f "${LIB_DIR}/probe.sh" ]]; then
   source "${LIB_DIR}/probe.sh"
 fi
@@ -170,6 +165,14 @@ trap 'exit 143' TERM
 #  trailing blank-line pair (the run-through's spacing). Step b owns the prerequisites
 #  AND the tracebloc CLI (moved out of provisioning — step d needs it to sign in).
 main() {
+  _main_dispatch "$@"
+  _main_begin "$@"
+  _main_steps_a_to_c
+  _main_steps_d_to_f
+}
+
+# Before the run commits to installing: --help, --diagnose, the refusals, prepare-host.
+_main_dispatch() {
   [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && print_help
   # Support bundle: collect redacted diagnostics and exit, before any install
   # work (so it works even when the install is broken). Clear the EXIT trap so
@@ -177,36 +180,33 @@ main() {
   [[ "${1:-}" == "--diagnose" ]] && { trap - EXIT; run_diagnose; exit $?; }
 
   # The Windows installer's client run hands over the credential on stdin
-  # (TRACEBLOC_CREDENTIAL_STDIN=1, tracebloc's WSL distro): read it before anything
-  # else, so the write that sent it is always read. It refuses nothing here: what it
-  # found wrong, and a build without provision.sh, is refused by name after the
-  # substrate line (refuse_wsl_run).
-  # Both are set by that read alone, never inherited: a stale TRACEBLOC_STDIN_CRED_FILE would
-  # hand step d a credential this run never read, and a stale refusal would refuse a run
-  # that was never handed one.
+  # (TRACEBLOC_CREDENTIAL_STDIN=1, tracebloc's WSL distro): read it before anything else,
+  # so the write that sent it is always read. It refuses nothing here: what it found
+  # wrong, and a build without provision.sh, is refused by name after the substrate line
+  # (refuse_wsl_run). Both are set by that read alone, never inherited: a stale
+  # TRACEBLOC_STDIN_CRED_FILE would hand step d a credential this run never read, and a
+  # stale refusal would refuse a run that was never handed one.
   TRACEBLOC_STDIN_CRED_FILE=""; TB_STDIN_CRED_REFUSAL=""
   if [[ "${TRACEBLOC_CREDENTIAL_STDIN:-}" == 1 ]] && declare -F provision_read_stdin_credential >/dev/null 2>&1; then
     provision_read_stdin_credential
   fi
 
   # The substrate line (the installer contract, scripts/spec/install-record.schema.json):
-  # printed BEFORE anything below can refuse, so whoever reads this output can tell
-  # which substrate a refusal belongs to. Only then is an unsupported request
-  # refused, by name. --help and --diagnose above install nothing and refuse
-  # nothing, so they print no line. A re-run without TRACEBLOC_SUBSTRATE keeps
-  # the substrate its install recorded (tb_substrate_resolve, read-only); a Mac
-  # gets k3s on Apple container, and Linux, outside WSL and inside it, native k3s,
-  # k3d being retired on every OS. A resolution that cannot tell, or a request for
-  # a retired substrate, is refused by name after the line. So is a new install on a
-  # Mac below the floor (Apple silicon, macOS 26 or later), before
-  # setup_log_file writes anything; prepare-host below is refused there too.
+  # printed BEFORE anything below can refuse, so whoever reads this output can tell which
+  # substrate a refusal belongs to. Only then is an unsupported request refused, by name.
+  # --help and --diagnose above install nothing and refuse nothing, so they print no line.
+  # A re-run without TRACEBLOC_SUBSTRATE keeps the substrate its install recorded
+  # (tb_substrate_resolve, read-only); a Mac gets k3s on Apple container, and Linux,
+  # outside WSL and inside it, native k3s, k3d being retired on every OS. A resolution
+  # that cannot tell, or a request for a retired substrate, is refused by name after the
+  # line. So is a new install on a Mac below the floor (Apple silicon, macOS 26 or later),
+  # before setup_log_file writes anything; prepare-host below is refused there too.
   tb_substrate_resolve
   print_substrate_token
   refuse_unsupported_substrate
   refuse_unresolved_substrate
-  # tracebloc's WSL distro runs only as the Windows installer runs it: native k3s,
-  # and one of its two runs (common.sh). Any other WSL
-  # distro is refused, whatever the substrate.
+  # tracebloc's WSL distro runs only as the Windows installer runs it: native k3s, and one
+  # of its two runs (common.sh). Any other WSL distro is refused, whatever the substrate.
   refuse_wsl_run
   # A Mac below the floor is stopped here, first on every path and as its own
   # refusal: every Mac resolves k3s since 4.1, so
@@ -220,39 +220,35 @@ main() {
     || error "This installer build can't check whether this machine runs tracebloc on k3d (stale bootstrap), and k3s is never set up beside it. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
   refuse_k3d_machine
 
-  # prepare-host: the standalone, admin-run Tier-2 step —
-  # installs the privileged prerequisites so a researcher can then install
-  # unprivileged at Tier 0, and grants them k3s through its group. Terminal like
-  # --diagnose (never provisions as the admin); clear the EXIT trap so no
-  # post-install cleanup message fires. Accept both the bootstrap positional
-  # (`… | bash -s -- prepare-host`) and the direct flag, AT ANY POSITION —
-  # install.sh's bailout exemption scans all args, so a run like
-  # `--force prepare-host` must dispatch here too, never fall through into a
-  # (forced) full provision as the admin (Bugbot r4).
-  # --print: list every command prepare-host would
-  # run as root, and run none. Read from the arguments only, never the environment.
+  # prepare-host: the standalone, admin-run Tier-2 step — installs the privileged
+  # prerequisites so a researcher can then install unprivileged at Tier 0, and grants them
+  # k3s through its group. Terminal like --diagnose (never provisions as the admin); clear
+  # the EXIT trap so no post-install cleanup message fires. Accept both the bootstrap
+  # positional (`… | bash -s -- prepare-host`) and the direct flag, AT ANY POSITION —
+  # install.sh's bailout exemption scans all args, so a run like `--force prepare-host`
+  # must dispatch here too, never fall through into a (forced) full provision as the admin
+  # (Bugbot r4). --print: list every command prepare-host would run as root, and run none.
+  # Read from the arguments only, never the environment.
   local _a_ph _a_pr
   TRACEBLOC_PREPARE_PRINT=""
   for _a_pr in "$@"; do [[ "$_a_pr" == "--print" ]] && TRACEBLOC_PREPARE_PRINT=1; done
   for _a_ph in "$@"; do
     [[ "$_a_ph" == "prepare-host" || "$_a_ph" == "--prepare-host" ]] || continue
     # Replace the full install_cleanup (its credential-shred + "did not complete"
-    # messaging don't apply to a host-prep run) with a lightweight reaper that
-    # still tears down the sudo keepalive preflight_sudo starts — otherwise it
-    # orphans a background loop polling `sudo` every 50s.
-    # It reaps the private download directories too: prepare-host
-    # installs the same prerequisites, so it can be mid-download when it dies.
-    # Its status takes tb_exit_rc's rule, inlined: like the
-    # declare -F guard above it, this trap cannot assume the libs loaded.
-    # A refusal that set its way out (tb_fail_next) shows it through tb_end_of_run;
-    # a plain failure ends silent, as before.
+    # messaging don't apply to a host-prep run) with a lightweight reaper that still tears
+    # down the sudo keepalive preflight_sudo starts — otherwise it orphans a background
+    # loop polling `sudo` every 50s. It reaps the private download directories too:
+    # prepare-host installs the same prerequisites, so it can be mid-download when it
+    # dies. Its status takes tb_exit_rc's rule, inlined: like the declare -F guard above
+    # it, this trap cannot assume the libs loaded. A refusal that set its way out
+    # (tb_fail_next) shows it through tb_end_of_run; a plain failure ends silent.
     trap '_tb_rc=$?; if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi; if declare -F tb_scratch_reap >/dev/null 2>&1; then tb_scratch_reap; fi; [ "$_tb_rc" -ne 0 ] || [ "${_tb_done:-0}" = 1 ] || _tb_rc=1; if [ "$_tb_rc" -ne 0 ] && [ -n "${TB_EXIT_REFUSED:-}" ] && [ -n "${_TB_FAIL_SET:-}" ] && declare -F tb_end_of_run >/dev/null 2>&1; then tb_end_of_run "$_tb_rc"; fi; exit "$_tb_rc"' EXIT
     setup_log_file
     # The leftover-data answers apply here too: prepare-host on native k3s refuses
-    # --wipe-data and lists the named user's data with no wipe offered, and the
-    # re-run hint it prints names --reuse-data, and --data-dir is the administrator's
-    # own choice of where the volumes live. The install's own flag loop below
-    # never runs on this path, so they are read before the dispatch.
+    # --wipe-data and lists the named user's data with no wipe offered, and the re-run hint
+    # it prints names --reuse-data, and --data-dir is the administrator's own choice of
+    # where the volumes live. The install's own flag loop below never runs on this path,
+    # so they are read before the dispatch.
     local _a_lf
     for _a_lf in "$@"; do
       case "$_a_lf" in
@@ -270,13 +266,15 @@ main() {
   # start one when an administrator asked only to see a plan.
   [[ -z "$TRACEBLOC_PREPARE_PRINT" ]] \
     || error "--print lists what prepare-host would run as root, and runs none of it. Ask for it with prepare-host: curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host --print"
+}
 
-  # Past this line the run is committed to installing, so it is the one that
-  # produces an outcome event. Everything above is terminal and
-  # touches nothing: --help exits 0, --diagnose clears the EXIT trap, and
-  # prepare-host swaps it for a lightweight reaper. Without this latch, a
-  # `--help` emitted install.run.succeeded and inflated the denominator of the
-  # failure rate the ticket exists to produce (Bugbot).
+# The run committed to installing: its flags, the checks before its log, the log itself.
+_main_begin() {
+  # Past this line the run is committed to installing, so it is the one that produces an
+  # outcome event. Everything above is terminal and touches nothing: --help exits 0,
+  # --diagnose clears the EXIT trap, and prepare-host swaps it for a lightweight reaper.
+  # Without this latch, a `--help` emitted install.run.succeeded and inflated the
+  # denominator of the failure rate the ticket exists to produce (Bugbot).
   #
   # NOT covered, deliberately: prepare-host. It is a different command with its
   # own registry component (§10.1 gives `installer` the components install /
@@ -321,11 +319,10 @@ main() {
   if declare -F _native_k3s_release_storage >/dev/null 2>&1; then
     _native_k3s_release_storage early
   fi
-  # Pre-log network-FS guard: setup_log_file mkdirs HOST_DATA_DIR and
-  # redirects the whole session's output onto it — refuse a network-FS target
-  # BEFORE that unguarded mkdir can fail (or land root-squashed) on an NFS
-  # home. Guarded so a stale bootstrap without the new helper proceeds as
-  # before (same pattern as the assess/host_audit gates below).
+  # Pre-log network-FS guard: setup_log_file mkdirs HOST_DATA_DIR and redirects the whole
+  # session's output onto it — refuse a network-FS target BEFORE that unguarded mkdir can
+  # fail (or land root-squashed) on an NFS home. Guarded so a stale bootstrap without the
+  # new helper proceeds as before (same pattern as the assess/host_audit gates below).
   if declare -F early_data_dir_guard >/dev/null 2>&1; then
     early_data_dir_guard
   fi
@@ -352,15 +349,17 @@ main() {
   if declare -F wire_ca_trust >/dev/null 2>&1; then
     wire_ca_trust
   fi
+}
 
+# Steps a to c: the machine checked, its dependencies installed, its cluster created.
+_main_steps_a_to_c() {
   # ── a) Check your machine ────────────────────────────────────────────────
   step_header a "Checking your machine"
   run_preflight
   detect_gpu
-  # Host audit: capability/privilege probe + the chosen install tier.
-  # Sets INSTALL_TIER, which install_linux's _route_install_tier honours. Guarded
-  # so a stale bootstrap without probe.sh simply skips it (routing then proceeds
-  # exactly as before).
+  # Host audit: capability/privilege probe + the chosen install tier. Sets INSTALL_TIER,
+  # which install_linux's _route_install_tier honours. Guarded so a stale bootstrap
+  # without probe.sh simply skips it (routing then proceeds exactly as before).
   if declare -F host_audit >/dev/null 2>&1; then
     host_audit
   fi
@@ -370,11 +369,11 @@ main() {
   step_end a
 
   # ── b) Install dependencies ──────────────────────────────────────────────
-  #     Prerequisites (the cluster runtime + system tools) AND the tracebloc CLI. The CLI moved
-  #     here from provisioning: step d (provision_client) needs it to sign in and
-  #     mint the credential, so it must exist before then. install_tracebloc_cli is
-  #     non-fatal on its own; step d's `has tracebloc` guard makes a genuinely
-  #     missing CLI fatal at the point it's actually required.
+  #     Prerequisites (the cluster runtime + system tools) AND the tracebloc CLI. The
+  #     CLI moved here from provisioning: step d (provision_client) needs it to sign in
+  #     and mint the credential, so it must exist before then. install_tracebloc_cli is
+  #     non-fatal on its own; step d's `has tracebloc` guard makes a genuinely missing
+  #     CLI fatal at the point it's actually required.
   step_header b "Installing dependencies"
   case "$OS" in
     Darwin)   install_macos ;;
@@ -419,19 +418,20 @@ main() {
   if declare -F print_environment_created >/dev/null 2>&1; then
     print_environment_created
   fi
-  # The GPU device plugin is no longer applied imperatively here:
-  # the chart now renders it as a Helm-managed DaemonSet, gated on
-  # gpu.devicePlugin.enabled, which install_client_helm sets in step (e) from
-  # GPU_VENDOR. So it comes up WITH the release (tracked, and removed on
-  # uninstall) and node verification moves to after Helm install below.
+  # The GPU device plugin is no longer applied imperatively here: the chart renders it
+  # as a Helm-managed DaemonSet, gated on gpu.devicePlugin.enabled, which
+  # install_client_helm sets in step (e) from GPU_VENDOR. So it comes up WITH the release
+  # (tracked, and removed on uninstall) and node verification follows the Helm install.
   echo ""; echo ""
+}
 
+# Steps d to f: the machine registered, tracebloc installed and connected.
+_main_steps_d_to_f() {
   # ── d) Register your machine ─────────────────────────────────────────────
   #     Sign in + `client create` BEFORE Helm, so the minted credential + derived
-  #     namespace feed the chart. Dual-mode (TRACEBLOC_VALUES_FILE / pre-
-  #     supplied credentials) skips sign-in. Guarded so a stale bootstrap that
-  #     didn't fetch provision.sh degrades to the dual-mode credential path inside
-  #     install_client_helm rather than aborting.
+  #     namespace feed the chart. Dual-mode (TRACEBLOC_VALUES_FILE / pre-supplied
+  #     credentials) skips sign-in. Guarded so a stale bootstrap that didn't fetch
+  #     provision.sh degrades to the dual-mode path inside install_client_helm.
   step_header d "Registering your machine"
   if declare -F provision_client >/dev/null 2>&1; then
     provision_client

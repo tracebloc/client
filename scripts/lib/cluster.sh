@@ -22,11 +22,10 @@ _ensure_tracebloc_dirs() {
   chmod -R 777 "$data_base/data" 2>/dev/null || true
 }
 
-# Modes the two SHARED hostPath dirs must end up with. Named constants because the
-# same pair is spelled out in the chart's init-writable-data
-# (client/templates/jobs-manager-deployment.yaml) too, and the two have to be
-# diffable by eye rather than drifting; hostpath-prep.bats holds them
-# equal.
+# Modes the two SHARED hostPath dirs must end up with. Named constants because the same
+# pair is spelled out in the chart's init-writable-data
+# (client/templates/jobs-manager-deployment.yaml) too, and the two have to be diffable by
+# eye rather than drifting; hostpath-prep.bats holds them equal.
 #
 # Both get setgid (2) so new entries inherit the group. They differ in the sticky bit,
 # deliberately:
@@ -60,12 +59,11 @@ _release_dirs_spec() {
   printf '%s\n' "$data_base/data:$TB_SHARED_DIR_MODE" "$base/logs:$TB_LOGS_DIR_MODE"
 }
 
-# Pre-create the per-release host dirs the chart's hostPath PVs bind to.
-# The PVs use <hostPath.root>/<release>/{data,logs,mysql}, and on native k3s the
-# installer sets that root to HOST_DATA_DIR, the host's own folder.
-# Without pre-creating these as the host user, kubelet's DirectoryOrCreate
-# makes them root:root 0755 and the host user can't drop training data into
-# /data/shared.
+# Pre-create the per-release host dirs the chart's hostPath PVs bind to. The PVs use
+# <hostPath.root>/<release>/{data,logs,mysql}, and on native k3s the installer sets that
+# root to HOST_DATA_DIR, the host's own folder. Without pre-creating these as the host
+# user, kubelet's DirectoryOrCreate makes them root:root 0755 and the host user can't drop
+# training data into /data/shared.
 _ensure_release_dirs() {
   local release="$1"
   [[ -z "$release" ]] && return 0
@@ -567,13 +565,12 @@ _tb_untraced__export_host_no_proxy() {
 }
 
 # ── Leftover-data guard ─────────────────────────────
-# The installer used to `mkdir -p` its data dirs and silently adopt whatever was
-# already there — data left by an earlier install (different layout, older
-# version, custom dir) got picked up by the next install, so a "fresh" install
-# was not guaranteed fresh. This guard detects real leftover data at install
-# time and forces a choice instead of adopting it. It doubles as the migration
-# prompt for the node-local transition: existing ~/.tracebloc data is
-# never silently stranded.
+# The installer used to `mkdir -p` its data dirs and silently adopt whatever was already
+# there — data left by an earlier install (different layout, older version, custom dir)
+# got picked up by the next install, so a "fresh" install was not guaranteed fresh. This
+# guard detects real leftover data at install time and forces a choice instead of adopting
+# it. It doubles as the migration prompt for the node-local transition: existing
+# ~/.tracebloc data is never silently stranded.
 #
 # Where prompts READ from (mirrors provision.sh/install-client-helm.sh so the
 # curl|bash path can still prompt on the controlling terminal; overridable so
@@ -705,13 +702,12 @@ _leftover_k3s_present() {
   tb_root sh -c "$TRACEBLOC_ROOT_SH_EXISTS" _ "$1" 2>/dev/null || true
 }
 
-# The native k3s scan: every local-path volume directory (pvc-*, with anything in
-# it) under the storage path _native_k3s_storage_path names (k3s.sh): k3s's
-# default, or the operator's data dir. Read as root. FAIL CLOSED: a storage path
-# root cannot be read is echoed itself, as data nobody could prove absent, and a
-# storage path that cannot be told (config.yaml unreadable) echoes config.yaml.
-# This runs inside the guard's process substitution, whose status nobody reads, so
-# it must print rather than fail.
+# The native k3s scan: every local-path volume directory (pvc-*, with anything in it)
+# under the storage path _native_k3s_storage_path names (k3s.sh): k3s's default, or the
+# operator's data dir. Read as root. FAIL CLOSED: a storage path root cannot be read is
+# echoed itself, as data nobody could prove absent, and a storage path that cannot be told
+# (config.yaml unreadable) echoes config.yaml. This runs inside the guard's process
+# substitution, whose status nobody reads, so it must print rather than fail.
 _leftover_k3s_volume_dirs() {
   local storage out rc=0
   storage="$(_native_k3s_storage_path)" || { printf '%s\n' "$TB_K3S_CONFIG_PATH"; return 0; }
@@ -769,12 +765,11 @@ _read_sanitized() {
 }
 
 # Delete the detected leftover data dirs. Only ever removes paths UNDER the
-# already-validated HOST_DATA_DIR (validate_config guarantees it is under $HOME
-# and not a system path) — never HOST_DATASET_DIR, never a system path. Returns
-# non-zero if anything survived the wipe (e.g. root/container-owned MySQL files
-# the host user can't remove) so the caller can fail closed instead of letting
-# create_cluster adopt the survivors — a warn-and-proceed would silently break
-# the "wipe means gone" guarantee.
+# already-validated HOST_DATA_DIR (validate_config guarantees it is under $HOME and not a
+# system path) — never HOST_DATASET_DIR, never a system path. Returns non-zero if anything
+# survived the wipe (e.g. root/container-owned MySQL files the host user can't remove) so
+# the caller can fail closed instead of letting create_cluster adopt the survivors — a
+# warn-and-proceed would silently break the "wipe means gone" guarantee.
 #
 # On native k3s it also removes a pvc-* volume directory directly under the
 # storage path, and every removal and its check run as root (through sudo; k3s owns
@@ -863,21 +858,19 @@ guard_leftover_data() {
   while IFS= read -r d; do [[ -n "$d" ]] && found+=("$d"); done < <(_leftover_data_dirs)
   [[ ${#found[@]} -eq 0 ]] && return 0   # clean slate — nothing to guard
 
-  # Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) words each line for its own storage: the data
-  # lies in the storage path as well as HOST_DATA_DIR (_leftover_where). Under
-  # node-local (native_nl) a fresh install gives its volumes new directories, so
-  # nothing found is adopted. Under hostpath the chart's PVs name
-  # HOST_DATA_DIR itself, so what lies there IS adopted; only a k3s
-  # volume (pvc-*) is not.
+  # Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) words each line for its own storage: the
+  # data lies in the storage path as well as HOST_DATA_DIR (_leftover_where). Under
+  # node-local (native_nl) a fresh install gives its volumes new directories, so nothing
+  # found is adopted. Under hostpath the chart's PVs name HOST_DATA_DIR itself, so what
+  # lies there IS adopted; only a k3s volume (pvc-*) is not.
   local where k3s="" native_nl="" frozen=""
   where="$(_leftover_where "${found[@]}")"  # set-u-safe: the empty-found check above returns first
   [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]] && k3s=1
   [[ -n "$k3s" && "${TB_STORAGE_MODE:-node-local}" == "node-local" ]] && native_nl=1
-  # A config.yaml froze the storage path: another data dir does not move the
-  # volumes, so "install into a different directory" is not an escape and is not
-  # offered (the same scan would find the same volumes and ask again).
-  # A frozen check that cannot answer (rc 2) is treated as frozen: do not offer an
-  # escape that may not exist.
+  # A config.yaml froze the storage path: another data dir does not move the volumes, so
+  # "install into a different directory" is not an escape and is not offered (the same
+  # scan would find the same volumes and ask again). A frozen check that cannot answer (rc
+  # 2) is treated as frozen: do not offer an escape that may not exist.
   if [[ -n "$k3s" ]]; then
     local frc=0
     _native_k3s_storage_frozen || frc=$?
@@ -918,6 +911,12 @@ guard_leftover_data() {
   fi
 
   local action="${TB_LEFTOVER_ACTION:-}"
+  _guard_leftover_ask
+  _guard_leftover_act
+}
+
+# The prompt, or with no terminal the refusal naming the flags; sets the caller's action.
+_guard_leftover_ask() {
   if [[ -z "$action" ]]; then
     if _tty_usable; then
       prompt_header "How should the installer handle it?"
@@ -980,7 +979,10 @@ guard_leftover_data() {
   (or TRACEBLOC_SKIP_LEFTOVER_GUARD=1 to bypass this guard entirely)"
     fi
   fi
+}
 
+# What the chosen action does; newdir re-runs the guard on the new directory.
+_guard_leftover_act() {
   case "$action" in
     reuse)
       if [[ -n "$native_nl" ]]; then
@@ -1007,7 +1009,7 @@ guard_leftover_data() {
       # Fail closed: if any data survived the wipe, abort rather than fall
       # through to create_cluster, which would adopt the survivors and silently
       # break the "wipe means gone" guarantee.
-      if ! _wipe_leftover_data "${found[@]}"; then  # set-u-safe: the empty-found check at the top of this function returns first
+      if ! _wipe_leftover_data "${found[@]}"; then  # set-u-safe: the caller's empty-found check returns first
         local rm_tail=" ${HOST_DATA_DIR}'"
         [[ -n "$k3s" ]] && rm_tail="' on each path listed above, with k3s stopped"
         local or_dir=", or choose a different directory"
@@ -1091,10 +1093,9 @@ _ipv4_to_int() {
 # install-client-helm.sh). Bound to 127.0.0.1, so nothing beyond this machine can
 # reach it.
 #
-# Fail-soft everywhere: a port already in use, or one the node will not publish,
-# turns the feature off with a warning and never stops the install.
-# TRACEBLOC_LOCAL_API=off opts out.
-# The defaults are the chart's localApi.hostPort / localApi.nodePort;
+# Fail-soft everywhere: a port already in use, or one the node will not publish, turns the
+# feature off with a warning and never stops the install. TRACEBLOC_LOCAL_API=off opts
+# out. The defaults are the chart's localApi.hostPort / localApi.nodePort;
 # local-api-port.bats holds them to values.yaml.
 _TB_LOCAL_API_HOST_PORT_DEFAULT="47910"
 _TB_LOCAL_API_NODE_PORT_DEFAULT="30910"
@@ -1127,12 +1128,11 @@ _local_api_host_port_busy() {
     'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "${TRACEBLOC_LOCAL_API_HOST_PORT}" 2>/dev/null
 }
 
-# Whether both ports are ones the install can take (digits only): the host port
-# any TCP port (1..65535), the node port one the chart's schema accepts
-# (30000..32767) -- anything else reaches the node and fails `helm install` on
-# localApi.nodePort. The overrides are free text; a bad one must
-# turn the feature off, never reach the node's create and fail the install
-# .
+# Whether both ports are ones the install can take (digits only): the host port any TCP
+# port (1..65535), the node port one the chart's schema accepts (30000..32767) -- anything
+# else reaches the node and fails `helm install` on localApi.nodePort. The overrides are
+# free text; a bad one must turn the feature off, never reach the node's create and fail
+# the install .
 _local_api_port_valid() {
   local p="$TRACEBLOC_LOCAL_API_HOST_PORT" n="$TRACEBLOC_LOCAL_API_NODE_PORT"
   [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1

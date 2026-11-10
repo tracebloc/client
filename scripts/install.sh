@@ -37,9 +37,9 @@
 #  tracebloc/client, which carries no scripts/ tree), so point it at a source whose
 #  tree is readable — a public fork with your branch pushed:
 #    curl -fsSL ... | TRACEBLOC_SOURCE_REPO=<you>/client TRACEBLOC_BRANCH=<branch> TRACEBLOC_ALLOW_UNVERIFIED=1 bash
-#  (TRACEBLOC_REF=<vX.Y.Z> pins another release instead; the older BRANCH
-#  spelling still works.) A source tree served from elsewhere -- a per-commit
-#  installer bundle unpacked and served on this machine, say -- is named whole
+#  (TRACEBLOC_REF=<vX.Y.Z> pins another release instead.) A source tree served
+#  from elsewhere -- a per-commit installer bundle unpacked and served on this
+#  machine, say -- is named whole
 #  with TRACEBLOC_SOURCE_URL (https, or http to 127.0.0.1 / localhost / [::1]):
 #    TRACEBLOC_SOURCE_URL=http://127.0.0.1:8765 TRACEBLOC_ALLOW_UNVERIFIED=1 bash install.sh
 #
@@ -156,11 +156,11 @@ esac
 # substrate served here (_tb_record_served, below).
 _tb_bail_ok=1
 _tb_force=0
-# The release pin is TRACEBLOC_REF alone: an inherited REF is overwritten. The
-# dev-branch override takes the older BRANCH when TRACEBLOC_BRANCH is unset or blank
-# (remove_by 2026-12-31). Both resolve into the variable the rest of this bootstrap reads.
+# The release pin is TRACEBLOC_REF alone and the dev-branch override TRACEBLOC_BRANCH
+# alone: an inherited REF or BRANCH is overwritten. Both resolve into the variable
+# the rest of this bootstrap reads.
 REF="${TRACEBLOC_REF:-}"
-if [[ -n "${TRACEBLOC_BRANCH:-}" ]]; then BRANCH="$TRACEBLOC_BRANCH"; fi
+BRANCH="${TRACEBLOC_BRANCH:-}"
 [[ "${TRACEBLOC_FORCE_REINSTALL:-0}" == "1" ]] && { _tb_bail_ok=0; _tb_force=1; }
 [[ "${TRACEBLOC_ALLOW_UNVERIFIED:-0}" == "1" ]] && { _tb_bail_ok=0; _tb_force=1; }
 [[ -n "${REF:-}" || -n "${BRANCH:-}" ]] && { _tb_bail_ok=0; _tb_force=1; }
@@ -309,8 +309,8 @@ DEFAULT_REF="__TRACEBLOC_RELEASE_REF__"
 ALLOW_UNVERIFIED="${TRACEBLOC_ALLOW_UNVERIFIED:-0}"
 
 # Resolve the ref to fetch from. Precedence: TRACEBLOC_REF (pin a different
-# release tag) > TRACEBLOC_BRANCH / BRANCH (dev only) > the pinned DEFAULT_REF. A
-# branch requires the unverified opt-in below.
+# release tag) > TRACEBLOC_BRANCH (dev only) > the pinned DEFAULT_REF. A branch
+# requires the unverified opt-in below.
 if [[ -n "${REF:-}" ]]; then
   :                       # explicit pin — honored as-is
 elif [[ -n "${BRANCH:-}" ]]; then
@@ -379,7 +379,7 @@ esac
 # The source repo whose raw TREE the dev/unverified path reads sub-scripts from.
 # Defaults to the public mirror. The public mirror does NOT carry a scripts/ tree
 # — its default branch is .github + README only, and no tag exposes scripts/
-# (verified against tracebloc/client on 2026-09-18) — so BRANCH= against the
+# (verified against tracebloc/client on 2026-09-18) — so TRACEBLOC_BRANCH= against the
 # default here has nothing to fetch. A maintainer iterating on an unreleased ref
 # points this at a source whose raw tree is actually readable: a public fork, or
 # tracebloc/client-dev itself (private, so its raw URLs need a token curl won't
@@ -446,7 +446,7 @@ REPO_REL="https://github.com/tracebloc/client/releases/download/${REF}"
 # safely try two locations, but a privileged sub-script must come from exactly the
 # one place the operator chose. So the dev path is coherent only against a ref
 # whose tree $REPO_RAW actually serves; set TRACEBLOC_SOURCE_REPO to a source you
-# control (a public fork) when iterating on an unreleased BRANCH.
+# control (a public fork) when iterating on an unreleased branch.
 subscript_url() {
   local f="$1"
   if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then

@@ -333,18 +333,21 @@ _mysql_first_boot_started() {
   printf '%s' "$st"
 }
 
+# _now -- the settle's clock, in whole seconds; tests replace it.
+_now() { printf '%s' "$SECONDS"; }
+
 # _mysql_first_boot_settle NS -- a first boot still running when the readiness gate
 # ends is waited on until it ends, or until its own count reaches the stall, so
 # print_summary can tell a stall from a slow start. The gate's READY_TIMEOUT (600 s)
 # starts before mysql-first-boot does, so its count is still short of the stall when
 # the gate gives up. A pod read that cannot tell keeps waiting. A progress line that
-# cannot be read counts on from the last one read (by SECONDS); with none ever read,
+# cannot be read counts on from the last one read (by _now); with none ever read,
 # TB_MYSQL_FIRST_BOOT_UNREAD_MAX such reads in a row end the wait. Bounded in
 # rounds and in wall time: the stall left to count, plus two progress lines.
 # TRACEBLOC_MYSQL_FIRST_BOOT_SETTLE=0 turns it off. Succeeds only when the first boot
 # ended during the wait, so the caller reads the services again.
 _mysql_first_boot_settle() {
-  local st c count="" unread=0 rounds=0 max_rounds left deadline ended="" why t0=$SECONDS last_t est
+  local st c count="" unread=0 rounds=0 max_rounds left deadline ended="" why t0=$(_now) last_t est
   TB_MYSQL_FIRST_BOOT_SETTLED_S="" TB_MYSQL_FIRST_BOOT_GONE=""
   if [[ "${TRACEBLOC_MYSQL_FIRST_BOOT_SETTLE:-}" == 0 ]]; then
     log "first boot: no wait after the readiness gate (TRACEBLOC_MYSQL_FIRST_BOOT_SETTLE=0)"
@@ -355,30 +358,30 @@ _mysql_first_boot_settle() {
   # succeeded, so the caller decides from TB_MYSQL_FIRST_BOOT_GONE.
   [[ -n "$st" ]] || { TB_MYSQL_FIRST_BOOT_GONE=1; return 1; }
   count="$(_mysql_first_boot_count "$1" "$st")"
-  last_t=$SECONDS
+  last_t=$(_now)
   if (( ${count:-0} >= TB_MYSQL_FIRST_BOOT_STALL_S )); then
     TB_MYSQL_FIRST_BOOT_SETTLED_S="$count"
     return 1
   fi
   left=$(( TB_MYSQL_FIRST_BOOT_STALL_S - ${count:-0} + 2 * TB_MYSQL_FIRST_BOOT_TICK_S ))
   max_rounds=$(( (left + TB_MYSQL_FIRST_BOOT_TICK_S - 1) / TB_MYSQL_FIRST_BOOT_TICK_S ))
-  deadline=$(( SECONDS + left ))
+  deadline=$(( $(_now) + left ))
   tb_live "Waiting for MySQL's first start..."
   _tb_animate || _tb_live_hold   # plain output: the line when the wait starts
   tb_live_detail "${count:-0}s of ${TB_MYSQL_FIRST_BOOT_STALL_S}s"
   why="the wait's bound"
-  while (( rounds < max_rounds && SECONDS < deadline )); do
+  while (( rounds < max_rounds && $(_now) < deadline )); do
     sleep "$TB_MYSQL_FIRST_BOOT_TICK_S"
     rounds=$(( rounds + 1 ))
     # A pod read that cannot tell is not an ended first boot: keep waiting.
     if st="$(_mysql_first_boot_started "$1")"; then
       if [[ -z "$st" ]]; then ended=1; why="it ended"; break; fi
       if c="$(_mysql_first_boot_count "$1" "$st")" && [[ -n "$c" ]]; then
-        count="$c"; unread=0; last_t=$SECONDS
+        count="$c"; unread=0; last_t=$(_now)
       elif [[ -n "$count" ]]; then
         # The pods say it still runs but its count can't be read: it counts on
         # from the last one read.
-        est=$(( count + SECONDS - last_t ))
+        est=$(( count + $(_now) - last_t ))
         if (( est >= TB_MYSQL_FIRST_BOOT_STALL_S )); then
           count="$est"; why="the stall (its count estimated: the progress lines could not be read)"; break
         fi
@@ -392,7 +395,7 @@ _mysql_first_boot_settle() {
   done
   tb_live_done
   [[ -n "$ended" ]] || TB_MYSQL_FIRST_BOOT_SETTLED_S="$count"
-  log "first boot: waited $(( SECONDS - t0 ))s after the readiness gate, until ${why}; ${count:-no}${count:+s} counted (stall at ${TB_MYSQL_FIRST_BOOT_STALL_S}s)"
+  log "first boot: waited $(( $(_now) - t0 ))s after the readiness gate, until ${why}; ${count:-no}${count:+s} counted (stall at ${TB_MYSQL_FIRST_BOOT_STALL_S}s)"
   [[ -n "$ended" ]]
 }
 

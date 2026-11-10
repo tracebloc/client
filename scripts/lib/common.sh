@@ -2063,9 +2063,9 @@ TB_K3S_IMAGE_ARM64_DIGEST="sha256:4ceb591dd1e592b98b7c51ff3bdb7143914e1bee0677e7
 # no digest here. TRACEBLOC_-named (TB_ is a banned prefix), and
 # assigned outright, so an exported TRACEBLOC_APPLE_* never reaches a reader.
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-TRACEBLOC_APPLE_CONTAINER_VERSION="1.6.1"
+TRACEBLOC_APPLE_CONTAINER_VERSION="1.7.1"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-TRACEBLOC_APPLE_CONTAINER_PKG_SHA256="cd47846819f06478d067060efe21e516b562ac0a9af8eecad6d5fea0b556b200"
+TRACEBLOC_APPLE_CONTAINER_PKG_SHA256="b6739caf3d47ca53a78f1a7edf32521420a75c7941838c3cefa75f30b80f5a97"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
 TRACEBLOC_APPLE_CONTAINER_TEAM_ID="UPBK2H6LZM"
 # The VM's init image and our kernel, each a repository and a digest (facts.env
@@ -2074,11 +2074,11 @@ TRACEBLOC_APPLE_CONTAINER_TEAM_ID="UPBK2H6LZM"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
 TRACEBLOC_APPLE_VMINIT_IMAGE="ghcr.io/tracebloc/apple-container-vminit"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-TRACEBLOC_APPLE_VMINIT_DIGEST="sha256:526b1bf414a186ce6047e600830fb2981509f041cf4d4ce91653d97bd30d4700"
+TRACEBLOC_APPLE_VMINIT_DIGEST="sha256:ab76bf71fbedcbf67a54dc5f37b0acefd68b1ba090d93f752f8e27c9961a685c"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
 TRACEBLOC_MAC_KERNEL_IMAGE="ghcr.io/tracebloc/apple-container-kernel"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-TRACEBLOC_MAC_KERNEL_SHA256="fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d"
+TRACEBLOC_MAC_KERNEL_SHA256="98a1005f8cc395e99b85775b9dce2b239190520b102bf549f4225104dcd7f511"
 # The NVIDIA GPU floors (facts.env NVIDIA_DRIVER_FLOOR_LINUX / NVIDIA_COMPUTE_CAP_FLOOR /
 # NVIDIA_DRIVER_HARD_FLOOR_LINUX, stamped by check-facts.sh --write). Below the
 # compute-capability floor or the hard driver floor (the CUDA 13 minimum) detect-gpu.sh

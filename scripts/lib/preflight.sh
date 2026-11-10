@@ -1223,13 +1223,12 @@ _pf_is_opaque_fuse_fstype() {
     # reached the `else` and was announced as "Local storage" -- a confident
     # answer about a mount we could not identify.
     #
-    # THE TWO PREDICATES STAY MUTUALLY EXCLUSIVE, which the bats suite asserts
-    # and which is worth more than it looks: without the negation below,
-    # `fuse.sshfs` would satisfy BOTH, and the only thing keeping it a hard
-    # fail rather than a warning would be the order the caller happens to ask
-    # in. A future caller asking "opaque?" first would silently downgrade a
-    # database-corrupting mount to a notice. Excluding the names the network
-    # classifier claims makes the correct answer independent of call order.
+    # THE TWO PREDICATES STAY MUTUALLY EXCLUSIVE, which the bats suite asserts and which
+    # is worth more than it looks: without the negation below, `fuse.sshfs` would satisfy
+    # BOTH, and the only thing keeping it a hard fail rather than a warning would be the
+    # order the caller happens to ask in. A future caller asking "opaque?" first would
+    # silently downgrade a database-corrupting mount to a notice. Excluding the names the
+    # network classifier claims makes the correct answer independent of call order.
     fuse.*) _pf_is_network_fstype "$t" && return 1; return 0 ;;
     *) return 1 ;;
   esac
@@ -1316,17 +1315,16 @@ early_data_dir_guard() {
 _pf_storage_type() {
   local target fstype disp tab=$'\t'
   target="${HOST_DATA_DIR:-$HOME/.tracebloc}"
-  # Native k3s keeps the database in a local-path volume, under the storage path, so
-  # that is the directory that must be local. _pf_disk_k3s has already read it (and
-  # refused when it could not: PF_HARD_FAIL is raised and run_preflight stops), so a
-  # failure here adds nothing (preflight.bats pins it). Under hostpath the database
-  # is the chart's hostPath PV under HOST_DATA_DIR
-  # , so HOST_DATA_DIR is the directory judged -- on native k3s an
-  # installed release's own root (_hostpath_root).
-  # The macOS node keeps it in the node's volume, a sparse image under the runtime's app
-  # root, so that directory must be local: measured where the disk line measures it, and
-  # when that cannot be told the disk line has already said so. Under hostpath it is in
-  # the hostPath folder on this Mac, which the node mounts, judged as on native k3s.
+  # Native k3s keeps the database in a local-path volume, under the storage path, so that
+  # is the directory that must be local. _pf_disk_k3s has already read it (and refused
+  # when it could not: PF_HARD_FAIL is raised and run_preflight stops), so a failure here
+  # adds nothing (preflight.bats pins it). Under hostpath the database is the chart's
+  # hostPath PV under HOST_DATA_DIR , so HOST_DATA_DIR is the directory judged -- on
+  # native k3s an installed release's own root (_hostpath_root). The macOS node keeps it
+  # in the node's volume, a sparse image under the runtime's app root, so that directory
+  # must be local: measured where the disk line measures it, and when that cannot be told
+  # the disk line has already said so. Under hostpath it is in the hostPath folder on this
+  # Mac, which the node mounts, judged as on native k3s.
   if _pf_on_mac_node && [[ "${TB_STORAGE_MODE:-node-local}" != "hostpath" ]]; then
     target="$(_pf_mac_node_disk_at)" || return 0
     target="${target%%"$tab"*}"
@@ -1389,9 +1387,9 @@ _pf_proxy_hostport() {
   echo "$u"
 }
 
-# Echo the first explicit proxy from the environment as a bare host:port (creds
-# stripped), or empty when none is set. HTTPS takes precedence (that's the one that
-# matters for our all-HTTPS egress).
+# Echo the first explicit proxy from the environment as a bare host:port (creds stripped),
+# or empty when none is set. HTTPS takes precedence (that's the one that matters for our
+# all-HTTPS egress).
 # _pf_env_proxy runs with bash -x held off, the secret it holds out of the trace (common.sh);
 # _tb_untraced__pf_env_proxy below is the function itself.
 _pf_env_proxy() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__pf_env_proxy "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
@@ -1425,10 +1423,9 @@ _tb_untraced__pf_env_proxy_raw() {
 # does not use '+'-for-space, so '+' is left literal.
 _pf_urldecode() {
   local s="${1:-}"
-  # Escape literal backslashes first so printf '%b' expands ONLY the percent-escapes
-  # we turn into \xHH below -- otherwise a '\' (or a '\n'/'\t') in the password is
-  # taken as an escape, diverging from .NET's percent-only UnescapeDataString
-  # .
+  # Escape literal backslashes first so printf '%b' expands ONLY the percent-escapes we
+  # turn into \xHH below -- otherwise a '\' (or a '\n'/'\t') in the password is taken as
+  # an escape, diverging from .NET's percent-only UnescapeDataString .
   s="${s//\\/\\\\}"
   printf '%b' "${s//%/\\x}"
 }
@@ -1571,57 +1568,8 @@ _pf_connectivity() {
     # ROOT 404s by design, while the index must exist for `helm repo add`.
     "tracebloc Helm charts (tracebloc.github.io)|https://tracebloc.github.io/client/index.yaml|strict"
   )
-  # Tool-binary download hosts — HARD: a blocked one used to pass preflight
-  # then fail the install ~30s later. Only added when the fetch will actually happen
-  # (tool absent; a present tool is never re-downloaded). Release downloads redirect
-  # to an asset host and _pf_probe_url does not follow redirects, so github.com
-  # passing proves nothing about the asset host — probe it explicitly. check-drift.sh
-  # holds the probe list to these hosts. main() leaves every run here on k3s: on the
-  # macOS node, or native k3s (Linux, and inside tracebloc's WSL distro).
   local tool_hosts nodes_trust
-  if _pf_on_mac_node; then
-    # A Mac sets up only the macOS node (slim client 4.1). Apple's runtime
-    # package comes from its GitHub release, whose download redirects to
-    # release-assets.githubusercontent.com (keyed on the runtime's folder, which a
-    # re-run reuses); kubectl, pinned to the node's release, from dl.k8s.io; helm from
-    # get.helm.sh when absent. The kernel and init image (ghcr.io) and the node image
-    # (Docker Hub) are in the always-needed set above.
-    if [[ ! -e "$(_mac_ct_install_root 2>/dev/null)" ]]; then
-      criticals+=("Apple container package (github.com)|https://github.com/" \
-                  "Apple container assets (release-assets.githubusercontent.com)|https://release-assets.githubusercontent.com/")
-    fi
-    criticals+=("kubectl (dl.k8s.io)|https://dl.k8s.io/")
-    if ! has helm; then criticals+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
-    tool_hosts="github.com / release-assets.githubusercontent.com / dl.k8s.io / get.helm.sh"
-    # The node takes the CA's roots by path (mac-container.sh's _mac_ct_node_ca).
-    nodes_trust="The macOS node is"
-  else
-    # NATIVE k3s fetches no kubectl (k3s carries its own), so dl.k8s.io is not
-    # probed. Its hosts are keyed on what THIS run fetches,
-    # never on k3s merely being there, so a re-run that needs a host is checked for
-    # it before anything changes:
-    #   - the binary, from github.com, whose release download redirects to
-    #     release-assets.githubusercontent.com (measured on v1.36.3+k3s1 under 1.1b):
-    #     on the predicate step c downloads on, a k3s that is absent or not the pin;
-    #   - nothing from raw.githubusercontent.com: k3s's install.sh ships with the
-    #     installer (scripts/vendor/);
-    #   - rpm.rancher.io on EVERY run of an SELinux rpm host: install.sh runs on every
-    #     pass and installs or refreshes k3s-selinux from there each time, and with
-    #     the host blocked a re-run fails at its `dnf install` (measured on Rocky 9).
-    #     Its api.github.com version lookup is not probed: install.sh only warns
-    #     when it fails (measured too).
-    if _native_k3s_binary_due; then
-      criticals+=("k3s download (github.com)|https://github.com/" \
-                  "k3s assets (release-assets.githubusercontent.com)|https://release-assets.githubusercontent.com/")
-    fi
-    # On an SELinux-enforcing host a missing policy is fatal to install.sh.
-    if _pf_k3s_selinux_rpm_host; then
-      criticals+=("k3s SELinux policy (rpm.rancher.io)|https://rpm.rancher.io/")
-    fi
-    if ! has helm;    then criticals+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
-    tool_hosts="github.com / release-assets.githubusercontent.com / get.helm.sh / rpm.rancher.io"
-    nodes_trust="k3s is"
-  fi
+  _pf_connectivity_hosts
   # Probe each critical host in the FOREGROUND (so PF_HARD_FAIL updates in THIS
   # shell — a backgrounded spinner subshell couldn't propagate it), advancing a
   # live line (quiet when plain: the copy has only its ✔). Failures are collected
@@ -1710,6 +1658,59 @@ _pf_connectivity() {
   return 0
 }
 
+# The tool-download hosts _pf_connectivity adds to its criticals; sets its tool_hosts and nodes_trust.
+# Tool-binary download hosts — HARD: a blocked one used to pass preflight
+# then fail the install ~30s later. Only added when the fetch will actually happen
+# (tool absent; a present tool is never re-downloaded). Release downloads redirect
+# to an asset host and _pf_probe_url does not follow redirects, so github.com
+# passing proves nothing about the asset host — probe it explicitly. check-drift.sh
+# holds the probe list to these hosts. main() leaves every run here on k3s: on the
+# macOS node, or native k3s (Linux, and inside tracebloc's WSL distro).
+_pf_connectivity_hosts() {
+  if _pf_on_mac_node; then
+    # A Mac sets up only the macOS node (slim client 4.1). Apple's runtime
+    # package comes from its GitHub release, whose download redirects to
+    # release-assets.githubusercontent.com (keyed on the runtime's folder, which a
+    # re-run reuses); kubectl, pinned to the node's release, from dl.k8s.io; helm from
+    # get.helm.sh when absent. The kernel and init image (ghcr.io) and the node image
+    # (Docker Hub) are in the always-needed set above.
+    if [[ ! -e "$(_mac_ct_install_root 2>/dev/null)" ]]; then
+      criticals+=("Apple container package (github.com)|https://github.com/" \
+                  "Apple container assets (release-assets.githubusercontent.com)|https://release-assets.githubusercontent.com/")
+    fi
+    criticals+=("kubectl (dl.k8s.io)|https://dl.k8s.io/")
+    if ! has helm; then criticals+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
+    tool_hosts="github.com / release-assets.githubusercontent.com / dl.k8s.io / get.helm.sh"
+    # The node takes the CA's roots by path (mac-container.sh's _mac_ct_node_ca).
+    nodes_trust="The macOS node is"
+  else
+    # NATIVE k3s fetches no kubectl (k3s carries its own), so dl.k8s.io is not probed. Its
+    # hosts are keyed on what THIS run fetches, never on k3s merely being there, so a
+    # re-run that needs a host is checked for it before anything changes:
+    #   - the binary, from github.com, whose release download redirects to
+    #     release-assets.githubusercontent.com (measured on v1.36.3+k3s1 under 1.1b):
+    #     on the predicate step c downloads on, a k3s that is absent or not the pin;
+    #   - nothing from raw.githubusercontent.com: k3s's install.sh ships with the
+    #     installer (scripts/vendor/);
+    #   - rpm.rancher.io on EVERY run of an SELinux rpm host: install.sh runs on every
+    #     pass and installs or refreshes k3s-selinux from there each time, and with
+    #     the host blocked a re-run fails at its `dnf install` (measured on Rocky 9).
+    #     Its api.github.com version lookup is not probed: install.sh only warns
+    #     when it fails (measured too).
+    if _native_k3s_binary_due; then
+      criticals+=("k3s download (github.com)|https://github.com/" \
+                  "k3s assets (release-assets.githubusercontent.com)|https://release-assets.githubusercontent.com/")
+    fi
+    # On an SELinux-enforcing host a missing policy is fatal to install.sh.
+    if _pf_k3s_selinux_rpm_host; then
+      criticals+=("k3s SELinux policy (rpm.rancher.io)|https://rpm.rancher.io/")
+    fi
+    if ! has helm;    then criticals+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
+    tool_hosts="github.com / release-assets.githubusercontent.com / get.helm.sh / rpm.rancher.io"
+    nodes_trust="k3s is"
+  fi
+}
+
 # The machine, for the collapsed step-a view:
 #   "macOS · Apple Silicon (arm64)"
 # The OS's family on a Mac (its version is the floor check's), its name and version
@@ -1732,10 +1733,9 @@ _pf_os_summary_line() {
 
 # One-line hardware summary for the collapsed step-a view:
 #   "N CPU cores · N GB memory · N GB free disk"
-# Computed from the same readers the individual checks use, so it can never
-# disagree with them. Fields that can't be read are simply omitted. Printed by
-# run_preflight only when nothing hard-failed — a ✔ summary above a ✖ would
-# contradict itself.
+# Computed from the same readers the individual checks use, so it can never disagree with
+# them. Fields that can't be read are simply omitted. Printed by run_preflight only when
+# nothing hard-failed — a ✔ summary above a ✖ would contradict itself.
 _pf_hw_summary_line() {
   local cpu mem_kb mem_gb disk_target="" disk_kb disk_gb tab=$'\t'
   local -a parts=()

@@ -254,6 +254,23 @@ _verify_tracebloc_cli() {
   return 0
 }
 
+# _cli_download_installer OUTFILE -> fetch the CLI's released installer, up to
+# TRACEBLOC_CLI_DL_ATTEMPTS tries (default 3), TRACEBLOC_CLI_DL_DELAY_S doubling pause (2).
+# One download hiccup must not leave the machine with no CLI, which every later `tracebloc`
+# step assumes; each retry is shown, the caller words the final failure.
+_cli_download_installer() {
+  local _dl_out="$1" _dl_try=1 _dl_max="${TRACEBLOC_CLI_DL_ATTEMPTS:-3}" _dl_delay="${TRACEBLOC_CLI_DL_DELAY_S:-2}"
+  while true; do
+    # --max-time 120: a stalled CDN becomes a failure here, not a hang.
+    curl_secure -fsSL --max-time 120 "$TRACEBLOC_CLI_INSTALL_URL" -o "$_dl_out" 2>>"${LOG_FILE:-/dev/null}" && return 0
+    (( _dl_try >= _dl_max )) && return 1
+    warn "The tracebloc CLI installer download failed (attempt ${_dl_try}/${_dl_max}); retrying in ${_dl_delay}s."
+    sleep "$_dl_delay"
+    _dl_delay=$((_dl_delay * 2))
+    _dl_try=$((_dl_try + 1))
+  done
+}
+
 install_tracebloc_cli() {
   # No step framing here: this is called from provision_client (Step 3) on the
   # browser-auth path and, non-fatally, on the dual-mode path — the caller owns
@@ -289,11 +306,8 @@ install_tracebloc_cli() {
 
   # 1) Download the released installer. A failure here is a download problem,
   #    distinct from an install problem below.
-  # curl_secure supplies the TLS floor and the connect timeout; --max-time 120
-  # tightens its default deadline so a stalled CDN turns into a clean "install
-  # later" failure below instead of hanging the CLI-install step (this call isn't
-  # retry-wrapped, and a hang is not a failure the graceful fallback would catch).
-  if ! curl_secure -fsSL --max-time 120 "$TRACEBLOC_CLI_INSTALL_URL" -o "$installer" 2>>"${LOG_FILE:-/dev/null}"; then
+  # Retried and bounded by _cli_download_installer.
+  if ! _cli_download_installer "$installer"; then
     warn "Couldn't download the tracebloc CLI installer — your secure environment is set up fine."
     hint "Install it later:  curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh"
     rm -f "$installer"

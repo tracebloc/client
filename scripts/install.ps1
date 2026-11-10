@@ -27,8 +27,7 @@
 #  tree is readable — a public fork with your branch pushed — and fetch install.ps1
 #  itself from that same fork:
 #    $env:TRACEBLOC_SOURCE_REPO = "<you>/client"; $env:TRACEBLOC_BRANCH = "<branch>"; $env:TRACEBLOC_ALLOW_UNVERIFIED = "1"
-#  ($env:TRACEBLOC_REF = "<vX.Y.Z>" pins another release instead; the older
-#  $env:BRANCH spelling still works.)
+#  ($env:TRACEBLOC_REF = "<vX.Y.Z>" pins another release instead.)
 #    irm https://raw.githubusercontent.com/<you>/client/<branch>/scripts/install.ps1 | iex
 #
 #  macOS / Linux:
@@ -918,11 +917,10 @@ function Invoke-Bootstrap {
   Assert-WslWindowsBuild
 
   $allowUnverified = ($env:TRACEBLOC_ALLOW_UNVERIFIED -eq "1")
-  # The release pin is TRACEBLOC_REF alone; the branch override takes the older
-  # BRANCH when TRACEBLOC_BRANCH is unset or empty (remove_by 2026-12-31): the bash
-  # bootstrap's rule.
+  # The release pin is TRACEBLOC_REF alone and the branch override TRACEBLOC_BRANCH
+  # alone: the bash bootstrap's rule.
   $refEnv    = $env:TRACEBLOC_REF
-  $branchEnv = if ($env:TRACEBLOC_BRANCH) { $env:TRACEBLOC_BRANCH } else { $env:BRANCH }
+  $branchEnv = $env:TRACEBLOC_BRANCH
   $ref = Resolve-InstallRef -DefaultRef $DefaultRef -RefEnv $refEnv -BranchEnv $branchEnv -AllowUnverified $allowUnverified
 
   # Everything the customer path fetches -- the sub-scripts (attached as flat
@@ -942,7 +940,7 @@ function Invoke-Bootstrap {
   #
   # $repoRaw is the source TREE, a dev/unverified-only transport. It reads from
   # $TRACEBLOC_SOURCE_REPO (default tracebloc/client, which has no scripts/ tree),
-  # so a maintainer iterating on an unreleased BRANCH points it at a source whose
+  # so a maintainer iterating on an unreleased branch points it at a source whose
   # raw tree is readable -- a public fork. Validate the owner/repo shape before it
   # is interpolated into a URL: exactly one '/' and shell-safe chars. The character
   # class admits '.', so a segment could be all dots ('a/..' matches) -- reject '..'
