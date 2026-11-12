@@ -762,7 +762,7 @@ sealCheck:
     # drift if upstream re-tags.
     image:
       repository: alpine/k8s
-      tag: "1.30.5"
+      tag: "1.36.6"
       pullPolicy: IfNotPresent
       # THE REGISTRY AND THE PIN, BOTH EXPRESSIBLE. This block was
       # `repository` + `tag` only, rendered as `mirrorPrefix + repo:tag` -- which,
@@ -792,7 +792,7 @@ sealCheck:
       # `registry` / global.imageRegistry never affect the match -- a registry-only
       # re-home keeps the pin.
       registry: "docker.io"
-      digest: "sha256:0d03af14f8539df28e51e8afc12ee6d78891c630b88226243307f08a6fab3538"
+      digest: "sha256:d9cb78be55e6e47c54e8a77bbf35ef87e98e5a03fbe5db7654d28bb78cc7d57e"
       # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
       # default identity for the chart's own pin, your image for your own digest.
       digestFor: ""
@@ -1883,9 +1883,9 @@ images:
     # The three templates read this value now, so the watch cannot be reading
     # something the render ignores.
     repository: library/busybox
-    tag: "1.35"
+    tag: "1.38"
     # PINNED, same provenance and same watch as the collector.
-    digest: "sha256:98ad9d1a2be345201bb0709b0d38655eb1b370145c7d94ca1fe9c421f76e245a"
+    digest: "sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4"
     # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
     # default identity for the chart's own pin, your image for your own digest.
     digestFor: ""
@@ -2706,7 +2706,7 @@ imageRefresh:
   # if upstream re-tags.
   image:
     repository: alpine/k8s
-    tag: "1.30.5"
+    tag: "1.36.6"
     pullPolicy: IfNotPresent
     # THE REGISTRY AND THE PIN, BOTH EXPRESSIBLE. This block was
     # `repository` + `tag` only, rendered as `mirrorPrefix + repo:tag` -- which,
@@ -2736,7 +2736,7 @@ imageRefresh:
     # `registry` / global.imageRegistry never affect the match -- a registry-only
     # re-home keeps the pin.
     registry: "docker.io"
-    digest: "sha256:0d03af14f8539df28e51e8afc12ee6d78891c630b88226243307f08a6fab3538"
+    digest: "sha256:d9cb78be55e6e47c54e8a77bbf35ef87e98e5a03fbe5db7654d28bb78cc7d57e"
     # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
     # default identity for the chart's own pin, your image for your own digest.
     digestFor: ""

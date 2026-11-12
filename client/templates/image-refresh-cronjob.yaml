@@ -1357,7 +1357,7 @@ spec:
           containers:
             - name: refresh
               # THROUGH THE ONE HELPER -- see the note in
-              # auto-upgrade-cronjob.yaml. A bare `alpine/k8s:1.30.5` is a
+              # auto-upgrade-cronjob.yaml. A bare `alpine/k8s:1.36.6` is a
               # Docker Hub pull with no `docker.io` anywhere in the file to find it by.
               image: {{ include "tracebloc.thirdPartyImage" (dict "site" "imageRefresh.image" "root" $) | quote }}
               imagePullPolicy: {{ (dig "image" "pullPolicy" "" (.Values.imageRefresh | default dict)) | default "IfNotPresent" }}

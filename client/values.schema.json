@@ -1007,7 +1007,7 @@
                   "not": {
                     "const": "latest"
                   },
-                  "default": "1.30.5"
+                  "default": "1.36.6"
                 },
                 "digest": {
                   "type": "string",

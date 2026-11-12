@@ -1198,9 +1198,9 @@ restrictedDns.image:
 sealCheck.storageAssertions.image:
   registry: docker.io
   repository: alpine/k8s
-  tag: "1.30.5"
-  digest: "sha256:0d03af14f8539df28e51e8afc12ee6d78891c630b88226243307f08a6fab3538"
-  digestFor: "alpine/k8s:1.30.5"
+  tag: "1.36.6"
+  digest: "sha256:d9cb78be55e6e47c54e8a77bbf35ef87e98e5a03fbe5db7654d28bb78cc7d57e"
+  digestFor: "alpine/k8s:1.36.6"
 autoUpgrade.image:
   registry: docker.io
   repository: alpine/helm
@@ -1216,9 +1216,9 @@ autoUpgrade.cosign.image:
 imageRefresh.image:
   registry: docker.io
   repository: alpine/k8s
-  tag: "1.30.5"
-  digest: "sha256:0d03af14f8539df28e51e8afc12ee6d78891c630b88226243307f08a6fab3538"
-  digestFor: "alpine/k8s:1.30.5"
+  tag: "1.36.6"
+  digest: "sha256:d9cb78be55e6e47c54e8a77bbf35ef87e98e5a03fbe5db7654d28bb78cc7d57e"
+  digestFor: "alpine/k8s:1.36.6"
 gpu.devicePlugin.amd:
   registry: docker.io
   repository: rocm/k8s-device-plugin
@@ -1240,9 +1240,9 @@ telemetryCollector.image:
 images.busybox:
   registry: docker.io
   repository: library/busybox
-  tag: "1.35"
-  digest: "sha256:98ad9d1a2be345201bb0709b0d38655eb1b370145c7d94ca1fe9c421f76e245a"
-  digestFor: "library/busybox:1.35"
+  tag: "1.38"
+  digest: "sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4"
+  digestFor: "library/busybox:1.38"
 {{- end -}}
 
 {{/*

@@ -21,3 +21,9 @@ maintainers:
 kubeVersion: ">=1.24.0-0"
 annotations:
   category: Machine Learning
+  # The announced next Kubernetes floor: a floor
+  # moves only after one release has told customers. NOTES.txt warns a cluster below
+  # it, naming the date. When the floor lands, kubeVersion above takes this version and
+  # both annotations are removed.
+  tracebloc.io/next-kube-floor: "1.32.0"
+  tracebloc.io/next-kube-floor-date: "2026-11-26"
