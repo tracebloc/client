@@ -3423,12 +3423,13 @@ ingestionAuthz:
 egressGate:
   # What the gate does with a message not on the list of what may leave; a
   # training's messages are checked under the mark its dataset was given at
-  # ingest. `report`: it leaves, and the outbound record marks it as would be
-  # refused. `enforce`: it is refused and nothing of it leaves. On patient data,
-  # enforce refuses the preprocessing file a training uploads with its weights,
-  # so the training fails, and the pooled preprocessing statistics of a federated
-  # training, which stops at its first cycle.
-  mode: report
+  # ingest. `enforce`, the default: it is refused and nothing of it leaves.
+  # `report`: it leaves, and the outbound record marks it as would be refused.
+  # On patient data a training's preprocessing state leaves only as a JSON
+  # document, which the gate reads whole and checks before any of it leaves;
+  # enforce refuses the pooled preprocessing statistics of a federated training,
+  # so that training stops at its first cycle.
+  mode: enforce
   record:
     # The `record` container serves the record read-only, to the owner, through
     # the Kubernetes API's service proxy. Idle unless the owner reads it, so it

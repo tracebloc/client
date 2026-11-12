@@ -84,7 +84,7 @@ LIB_DIR="${SCRIPT_DIR}/lib"
 _tb_missing=""
 for _tb_m in settings output progress errors retry download root kube host substrate record \
   preflight preflight-storage detect-gpu gpu-nvidia gpu-amd setup-macos setup-linux cluster k3s k3s-firewall \
-  k3s-apparmor k3s-gpu k3s-prepared k3s-config k3s-kubeconfig gpu-plugins install-client-helm training-fit credentials dashboard-link chart-source helm-release summary diagnose; do
+  k3s-apparmor k3s-gpu k3s-prepared k3s-config k3s-kubeconfig gpu-plugins install-client-helm training-fit helm-progress mysql-engine credentials dashboard-link chart-source helm-set-args machine-facts helm-release summary diagnose; do
   [[ -f "${LIB_DIR}/${_tb_m}.sh" ]] || _tb_missing="${_tb_missing} ${_tb_m}.sh"
 done
 if [[ -n "$_tb_missing" ]]; then
@@ -116,7 +116,7 @@ if [[ -f "${LIB_DIR}/mac-runtime.sh" && -f "${LIB_DIR}/mac-container.sh" && -f "
   source "${LIB_DIR}/mac-container.sh"
   source "${LIB_DIR}/mac-login-items.sh"
 fi
-source "${LIB_DIR}/gpu-plugins.sh"; source "${LIB_DIR}/install-client-helm.sh"; source "${LIB_DIR}/training-fit.sh"; source "${LIB_DIR}/credentials.sh"; source "${LIB_DIR}/dashboard-link.sh"; source "${LIB_DIR}/chart-source.sh"; source "${LIB_DIR}/helm-release.sh"
+source "${LIB_DIR}/gpu-plugins.sh"; source "${LIB_DIR}/install-client-helm.sh"; source "${LIB_DIR}/training-fit.sh"; source "${LIB_DIR}/helm-progress.sh"; source "${LIB_DIR}/mysql-engine.sh"; source "${LIB_DIR}/credentials.sh"; source "${LIB_DIR}/dashboard-link.sh"; source "${LIB_DIR}/chart-source.sh"; source "${LIB_DIR}/helm-set-args.sh"; source "${LIB_DIR}/machine-facts.sh"; source "${LIB_DIR}/helm-release.sh"
 # install-cli.sh may be absent if an older bootstrap copy (e.g. a not-yet-updated
 # tracebloc.io/i.sh, whose FILES list is hand-maintained) didn't fetch it. Guard the
 # source so a stale bootstrap degrades gracefully (Step 5 is skipped) instead of aborting

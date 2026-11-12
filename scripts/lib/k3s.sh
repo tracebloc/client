@@ -889,7 +889,7 @@ _native_k3s_refuse_host() {
   fi
   # hostpath and HOST_DATASET_DIR are served: the node is the host,
   # so the chart's hostPath PVs name host_data_dir and the dataset dir themselves
-  # (install-client-helm.sh, _hostpath_paths_block). validate_config still refuses a
+  # (mysql-engine.sh, _hostpath_paths_block). validate_config still refuses a
   # dataset dir under node-local, on both substrates.
   _native_k3s_check_version
 }

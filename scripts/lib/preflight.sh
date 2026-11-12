@@ -686,7 +686,7 @@ _pf_backend_host() {
 
 # ── Checks (each ALWAYS returns 0; hard failures go into PF_HARD_FAILS) ───────
 
-# Ask install-client-helm.sh's engine rule which MySQL engine THIS host will get,
+# Ask mysql-engine.sh's engine rule which MySQL engine THIS host will get,
 # echoing its "<engine> <reason>" verdict. The one amd64-only image
 # left is mysql-client 5.7, so "will this host need emulation at all?" is a
 # question only that rule can answer — and the arch gate below used to answer it

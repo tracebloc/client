@@ -38,7 +38,7 @@ _emit_launch_plist() {
 }
 
 # The macOS amd64-emulation refusal: the Rosetta remedy. Read by the late
-# _assert_engine_runs_on_this_arch gate (install-client-helm.sh) on an Apple silicon
+# _assert_engine_runs_on_this_arch gate (mysql-engine.sh) on an Apple silicon
 # Mac whose install resolved to the amd64-only MySQL 5.7 engine, so the refusal gives
 # the Mac's fix, never the Linux binfmt one.
 _macos_amd64_refusal() {

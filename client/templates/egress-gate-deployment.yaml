@@ -187,8 +187,10 @@ spec:
               value: {{ include "tracebloc.clientEnv" . | quote }}
             - name: TRACEBLOC_EGRESS_GATE_SENDERS
               value: {{ include "tracebloc.egressGateSenders" . | quote }}
+            {{- /* With no egressGate keys stored (a --reuse-values replay) it renders
+                 values.yaml's default; egress-gate-mode-agreement.sh holds the two equal. */}}
             - name: TRACEBLOC_EGRESS_GATE_MODE
-              value: {{ (default dict .Values.egressGate).mode | default "report" | quote }}
+              value: {{ (default dict .Values.egressGate).mode | default "enforce" | quote }}
             - name: TRACEBLOC_EGRESS_RECORD_DIR
               value: "/var/lib/tracebloc/egress-record"
             - name: MYSQL_HOST
