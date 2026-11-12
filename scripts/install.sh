@@ -492,7 +492,7 @@ FILES=(
   "scripts/lib/detect-gpu.sh" "scripts/lib/gpu-nvidia.sh" "scripts/lib/gpu-amd.sh"
   "scripts/lib/setup-macos.sh" "scripts/lib/setup-linux.sh" "scripts/lib/cluster.sh"
   "scripts/lib/k3s.sh" "scripts/lib/k3s-firewall.sh" "scripts/lib/k3s-apparmor.sh"
-  "scripts/lib/k3s-gpu.sh" "scripts/lib/k3s-prepared.sh" "scripts/lib/mac-runtime.sh"
+  "scripts/lib/k3s-gpu.sh" "scripts/lib/k3s-prepared.sh" "scripts/lib/k3s-config.sh" "scripts/lib/k3s-kubeconfig.sh" "scripts/lib/mac-runtime.sh"
   "scripts/lib/mac-container.sh" "scripts/lib/mac-login-items.sh" "scripts/lib/gpu-plugins.sh"
   "scripts/lib/install-client-helm.sh" "scripts/lib/training-fit.sh"
   "scripts/lib/credentials.sh" "scripts/lib/dashboard-link.sh" "scripts/lib/chart-source.sh" "scripts/lib/helm-release.sh"

@@ -84,7 +84,7 @@ LIB_DIR="${SCRIPT_DIR}/lib"
 _tb_missing=""
 for _tb_m in settings output progress errors retry download root kube host substrate record \
   preflight preflight-storage detect-gpu gpu-nvidia gpu-amd setup-macos setup-linux cluster k3s k3s-firewall \
-  k3s-apparmor k3s-gpu k3s-prepared gpu-plugins install-client-helm training-fit credentials dashboard-link chart-source helm-release summary diagnose; do
+  k3s-apparmor k3s-gpu k3s-prepared k3s-config k3s-kubeconfig gpu-plugins install-client-helm training-fit credentials dashboard-link chart-source helm-release summary diagnose; do
   [[ -f "${LIB_DIR}/${_tb_m}.sh" ]] || _tb_missing="${_tb_missing} ${_tb_m}.sh"
 done
 if [[ -n "$_tb_missing" ]]; then
@@ -94,8 +94,7 @@ fi
 unset _tb_m _tb_missing
 source "${LIB_DIR}/settings.sh"; source "${LIB_DIR}/output.sh"; source "${LIB_DIR}/progress.sh"
 source "${LIB_DIR}/errors.sh"; source "${LIB_DIR}/retry.sh"; source "${LIB_DIR}/download.sh"
-source "${LIB_DIR}/root.sh"; source "${LIB_DIR}/kube.sh"; source "${LIB_DIR}/host.sh"
-source "${LIB_DIR}/substrate.sh"; source "${LIB_DIR}/record.sh"
+source "${LIB_DIR}/root.sh"; source "${LIB_DIR}/kube.sh"; source "${LIB_DIR}/host.sh"; source "${LIB_DIR}/substrate.sh"; source "${LIB_DIR}/record.sh"
 # telemetry.sh next, so the install clock starts before any work and step_header / install_cleanup find its
 # hooks. Guarded: a stale bootstrap may lack it, and aborting for want of self-reporting is a poor trade.
 if [[ -f "${LIB_DIR}/telemetry.sh" ]]; then
@@ -109,15 +108,15 @@ source "${LIB_DIR}/k3s-firewall.sh"
 source "${LIB_DIR}/k3s-apparmor.sh"
 source "${LIB_DIR}/k3s-gpu.sh"
 source "${LIB_DIR}/k3s-prepared.sh"
+source "${LIB_DIR}/k3s-config.sh"
+source "${LIB_DIR}/k3s-kubeconfig.sh"
 # The macOS node (2.1 part 6) is three libs, all or none; a stale bootstrap may lack them (refused by name, _native_k3s_refuse_host).
 if [[ -f "${LIB_DIR}/mac-runtime.sh" && -f "${LIB_DIR}/mac-container.sh" && -f "${LIB_DIR}/mac-login-items.sh" ]]; then
   source "${LIB_DIR}/mac-runtime.sh"
   source "${LIB_DIR}/mac-container.sh"
   source "${LIB_DIR}/mac-login-items.sh"
 fi
-source "${LIB_DIR}/gpu-plugins.sh"
-source "${LIB_DIR}/install-client-helm.sh"; source "${LIB_DIR}/training-fit.sh"; source "${LIB_DIR}/credentials.sh"; source "${LIB_DIR}/dashboard-link.sh"; source "${LIB_DIR}/chart-source.sh"
-source "${LIB_DIR}/helm-release.sh"
+source "${LIB_DIR}/gpu-plugins.sh"; source "${LIB_DIR}/install-client-helm.sh"; source "${LIB_DIR}/training-fit.sh"; source "${LIB_DIR}/credentials.sh"; source "${LIB_DIR}/dashboard-link.sh"; source "${LIB_DIR}/chart-source.sh"; source "${LIB_DIR}/helm-release.sh"
 # install-cli.sh may be absent if an older bootstrap copy (e.g. a not-yet-updated
 # tracebloc.io/i.sh, whose FILES list is hand-maintained) didn't fetch it. Guard the
 # source so a stale bootstrap degrades gracefully (Step 5 is skipped) instead of aborting

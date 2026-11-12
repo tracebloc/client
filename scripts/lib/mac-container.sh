@@ -698,7 +698,7 @@ _mac_ct_node_ready_since() {
 # _mac_ct_running_node_name -- the name of the one node the macOS node's k3s runs,
 # asked inside the node (`container exec NAME kubectl`, as _mac_ct_node_ready_since
 # asks): the Mac has no k3s of its own. Fails when the node does not answer (stopped,
-# or no runtime). k3s.sh's _native_k3s_running_node_name asks it when the Mac's
+# or no runtime). k3s-config.sh's _native_k3s_running_node_name asks it when the Mac's
 # config.yaml no longer names the node.
 _mac_ct_running_node_name() {
   local root name
@@ -708,7 +708,7 @@ _mac_ct_running_node_name() {
 }
 
 # _mac_ct_ready_why CT NAME SINCE -- why the macOS node's Ready wait was refused: the
-# last Ready condition it read (k3s.sh _native_k3s_ready_said) with its heartbeat, and
+# last Ready condition it read (k3s-kubeconfig.sh _native_k3s_ready_said) with its heartbeat, and
 # whether the node container still runs. Where Linux counts k3s's restarts, the Mac
 # cannot: k3s is the container's PID 1 and Apple's runtime has no restart policy, so a
 # k3s that exited is a node container that stopped.

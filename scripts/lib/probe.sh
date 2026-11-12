@@ -18,7 +18,7 @@
 #       serve — a one-time admin step is required.
 #  Tier 1, rootless Docker for k3d, left with k3d, and with it the kernel and
 #  subordinate-ID probes it needed. Native k3s reads its own
-#  cgroup version (k3s.sh, _native_k3s_cgroup_version) and runs on v1 too.
+#  cgroup version (k3s-config.sh, _native_k3s_cgroup_version) and runs on v1 too.
 #
 #  run_host_probes sets, once:
 #    PROBE_PRIVILEGE       root | sudo_nopw | sudo_pw | no_sudo

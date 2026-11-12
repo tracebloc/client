@@ -94,7 +94,7 @@ function Read-HostInstallRecord {
 # None of them: nothing is left to keep, and the install goes on.
 # Each retired substrate, with the name a customer knew its install by and the
 # context it wrote (the substrate, then settings.sh's default cluster name, as
-# k3s.sh's _native_k3s_context names the distro's): the one line here that
+# k3s-kubeconfig.sh's _native_k3s_context names the distro's): the one line here that
 # names it.
 $RetiredInstalls = [ordered]@{
   k3d = @{ Name = 'Docker Desktop with k3d'; Context = 'k3d-tracebloc' }

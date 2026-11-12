@@ -143,7 +143,7 @@ TRACEBLOC_CA_REGISTRIES=(docker.io registry-1.docker.io auth.docker.io ghcr.io)
 
 # Print a containerd registries.yaml that points every registry in TRACEBLOC_CA_REGISTRIES
 # at the CA file $1 -- the path containerd reads it from, on the host on native k3s.
-# Pure: the writer (k3s.sh's _native_k3s_write_config) owns where it lands.
+# Pure: the writer (k3s-config.sh's _native_k3s_write_config) owns where it lands.
 _render_registries_config() {
   local node_ca="$1" host
   echo "configs:"
@@ -510,7 +510,7 @@ _kubelet_reservation_values() {
 # Print the kubelet config drop-in: the image-GC thresholds, plus the node
 # reservation for a measured platform. Pure; returns 1 on a broken reservation
 # embed, or when the one write of the rendering fails. The writer below and
-# k3s.sh's _native_k3s_write_config both print it through here, so the two
+# k3s-config.sh's _native_k3s_write_config both print it through here, so the two
 # substrates cannot write different kubelet configs.
 #
 # The text is built in memory with `printf -v` and written ONCE, so the exit
@@ -1068,7 +1068,7 @@ _api_answers() {
 }
 
 # The API wait budget in seconds: TB_API_WAIT_S when it is a whole number, else 180.
-# One reading for every wait (k3s.sh's _native_k3s_wait_for_api, the macOS node's),
+# One reading for every wait (k3s-kubeconfig.sh's _native_k3s_wait_for_api, the macOS node's),
 # so the documented knob means the same wherever it is read.
 _api_wait_budget_s() {
   case "${TB_API_WAIT_S:-}" in ''|*[!0-9]*) printf '180' ;; *) printf '%s' "$((10#${TB_API_WAIT_S}))" ;; esac

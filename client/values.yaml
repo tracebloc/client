@@ -1677,16 +1677,16 @@ images:
     # `pinnedImageLabels` entry. A check that fails keeps the watch red and
     # opens nothing (docs/SECURITY.md §4.1.1).
     #
-    # ghcr.io/tracebloc/ingestor multi-arch index, **v0.12.6** — VERIFIED
-    # against ghcr.io 2026-11-11 by scripts/verify-ingestor-release.sh in the
+    # ghcr.io/tracebloc/ingestor multi-arch index, **v0.12.8** — VERIFIED
+    # against ghcr.io 2026-11-12 by scripts/verify-ingestor-release.sh in the
     # digest-drift watch: a linux/amd64 + linux/arm64 OCI image index, the
-    # digest the `0.12` float, the `0.12.6` tag and the v0.12.6 GitHub Release
+    # digest the `0.12` float, the `0.12.8` tag and the v0.12.8 GitHub Release
     # name, with one version and revision label on both platforms; revision
-    # c6d9d19, on main and named by refs/tags/v0.12.6; SLSA provenance and a
+    # e75d6d9, on main and named by refs/tags/v0.12.8; SLSA provenance and a
     # cosign keyless signature from data-ingestors' release-image.yml at
-    # refs/tags/v0.12.6. What the release changes is in its GitHub Release
+    # refs/tags/v0.12.8. What the release changes is in its GitHub Release
     # notes and in the pin PR, which the watch opened.
-    prodDigestServiceDb: "sha256:2fd6005e8d35ac532ed210f76807e560e14f04913fc13dc284a0d7297d816216"
+    prodDigestServiceDb: "sha256:2ae1d4e0f0664f2560b6ceb14c9556993bf3a5e630e61fc8f40b58b95235f97d"
 
     # -- What each chart-pinned ingestor image says about itself, keyed by its
     # digest. When the digest `tracebloc.ingestorDigest`
@@ -1715,8 +1715,8 @@ images:
     # disagrees with its image's labels, or when an entry names a digest no
     # chart pin uses. Moving a pin therefore means re-running the script.
     pinnedImageLabels:
-      "sha256:2fd6005e8d35ac532ed210f76807e560e14f04913fc13dc284a0d7297d816216":
-        version: "0.12.6"
+      "sha256:2ae1d4e0f0664f2560b6ceb14c9556993bf3a5e630e61fc8f40b58b95235f97d":
+        version: "0.12.8"
         capabilities: "ingest:v1,layout:4,multi_label_text_classification:fasta,object_detection:manifestless,option:example,tabular_classification:wide-table,tabular_regression:wide-table,task:causal_language_modeling,task:embeddings,task:image_classification,task:keypoint_detection,task:masked_language_modeling,task:multi_label_text_classification,task:object_detection,task:semantic_segmentation,task:sentence_pair_classification,task:seq2seq,task:tabular_classification,task:tabular_regression,task:text_classification,task:text_regression,task:time_series_classification,task:time_series_forecasting,task:time_to_event_prediction,task:token_classification,text_classification:fasta,text_regression:fasta,time_series_forecasting:named-time-column,token_classification:fasta"
 
     # -- Whether `prodDigestServiceDb` applies on this edge. Default true, which means
