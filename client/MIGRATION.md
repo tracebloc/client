@@ -543,13 +543,21 @@ environment variables inside the pods, see the section above.
 - **Rotating a credential by hand:** set the `TRACEBLOC_` key (`docs/SECURITY.md`
   §6.1). A legacy key set beside it is ignored.
 
-An upgrade from any older chart keeps working: when the live Secret has only the
-legacy keys (written before 1.9.180), the chart reads the values from them and
-writes them under the `TRACEBLOC_` names. **Going back:** `helm rollback` restores
-the older revision's Secret as it was. `helm upgrade --version` to a chart from
-1.9.180 on works too, because those charts read the `TRACEBLOC_` keys. A chart
-older than 1.9.180 reads only the legacy keys, so do not downgrade to one from
-this release.
+**A Secret with only the legacy keys is refused.** When the live Secret has
+neither `TRACEBLOC_CLIENT_ID` nor `TRACEBLOC_CLIENT_PASSWORD` (it was last written
+by a chart older than 1.9.180, or created by hand without them), the upgrade stops
+before it changes anything: updating in place would generate new MySQL passwords
+while the existing database still holds the old ones. Reinstall that environment:
+delete it with `tracebloc delete` and run the installer again, or on a cluster you
+manage with Helm, `helm uninstall <release> -n <ns>` and `kubectl -n <ns> delete
+pvc mysql-pvc`, then install the chart again. Reinstalling deletes the
+environment's data; its datasets are ingested again. If you created the Secret by
+hand, add both `TRACEBLOC_` keys to it instead.
+
+**Going back:** `helm rollback` restores the older revision's Secret as it was.
+`helm upgrade --version` to a chart from 1.9.180 on works too, because those
+charts read the `TRACEBLOC_` keys. A chart older than 1.9.180 reads only the
+legacy keys, so do not downgrade to one from this release.
 
 ## Upgrading to 1.9.214 — `selfRotateMysqlRoot` is on for `prod`
 

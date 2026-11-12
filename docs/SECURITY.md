@@ -557,7 +557,7 @@ kubectl -n <ns> get secret <release>-secrets \
   -o jsonpath='{.data.TRACEBLOC_CLIENT_ID}' | base64 -d
 ```
 
-(`TRACEBLOC_CLIENT_ID` is the key the pods read, and the one the chart resolves first. A Secret last written by a chart older than the one that added it has only the legacy `CLIENT_ID`; read that key instead if the command above prints nothing -- the next `helm upgrade` moves the value to `TRACEBLOC_CLIENT_ID`.)
+(`TRACEBLOC_CLIENT_ID` is the key the pods read, and the one the chart resolves first. A Secret that has only the legacy `CLIENT_ID` is refused by `helm upgrade`: reinstall that environment, or add both `TRACEBLOC_` keys to the Secret by hand (`client/MIGRATION.md`, "Upgrading to 1.9.218").)
 
 Empty output means tier 2 has nothing to resolve from, and dropping the values would make the next upgrade **fail** rather than degrade. Create them first, using the labelled/annotated form in `values.yaml` so Helm adopts the Secret instead of colliding with it.
 
