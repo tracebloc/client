@@ -4,6 +4,33 @@ entries:
   - annotations:
       category: Machine Learning
     apiVersion: v2
+    appVersion: 1.18.3
+    created: "2026-11-12T11:19:16Z"
+    description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
+    digest: dcc2ba6b78e9bef14fad9a901f6d71753baeaabd90798f2ed57396ce772d2249
+    home: https://github.com/tracebloc/client
+    keywords:
+    - tracebloc
+    - kubernetes
+    - machine-learning
+    - aks
+    - eks
+    - openshift
+    - bare-metal
+    kubeVersion: '>=1.24.0-0'
+    maintainers:
+    - name: Tracebloc Team
+      url: https://tracebloc.com
+    name: client
+    sources:
+    - https://github.com/tracebloc/client
+    type: application
+    urls:
+    - https://github.com/tracebloc/client/releases/download/v1.18.3/client-1.18.3.tgz
+    version: 1.18.3
+  - annotations:
+      category: Machine Learning
+    apiVersion: v2
     appVersion: 1.18.2
     created: "2026-11-12T10:51:22Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
@@ -5708,4 +5735,4 @@ entries:
     urls:
     - https://github.com/tracebloc/client/releases/download/v1.9.123/ingestor-0.2.0.tgz
     version: 0.2.0
-generated: "2026-11-12T10:59:11.895828952Z"
+generated: "2026-11-12T11:27:14.172571174Z"
