@@ -109,7 +109,7 @@ TB_TELEMETRY_CLIENT_STATES="connected starting bad_creds image_pull image_pull_c
 TB_TELEMETRY_ERROR_CLASSES="unexpected_exit_2 bad_credentials image_pull_failed image_pull_untrusted_ca crash_loop not_ready bootstrap_failed preflight_failed prerequisites_failed cluster_create_failed registration_failed helm_install_failed unclassified"
 
 # ── Source-file vocabulary ───────────────────────────────────────────────────
-# The installer already records WHERE it died (common.sh's _record_err), and
+# The installer already records WHERE it died (errors.sh's _record_err), and
 # "died in setup-linux.sh at line 412" is the difference between an actionable
 # failure and an unclassified one. The full TRACEBLOC_ERR_LOC is a PATH, though —
 # under curl|bash it is a temp directory, which on macOS sits under
@@ -118,12 +118,12 @@ TB_TELEMETRY_ERROR_CLASSES="unexpected_exit_2 bad_credentials image_pull_failed 
 # the bootstrap; the agreement test derives it from there.
 #
 # `install.sh` is in the set for derivation symmetry and is UNREACHABLE today:
-# TRACEBLOC_ERR_LOC has exactly one writer, common.sh's _record_err (common.sh:988), and
-# common.sh is only ever sourced inside install-k8s.sh's process. Nothing in the
+# TRACEBLOC_ERR_LOC has exactly one writer, errors.sh's _record_err, and
+# errors.sh is only ever sourced inside install-k8s.sh's process. Nothing in the
 # bootstrap can name itself here. Kept rather than special-cased out, because the
 # day the bootstrap does get an emitter the name must already be admissible —
 # but do not read its presence as coverage.
-TB_TELEMETRY_SOURCES="install.sh install-k8s.sh common.sh preflight.sh detect-gpu.sh gpu-nvidia.sh gpu-amd.sh setup-macos.sh setup-linux.sh cluster.sh k3s.sh k3s-firewall.sh mac-container.sh gpu-plugins.sh install-client-helm.sh install-cli.sh provision.sh assess.sh reinstall.sh probe.sh summary.sh diagnose.sh telemetry.sh"
+TB_TELEMETRY_SOURCES="install.sh install-k8s.sh output.sh progress.sh errors.sh retry.sh download.sh root.sh kube.sh settings.sh host.sh substrate.sh record.sh preflight.sh preflight-storage.sh detect-gpu.sh gpu-nvidia.sh gpu-amd.sh setup-macos.sh setup-linux.sh cluster.sh k3s.sh k3s-firewall.sh k3s-apparmor.sh k3s-gpu.sh k3s-prepared.sh mac-runtime.sh mac-container.sh mac-login-items.sh gpu-plugins.sh install-client-helm.sh training-fit.sh credentials.sh dashboard-link.sh chart-source.sh helm-release.sh install-cli.sh provision.sh assess.sh reinstall.sh probe.sh summary.sh diagnose.sh telemetry.sh"
 
 # ── The value shapes ─────────────────────────────────────────────────────────
 # This is the privacy boundary. Nothing else in this file is allowed to write to
@@ -295,14 +295,14 @@ _telemetry_phase_names() {
 }
 
 # telemetry_phase_begin LETTER — close the running phase's timer, open the next.
-# Called from step_header (common.sh), so the timings come from the code that
+# Called from step_header (output.sh), so the timings come from the code that
 # actually prints the steps. Always returns 0: a timing bookkeeping error must
 # never be able to end an install.
 telemetry_phase_begin() {
   local name now elapsed
   now="$(_telemetry_now_ms)"
   elapsed=$(( now - _TB_TELEMETRY_PHASE_STARTED_MS ))
-  # An `if` block, not `[ … ] && elapsed=0`. common.sh's _record_err records why:
+  # An `if` block, not `[ … ] && elapsed=0`. errors.sh's _record_err records why:
   # a bare AND-list whose test is FALSE returns 1, and as the last statement of a
   # function that becomes the function's status — which under the installer's
   # `set -e` is fatal at the call site. Clock-step clamps are exactly the lines
@@ -328,7 +328,7 @@ telemetry_phase_begin() {
 # against it. That lost the most important number in the file:
 #
 #   * on every SUCCESSFUL install, phase_connect_ms — the readiness wait, up to
-#     READY_TIMEOUT (600s), the single longest phase;
+#     ready_timeout (600s), the single longest phase;
 #   * on every failure and every cancel, the duration of the phase named by
 #     tracebloc.install.phase — i.e. exactly the dpkg-lock shape this feature
 #     exists to surface, in its most likely real form: stuck twenty minutes in
@@ -716,7 +716,7 @@ _telemetry_instance_id() { printf '%s' "$TB_TELEMETRY_INSTANCE_ID"; }
 # ── Delivery ─────────────────────────────────────────────────────────────────
 
 _telemetry_spool_path() {
-  printf '%s/telemetry/pending.jsonl' "${HOST_DATA_DIR:-${HOME}/.tracebloc}"
+  printf '%s/telemetry/pending.jsonl' "${host_data_dir:-${HOME}/.tracebloc}"
 }
 
 # _telemetry_deliver JSON — THE TRANSPORT SEAM.
@@ -728,7 +728,7 @@ _telemetry_spool_path() {
 # these files: it is an OpenTelemetry Collector running as a pod INSIDE the
 # customer's Kubernetes cluster, reading container stdout through a `file_log`
 # receiver. Neither spool this function writes is container stdout and neither is
-# reachable from a pod: `$HOST_DATA_DIR/telemetry/pending.jsonl` and the
+# reachable from a pod: `$host_data_dir/telemetry/pending.jsonl` and the
 # `$TMPDIR` fallback are both files on the operator's own machine, written before
 # — and often instead of — any cluster existing at all. The pre-log failures this
 # fallback exists for (`validate_config`, `early_data_dir_guard`) happen when
@@ -761,7 +761,7 @@ _telemetry_spool_path() {
 # fix that does not work on the machines this feature exists for.
 #
 # When TMPDIR is disqualified the record goes to $HOME — outside anything the
-# bootstrap's trap owns, and NOT into $HOME/.tracebloc, which is HOST_DATA_DIR
+# bootstrap's trap owns, and NOT into $HOME/.tracebloc, which is host_data_dir
 # and which telemetry must never create (the network-data-dir refusal, and the comment on
 # _telemetry_deliver). /tmp is the last resort for a run with no usable HOME.
 _TB_TELEMETRY_SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd -P)" || _TB_TELEMETRY_SRC_DIR=""
@@ -814,10 +814,10 @@ _telemetry_deliver() {
   # feature exists to produce. (This file's own NFS test masked it by setting LOG_FILE=/dev/null.)
   log "telemetry: $json"
 
-  # TELEMETRY MUST NOT CREATE HOST_DATA_DIR. An observer that changes the
+  # TELEMETRY MUST NOT CREATE host_data_dir. An observer that changes the
   # install's own preconditions is not an observer.
   #
-  # This ran from the EXIT trap and did `mkdir -p "$HOST_DATA_DIR/telemetry"`
+  # This ran from the EXIT trap and did `mkdir -p "$host_data_dir/telemetry"`
   # unconditionally — including on the path where early_data_dir_guard had just
   # REFUSED that directory for being on a network filesystem and called `error`.
   # The guard skips an existing dir on purpose ("an EXISTING data dir has no
@@ -833,7 +833,7 @@ _telemetry_deliver() {
   #
   # AND A FAILED WRITE FALLS THROUGH, it does not return. Both of these steps
   # used to be `|| return 0`, which put the fallback out of reach in the one case
-  # it exists for: HOST_DATA_DIR present but not writable is precisely when
+  # it exists for: host_data_dir present but not writable is precisely when
   # _choose_log_file has already fallen back to a mktemp log — and on curl|bash
   # that log is inside the bootstrap's own doomed TMPDIR — so `log` above kept
   # nothing either and the event was gone. The fallback existed and was
@@ -846,7 +846,7 @@ _telemetry_deliver() {
   # there is no flag to keep in step and no ordering to get wrong. Everything
   # after the append (chmod, trim, mv) can fail freely: the line is already on
   # disk, and re-filing it in the fallback would turn one install into two rows.
-  if [ -n "${HOST_DATA_DIR:-}" ] && [ -d "$HOST_DATA_DIR" ]; then
+  if [ -n "${host_data_dir:-}" ] && [ -d "$host_data_dir" ]; then
     spool="$(_telemetry_spool_path)"
     dir="${spool%/*}"
     if mkdir -p "$dir" 2>/dev/null; then
@@ -900,7 +900,7 @@ _telemetry_trim_spool() {
       # The trim REPLACES the file, so the mode has to be put on the thing that
       # survives. `> "${spool}.tmp"` creates under the process umask and `mv`
       # keeps the tmp file's mode, so a chmod that ran only before this landed
-      # a 0644 spool: common.sh's `umask 077` normally covers it, but native
+      # a 0644 spool: settings.sh's `umask 077` normally covers it, but native
       # k3s's step b (k3s.sh) sets `umask 022` around install_helm and restores
       # it only afterwards — so an install that dies in it emits from the EXIT
       # trap under 022. Nothing sensitive is in the

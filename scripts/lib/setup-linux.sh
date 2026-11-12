@@ -274,7 +274,7 @@ _ensure_unpack_tools() {
   has gzip || missing+=(gzip)
   [ ${#missing[@]} -eq 0 ] && return 0
   setup_pm    # PM_UPDATE/PM_INSTALL (and, on apt, the toolkit-file repair); errors on unknown PM
-  # PM_INSTALL leads with `tb_root` — the common.sh executor (A2): as root it
+  # PM_INSTALL leads with `tb_root` — the root.sh executor (A2): as root it
   # runs the command directly (fine with no sudo binary at all), so nothing to
   # strip here. The OPTION-led probes below must BYPASS the shadow via
   # _have_sudo_bin/_real_sudo — as root the shadow would execute "-n true" as a
@@ -414,11 +414,11 @@ _helm_expect() {
 
 install_helm() {
   if _helm_fetch_due; then
-    # Pin the Helm release (HELM_VERSION, common.sh) and fetch the tarball
+    # Pin the Helm release (HELM_VERSION, settings.sh) and fetch the tarball
     # DIRECTLY from get.helm.sh, verified against its published .sha256sum —
     # get-helm-3 is gone (see _fetch_helm_release). HELM_VERSION=latest resolves
     # the newest release at install time via get.helm.sh/helm-latest-version and
-    # takes the same verified path; an empty value means the common.sh pin. The
+    # takes the same verified path; an empty value means the settings.sh pin. The
     # tag lands in a URL path, so anything that isn't a plain release tag fails
     # closed.
     local _helm_tag="${HELM_VERSION:-}"
@@ -475,7 +475,7 @@ dispatch_gpu_setup() {
 }
 
 # _nvidia_gpu_setup -- dispatch_gpu_setup's NVIDIA half, which prepare-host runs too
-# (k3s.sh _native_k3s_prepare_host): the floor, the driver, then the toolkit and a CDI
+# (k3s-prepared.sh _native_k3s_prepare_host): the floor, the driver, then the toolkit and a CDI
 # spec.
 _nvidia_gpu_setup() {
   if _gpu_floor_skips; then
@@ -569,31 +569,30 @@ refuse_sudo_wrapped_install() {
 }
 
 # _prepare_host_named_user -- set TB_PREPARE_TARGET to the user prepare-host is run
-# for: TRACEBLOC_PREPARE_USER, or TB_PREPARE_USER when that is unset or blank, each
-# trimmed. The user must be named EXPLICITLY: never $SUDO_USER, which is the ADMIN
-# who ran prepare-host, not the researcher (granting the admin would report success
-# while the researcher still can't install).
+# for: TRACEBLOC_PREPARE_USER, trimmed. The user must be named EXPLICITLY: never
+# $SUDO_USER, which is the ADMIN who ran prepare-host, not the researcher (granting
+# the admin would report success while the researcher still can't install).
 #
-# Both set and different is refused, granting nobody: a CLI that sets and clears only
-# TB_PREPARE_USER lets a TRACEBLOC_PREPARE_USER left in the admin's shell arrive beside
-# the user named, and either pick could give k3s to a user the admin did not mean.
+# A non-blank TB_PREPARE_USER refuses, granting nobody; its value is never used. A CLI
+# before 0.10.60 clears only that name, so a TRACEBLOC_PREPARE_USER left in the admin's
+# shell would reach the run as a user the admin did not name.
 TB_PREPARE_TARGET=""
 _prepare_host_named_user() {
-  local canon="${TRACEBLOC_PREPARE_USER:-}" legacy="${TB_PREPARE_USER:-}"
+  local target="${TRACEBLOC_PREPARE_USER:-}" retired="${TB_PREPARE_USER:-}"
+  retired="${retired#"${retired%%[![:space:]]*}"}"; retired="${retired%"${retired##*[![:space:]]}"}"
+  if [[ -n "$retired" ]]; then
+    error "TB_PREPARE_USER is set, and prepare-host no longer reads it. Nothing was set up. Unset it, then name the user with TRACEBLOC_PREPARE_USER or with tracebloc prepare-host <user>. If the tracebloc CLI set it, update the tracebloc CLI first: tracebloc upgrade"
+  fi
   # Trim surrounding whitespace BEFORE the non-empty gate: a pasted value with
   # stray spaces passes [[ -n ]], fails usermod, and skips the honest no-grant
   # messaging even though a real username was intended.
-  canon="${canon#"${canon%%[![:space:]]*}"}"; canon="${canon%"${canon##*[![:space:]]}"}"
-  legacy="${legacy#"${legacy%%[![:space:]]*}"}"; legacy="${legacy%"${legacy##*[![:space:]]}"}"
-  if [[ -n "$canon" && -n "$legacy" && "$canon" != "$legacy" ]]; then
-    error "prepare-host was given two different users: TRACEBLOC_PREPARE_USER='${canon}' and TB_PREPARE_USER='${legacy}'. Nothing was set up. Unset the one you did not mean, then re-run prepare-host."
-  fi
-  TB_PREPARE_TARGET="${canon:-$legacy}"
+  target="${target#"${target%%[![:space:]]*}"}"; target="${target%"${target##*[![:space:]]}"}"
+  TB_PREPARE_TARGET="$target"
 }
 
 # _prepare_host_print — `prepare-host --print`:
 # run_prepare_host itself, with TRACEBLOC_ROOT_PLAN set, so each privileged command it
-# would run is listed by the root executor (common.sh's tb_root) and none runs.
+# would run is listed by the root executor (root.sh's tb_root) and none runs.
 # The list cannot drift from a run: it IS the run's own calls. The dry run's
 # messages go to the log, stdin is /dev/null (nothing is read from the installer
 # under `curl | bash`), and a refusal still reaches the terminal, on stderr. Prints

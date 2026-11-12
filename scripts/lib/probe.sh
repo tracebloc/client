@@ -36,7 +36,7 @@
 # _probe_wsl — are we running inside a WSL2 distro (Linux inside Windows)?
 # WSL sets WSL_DISTRO_NAME / WSL_INTEROP in the environment and stamps "microsoft"/
 # "WSL" into the kernel release. Read-only. Its consumers include the audit note,
-# the run contract (refuse_wsl_run, lib/common.sh), which refuses a run in any WSL
+# the run contract (refuse_wsl_run, lib/host.sh), which refuses a run in any WSL
 # distro but tracebloc's own, and `_kubelet_reservation_platform` (lib/cluster.sh),
 # which routes a Linux kernel through this detector so a WSL2 host never gets a
 # row measured on a Linux host. Inside WSL2 the environment is still Linux, so the
@@ -121,7 +121,7 @@ _probe_windows_drive() {
 # `id -u`, `command -v sudo`, and `sudo -n true` are all side-effect-free.
 _probe_privilege() {
   if [[ "$(id -u 2>/dev/null)" == "0" ]]; then echo "root"; return 0; fi
-  # Detect the real sudo *binary*, never a `sudo` shell function common.sh
+  # Detect the real sudo *binary*, never a `sudo` shell function root.sh
   # installs (the A2 shadow). `has sudo` / a bare `sudo -n true` both resolve
   # to that function, so a host with no sudo at all would look like sudo is
   # present and we'd misreport the posture as sudo_pw instead of no_sudo.

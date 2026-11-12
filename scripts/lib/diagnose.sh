@@ -17,7 +17,7 @@
 #  Side-effect-safe to source (function definitions only).
 # =============================================================================
 
-# The xtrace hold (common.sh). A no-op with a common.sh from before it, so a mixed
+# The xtrace hold (output.sh). A no-op with an output.sh from before it, so a mixed
 # set of libs runs, unheld, rather than stopping on a missing command.
 declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
 declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
@@ -267,13 +267,13 @@ run_diagnose() {
 
   local ts base outdir d ns cn ctx
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null)"; [[ -z "$ts" ]] && ts="bundle"
-  base="${HOST_DATA_DIR:-$HOME/.tracebloc}"; mkdir -p "$base" 2>/dev/null
-  cn="${CLUSTER_NAME:-tracebloc}"
+  base="${host_data_dir:-$HOME/.tracebloc}"; mkdir -p "$base" 2>/dev/null
+  cn="${cluster_name:-tracebloc}"
   outdir="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-diag-XXXXXX" 2>/dev/null)"
   if [[ -z "$outdir" || ! -d "$outdir" ]]; then echo "  diagnose: cannot create a temp directory" >&2; return 1; fi
   d="$outdir/tracebloc-diagnose-$ts"; mkdir -p "$d/logs"
 
-  # Namespace discovery — TB_NAMESPACE isn't set on a standalone diagnose run,
+  # Namespace discovery — namespace isn't set on a standalone diagnose run,
   # so find the namespace of the jobs-manager pod (falls back to "default").
   # Every kubectl call below carries --request-timeout: `set +e` does NOT bound an
   # indefinite BLOCK, and --diagnose is the "API may be wedged" path, where an
@@ -288,7 +288,7 @@ run_diagnose() {
     _native_k3s_pin_context "$ctx" \
       || { rm -rf "$outdir"; tb_scratch_reap; echo "  diagnose: cannot write the temporary file that names tracebloc's kube context" >&2; return 1; }
   fi
-  ns="${TB_NAMESPACE:-}"
+  ns="${namespace:-}"
   if [[ -z "$ns" ]] && has kubectl; then
     ns="$(kubectl get pods -A $kt 2>/dev/null | awk '/-jobs-manager/{print $1; exit}')"
   fi
@@ -359,7 +359,7 @@ run_diagnose() {
   fi
 
   # ── proxy / env ──
-  # A proxy URL may carry a password: written with bash -x held off (common.sh), so the
+  # A proxy URL may carry a password: written with bash -x held off (output.sh), so the
   # trace does not show it; _redact_tree takes it out of the file below.
   { _tb_trace_off; } 2>/dev/null
   {

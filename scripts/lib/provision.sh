@@ -8,9 +8,9 @@
 #  credential is written to a 0600 file by `--credential-file` and sourced here
 #  (never printed), then handed to the Helm step via the SAME env contract
 #  install_client_helm already consumes:
-#      TRACEBLOC_CLIENT_ID + TRACEBLOC_CLIENT_PASSWORD + TB_NAMESPACE
-#  (TB_NAMESPACE is this shell's variable; children get it as the canonical
-#  TRACEBLOC_NAMESPACE, see tb_export_namespace in common.sh)
+#      TRACEBLOC_CLIENT_ID + TRACEBLOC_CLIENT_PASSWORD + namespace
+#  (namespace is this shell's variable; children get it as the canonical
+#  TRACEBLOC_NAMESPACE, see tb_export_namespace in kube.sh)
 #
 #  DUAL-MODE (unchanged, one deprecation cycle): when the operator pre-supplies a
 #  values file (TRACEBLOC_VALUES_FILE) or credentials (TRACEBLOC_CLIENT_ID +
@@ -19,14 +19,14 @@
 #  interactive; a non-interactive enroll-token login is a CLI follow-up.
 # =============================================================================
 
-# The xtrace hold (common.sh). A no-op with a common.sh from before it, so a mixed
+# The xtrace hold (output.sh). A no-op with an output.sh from before it, so a mixed
 # set of libs runs, unheld, rather than stopping on a missing command.
 declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
 declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
 
 # _provisioning_preset: true when the operator already supplied a values file or
 # credentials, so browser sign-in is skipped and install_client_helm uses them.
-# _provisioning_preset runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _provisioning_preset runs with bash -x held off, the secret it holds out of the trace (output.sh);
 # _tb_untraced__provisioning_preset below is the function itself.
 _provisioning_preset() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__provisioning_preset "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
 _tb_untraced__provisioning_preset() {
@@ -58,11 +58,11 @@ _create_plan() {
 # create` to send when it registers the client, so the dashboard can say so before
 # the first heartbeat. The same detection the chart's heartbeat env gets
 # (_detect_machine_kind / _detect_cloud_provider in install-client-helm.sh,
-# _host_os_label in common.sh), into _TB_REG_MACHINE_KIND / _TB_REG_CLOUD_PROVIDER
+# _host_os_label in host.sh), into _TB_REG_MACHINE_KIND / _TB_REG_CLOUD_PROVIDER
 # / _TB_REG_HOST_OS. Each is EMPTY when it cannot be read or its detector is not
 # loaded, and the CLI then leaves it out of the registration. Always exits 0: a fact
 # is not worth a registration. On Windows the distro's cluster run reads them here
-# and hands them to the host's create (tb_wsl_handover_write in common.sh).
+# and hands them to the host's create (tb_wsl_handover_write in host.sh).
 _registration_machine_facts() {
   _TB_REG_MACHINE_KIND=""; _TB_REG_CLOUD_PROVIDER=""; _TB_REG_HOST_OS=""
   if declare -F _prime_windows_host_identity >/dev/null 2>&1; then _prime_windows_host_identity || true; fi
@@ -392,7 +392,7 @@ _show_create_notices() {
 # presets, and the Windows installer's handed-over credential, never reach it.
 # _provisioning_preset is deliberately left as it is: this only fills in the
 # password it reads.
-# _provision_wants_preset_password runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _provision_wants_preset_password runs with bash -x held off, the secret it holds out of the trace (output.sh);
 # _tb_untraced__provision_wants_preset_password below is the function itself.
 _provision_wants_preset_password() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__provision_wants_preset_password "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
 _tb_untraced__provision_wants_preset_password() {
@@ -406,7 +406,7 @@ _tb_untraced__provision_wants_preset_password() {
 # is asked again, with no cap (Ctrl-C stops); a rejection asks for the Client ID too,
 # Enter keeping it. An inactive account, or a terminal that gives no input (EOF),
 # stops with the remedy. Never prints the password.
-# _provision_prompt_preset_password runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _provision_prompt_preset_password runs with bash -x held off, the secret it holds out of the trace (output.sh);
 # _tb_untraced__provision_prompt_preset_password below is the function itself.
 _provision_prompt_preset_password() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__provision_prompt_preset_password "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
 _tb_untraced__provision_prompt_preset_password() {
@@ -511,7 +511,7 @@ provision_client() {
   # Mint the client + derive the namespace. --credential-file writes the secret to
   # a 0600 file (never printed); we source it, hand it to Helm, then delete it (the
   # secret's durable home is the Helm/cluster secret — RFC §7.9).
-  local cred_file="${HOST_DATA_DIR}/client-credential.env"
+  local cred_file="${host_data_dir}/client-credential.env"
   # Register the path so install_cleanup removes it on ANY exit (error/signal)
   # between mint and the explicit removal below — the secret must never linger.
   _PROVISION_CRED_FILE="$cred_file"
@@ -744,7 +744,7 @@ _provision_mint() {
   # safe to show. Prefer mktemp; if it's unavailable, fall back INSIDE the install dir
   # (which we own and just wrote the 0600 credential into) rather than a predictable
   # world-writable /tmp path — that path is a symlink-clobber target under sudo.
-  local _create_out; _create_out="$(mktemp 2>/dev/null)" || _create_out="${HOST_DATA_DIR}/.client-create.$$.out"
+  local _create_out; _create_out="$(mktemp 2>/dev/null)" || _create_out="${host_data_dir}/.client-create.$$.out"
   # Where this machine runs and what it is called (_machine_labels above), handed to
   # the create in its environment (a CLI that predates the variables ignores them).
   _registration_machine_facts
@@ -840,7 +840,7 @@ TB_CRED_KEYS="TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD TRACEBLOC_NAMESPACE 
 # key given twice, no TRACEBLOC_CLIENT_ID, or an id with neither a password nor
 # TRACEBLOC_CLIENT_ADOPTED=1. A refusal returns 1 with the reason in
 # _PROVISION_CRED_WHY, which names lines and keys and never a value.
-# _provision_read_credential runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _provision_read_credential runs with bash -x held off, the secret it holds out of the trace (output.sh);
 # _tb_untraced__provision_read_credential below is the function itself.
 _provision_read_credential() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__provision_read_credential "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
 _tb_untraced__provision_read_credential() {
@@ -856,6 +856,7 @@ _tb_untraced__provision_read_credential() {
     if [[ "$ok" -ne 1 ]]; then _PROVISION_CRED_WHY="line ${n} names a key a credential does not carry"; return 1; fi
     case "$seen" in *" ${key} "*) _PROVISION_CRED_WHY="${key} is given twice"; return 1 ;; esac
     seen="${seen}${key} "
+    [[ "$key" != TB_NAMESPACE ]] || key=_PROVISION_CRED_OLD_NS  # the namespace's pre-TRACEBLOC_ key
     printf -v "$key" '%s' "${line#*=}"
   done <"$1"
   [[ -n "${TRACEBLOC_CLIENT_ID:-}" ]] || { _PROVISION_CRED_WHY="it names no TRACEBLOC_CLIENT_ID"; return 1; }
@@ -875,33 +876,32 @@ _tb_untraced__provision_read_credential() {
 # when the CLI reissued the existing client's credential.
 _provision_take_credential() {
   local cred_file="$1" _reuse_ns="${2:-}" _reconnected="${3:-0}"
-  # The secure-environment name set for this install (common.sh resolved
-  # TRACEBLOC_NAMESPACE into TB_NAMESPACE), kept for a preset, which names none.
-  local _set_ns="${TB_NAMESPACE:-}"
+  # The secure-environment name set for this install (settings.sh resolved
+  # TRACEBLOC_NAMESPACE into namespace), kept for a preset, which names none.
+  local _set_ns="${namespace:-}"
   # The credential file is the sole source of truth for what was provisioned.
   # Clear any pre-existing values from the environment first: the mint case does
   # NOT write TRACEBLOC_CLIENT_ADOPTED, so a stale ADOPTED=1 left in the env would
   # otherwise misroute a fresh mint into the adopt branch and drop the just-minted
   # credential. Same reasoning for id/password/namespace — only the file wins.
-  # TRACEBLOC_NAMESPACE is cleared WITH TB_NAMESPACE: it is the canonical
-  # spelling of the same name, so a value the operator set before the mint
-  # would otherwise outrank the minted slug for any alias-first reader.
-  unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD TB_NAMESPACE TRACEBLOC_NAMESPACE TRACEBLOC_CLIENT_ADOPTED
+  # The retired TB_NAMESPACE goes too, so no child inherits it.
+  unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD namespace TB_NAMESPACE TRACEBLOC_NAMESPACE TRACEBLOC_CLIENT_ADOPTED _PROVISION_CRED_OLD_NS
   local read_rc=0
   _provision_read_credential "$cred_file" || read_rc=1
   rm -f "$cred_file"
   unset _PROVISION_CRED_FILE
   if [[ "$read_rc" -ne 0 ]]; then
-    unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD TB_NAMESPACE TRACEBLOC_NAMESPACE TRACEBLOC_CLIENT_ADOPTED
+    unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD namespace TRACEBLOC_NAMESPACE TRACEBLOC_CLIENT_ADOPTED _PROVISION_CRED_OLD_NS
     if [[ -n "${TRACEBLOC_STDIN_CRED_FILE:-}" && "$cred_file" == "$TRACEBLOC_STDIN_CRED_FILE" ]]; then
       TB_EXIT_REFUSED=1
       error "The credential the Windows installer handed over isn't one this installer reads (${_PROVISION_CRED_WHY}), so this machine was not registered. Re-run the installer from Windows."
     fi
     error "The credential file 'tracebloc client create' wrote isn't one this installer reads (${_PROVISION_CRED_WHY}). Update the tracebloc CLI (curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh), then re-run the installer."
   fi
-  # The CLI writes TB_NAMESPACE today; read the canonical first so a CLI that
-  # writes TRACEBLOC_NAMESPACE is honoured without another installer change.
-  if [[ -n "${TRACEBLOC_NAMESPACE:-}" ]]; then TB_NAMESPACE="$TRACEBLOC_NAMESPACE"; fi
+  # The file's namespace: TRACEBLOC_NAMESPACE, else the key a CLI before 0.10.58 wrote alone.
+  if [[ -n "${TRACEBLOC_NAMESPACE:-}" ]]; then namespace="$TRACEBLOC_NAMESPACE"
+  elif [[ -n "${_PROVISION_CRED_OLD_NS+set}" ]]; then namespace="$_PROVISION_CRED_OLD_NS"; fi
+  unset _PROVISION_CRED_OLD_NS
 
   if [[ "${TRACEBLOC_CLIENT_ADOPTED:-}" == "1" ]]; then
     # Re-run on an already-registered cluster: no fresh credential was minted (the
@@ -914,7 +914,7 @@ _provision_take_credential() {
     # this case. A rebuilt host with no local release still reconciles by discovery.
     # Name it by namespace (= the dashboard handle), not the client's UUID login.
     # Said once: a reuse found by the pre-flight was announced before the create.
-    [[ -n "$_reuse_ns" ]] || info "Reconnecting your secure environment '${TB_NAMESPACE:-${TRACEBLOC_NAMESPACE:-?}}' — it's already registered with tracebloc."
+    [[ -n "$_reuse_ns" ]] || info "Reconnecting your secure environment '${namespace:-${TRACEBLOC_NAMESPACE:-?}}' — it's already registered with tracebloc."
     unset TRACEBLOC_CLIENT_PASSWORD
     export TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_ADOPTED
     tb_export_namespace
@@ -923,7 +923,7 @@ _provision_take_credential() {
 
   # Mint: hand the credential + the provisioned namespace to the Helm step. The
   # namespace MUST be the created client's slug (Q2: it equals the heartbeat-
-  # reported namespace), so the minted value wins over any TB_NAMESPACE default.
+  # reported namespace), so the minted value wins over any namespace default.
   export TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD
   # An id and a password with no namespace (what the Windows installer hands over) is
   # a preset, as credentials supplied in the environment are (_provisioning_preset):
@@ -931,18 +931,18 @@ _provision_take_credential() {
   # that preset, it picks the name set for this install, else tracebloc: the clear
   # above was for a minted slug to win, and a preset has none. Without this, a name
   # set on Windows, which reaches the client run on its line, was dropped here.
-  if [[ -z "${TB_NAMESPACE:-}" ]]; then
+  if [[ -z "${namespace:-}" ]]; then
     if [[ -n "$_set_ns" ]]; then
-      TB_NAMESPACE="$_set_ns"
+      namespace="$_set_ns"
       tb_export_namespace
     fi
     log "Credential handed to the install (not shown); the Helm step picks the namespace."
     return 0
   fi
   tb_export_namespace
-  # The registered identity is the minted slug (= TB_NAMESPACE = the dashboard
+  # The registered identity is the minted slug (= namespace = the dashboard
   # name), e.g. "lukas-01" — not the raw typed name (which may be de-duplicated).
   # e2e reads this line (tb_machine_lines); the summary's Environment row says it to a person.
-  [[ "$_reconnected" == 1 ]] || tb_machine_lines success "Registered as \"${TB_NAMESPACE}\""
+  [[ "$_reconnected" == 1 ]] || tb_machine_lines success "Registered as \"${namespace}\""
   log "Provisioned — credential handed to the install (not shown)."
 }

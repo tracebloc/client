@@ -110,8 +110,26 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # curl_secure() carries the repo's TLS floor and timeout bounds.
 # A bare `curl` here would be an unbounded, un-floored fetch, and the style guard
 # rejects one by name -- correctly: this call reaches the public internet.
-# shellcheck source=scripts/lib/common.sh
-. "$ROOT/scripts/lib/common.sh"
+# The core modules, in the order install-k8s.sh sources them,
+# less kube.sh and record.sh: curl_secure() and what it reaches read neither.
+# shellcheck source=scripts/lib/settings.sh
+. "$ROOT/scripts/lib/settings.sh"
+# shellcheck source=scripts/lib/output.sh
+. "$ROOT/scripts/lib/output.sh"
+# shellcheck source=scripts/lib/progress.sh
+. "$ROOT/scripts/lib/progress.sh"
+# shellcheck source=scripts/lib/errors.sh
+. "$ROOT/scripts/lib/errors.sh"
+# shellcheck source=scripts/lib/retry.sh
+. "$ROOT/scripts/lib/retry.sh"
+# shellcheck source=scripts/lib/download.sh
+. "$ROOT/scripts/lib/download.sh"
+# shellcheck source=scripts/lib/root.sh
+. "$ROOT/scripts/lib/root.sh"
+# shellcheck source=scripts/lib/host.sh
+. "$ROOT/scripts/lib/host.sh"
+# shellcheck source=scripts/lib/substrate.sh
+. "$ROOT/scripts/lib/substrate.sh"
 
 # docs/INSTALL.md tells TLS-inspecting sites to export TRACEBLOC_CA_BUNDLE, and
 # the fetch-failure remedy below names it -- but curl_secure() reads only curl's
@@ -303,7 +321,7 @@ else
   # private mirror of the repository list can point at it. Without a knob here the
   # refusal could only be reasoned about, never exercised -- and an unexercised
   # guard is indistinguishable from one that does not work (rule 5). Note that
-  # common.sh prepends the system PATH, so stubbing `curl` is not an option.
+  # settings.sh prepends the system PATH, so stubbing `curl` is not an option.
   # Docker Hub is queried for the repository NAMES whatever host the render
   # stamps (ghcr.io by chart default): GHCR exposes no anonymous repository-list
   # endpoint, and the training images are dual-published under the same names,

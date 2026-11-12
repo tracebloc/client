@@ -54,14 +54,14 @@ _cli_at_system_dir() {
 }
 
 # _cli_on_launch_path BIN -> 0 when BIN's directory was on the PATH of the shell
-# that started the install (TRACEBLOC_LAUNCH_PATH, captured by install.sh / common.sh
+# that started the install (TRACEBLOC_LAUNCH_PATH, captured by install.sh / settings.sh
 # before either prepends anything). That shell is the one the user types the next
 # command into, so a CLI in ~/.local/bin is usable there right away when the user's
 # PATH already had ~/.local/bin -- the common case on a re-install. Without this,
 # such a user was told "open a new terminal" while their shell already found the
 # CLI. Conservative: an unset or empty TRACEBLOC_LAUNCH_PATH, or a BIN
-# that is not an absolute path, is "no". A bootstrap older than common.sh has already
-# prepended ~/.local/bin by the time common.sh captures the PATH, so common.sh drops
+# that is not an absolute path, is "no". A bootstrap older than this capture has already
+# prepended ~/.local/bin by the time settings.sh captures the PATH, so settings.sh drops
 # that leading entry from the capture instead of trusting it.
 _cli_on_launch_path() {
   local bin="${1:-}" dir
@@ -327,7 +327,7 @@ install_tracebloc_cli() {
   local _cli_out _cli_rc=0
   _cli_out="$(mktemp)" || _cli_out=""
   # Appended, never truncated: without a temp file the fallback is the install log.
-  # Under umask 022, not the core's 077 (common.sh): the CLI it installs is for this
+  # Under umask 022, not the core's 077 (settings.sh): the CLI it installs is for this
   # user's every shell, and under 077 it would land 0700.
   # It inherits TRACEBLOC_COSIGN, the pinned cosign the shim or install.sh already
   # checked, and reuses it on the same checksum check instead of downloading it

@@ -10,7 +10,7 @@ _log_cluster_status() {
   # (|| true only swallows the exit code, not an indefinite block).
   kubectl cluster-info --request-timeout=5s >> "${LOG_FILE:-/dev/null}" 2>&1 || true
   kubectl get nodes -o wide --request-timeout=5s >> "${LOG_FILE:-/dev/null}" 2>&1 || true
-  kubectl get pods -n "${TB_NAMESPACE:-default}" -o wide --request-timeout=5s >> "${LOG_FILE:-/dev/null}" 2>&1 || true
+  kubectl get pods -n "${namespace:-default}" -o wide --request-timeout=5s >> "${LOG_FILE:-/dev/null}" 2>&1 || true
   log "--- End Cluster Status ---"
 }
 
@@ -31,16 +31,16 @@ TRACEBLOC_CLIENT_STATE=""
 # images isn't reported "not connected" while still healthily starting. Kept in
 # sync with scripts/spec/facts.env (check-facts.sh); override via
 # TRACEBLOC_READY_TIMEOUT. An inherited READY_TIMEOUT is ignored.
-READY_TIMEOUT="${TRACEBLOC_READY_TIMEOUT:-600}"
+ready_timeout="${TRACEBLOC_READY_TIMEOUT:-600}"
 # A run that would end starting with MySQL's first boot still running then waits for
 # it, up to TB_MYSQL_FIRST_BOOT_STALL_S plus two progress lines more (_mysql_first_boot_settle):
-# about 660 s on top of READY_TIMEOUT. TRACEBLOC_MYSQL_FIRST_BOOT_SETTLE=0 turns that off,
+# about 660 s on top of ready_timeout. TRACEBLOC_MYSQL_FIRST_BOOT_SETTLE=0 turns that off,
 # for a user who asks; CI never sets it (a CI journey always runs the code path it
 # checks: the tester's hard rule).
 
 wait_for_client_ready() {
-  local ns="${TB_NAMESPACE:-default}"
-  _client_ready_gate "$ns" "$READY_TIMEOUT"
+  local ns="${namespace:-default}"
+  _client_ready_gate "$ns" "$ready_timeout"
   # jobs-manager's wait-for-mysql gives up and backs off before a slow first boot's
   # stall, so the gate can read crash while MySQL's first boot is still running. That
   # crash, and only that one (the first boot read as running, mysql-client not
@@ -96,7 +96,7 @@ _only_wait_for_mysql_backing_off() {
 _client_ready_gate() {
   local ns="$1"
   # The workloads that must be Ready are READ from the release, not rebuilt from
-  # the namespace: _client_workloads (common.sh) is the one helper
+  # the namespace: _client_workloads (kube.sh) is the one helper
   # the stop-and-check gate (assess.sh) and --diagnose use too, and the
   # PowerShell installer's Get-ClientWorkloads is its guarded twin. A read that
   # cannot resolve all three is a client that is not all there, so it takes the
@@ -338,7 +338,7 @@ _now() { printf '%s' "$SECONDS"; }
 
 # _mysql_first_boot_settle NS -- a first boot still running when the readiness gate
 # ends is waited on until it ends, or until its own count reaches the stall, so
-# print_summary can tell a stall from a slow start. The gate's READY_TIMEOUT (600 s)
+# print_summary can tell a stall from a slow start. The gate's ready_timeout (600 s)
 # starts before mysql-first-boot does, so its count is still short of the stall when
 # the gate gives up. A pod read that cannot tell keeps waiting. A progress line that
 # cannot be read counts on from the last one read (by _now); with none ever read,
@@ -698,7 +698,7 @@ _prepull_skip() {
 # _prepull_training_parent -- the step. Runs from main() after the example use case
 # and before print_summary; returns 0 always.
 _prepull_training_parent() {
-  local ns="${TB_NAMESPACE:-default}" out rc=0 name="" platforms="" manifest host store disk image sub gb what="the parent"
+  local ns="${namespace:-default}" out rc=0 name="" platforms="" manifest host store disk image sub gb what="the parent"
   log "training prepull: start"
   if ! _gpu_wired; then _prepull_skip "not GPU-wired (only the GPU training images build FROM the torch parent)"; return 0; fi
   if [[ -n "${TRACEBLOC_SKIP_TRAINING_PREPULL:-}" ]]; then _prepull_skip "TRACEBLOC_SKIP_TRAINING_PREPULL is set"; return 0; fi
@@ -772,7 +772,7 @@ _prepull_cpu_skip() {
 # _prepull_training_cpu -- the step. Runs from main() right after
 # wait_for_client_ready and before setup_example_use_case. Returns 0 always.
 _prepull_training_cpu() {
-  local ns="${TB_NAMESPACE:-default}" out rc=0 name manifest store disk image sub job
+  local ns="${namespace:-default}" out rc=0 name manifest store disk image sub job
   log "training prepull (cpu): start"
   if [[ -n "${TRACEBLOC_SKIP_TRAINING_PREPULL:-}" ]]; then _prepull_cpu_skip "TRACEBLOC_SKIP_TRAINING_PREPULL is set"; return 0; fi
   out="$(_bounded "$TB_PREPULL_CALL_S" kubectl get configmap -n "$ns" -l "app.kubernetes.io/component=${TB_PREPULL_CPU_COMPONENT}" \
@@ -957,7 +957,7 @@ print_summary() {
   if _gpu_wired; then
     mode="NVIDIA GPU"
     # Native k3s: the runtime is wired, but the node advertised no GPU after the
-    # install (k3s.sh _native_k3s_gpu_verify, which warned with the remedy).
+    # install (k3s-gpu.sh _native_k3s_gpu_verify, which warned with the remedy).
     [[ -z "${TB_K3S_GPU_UNCONFIRMED:-}" ]] || mode="NVIDIA GPU, not confirmed (see the GPU warning above)"
   elif [[ "$GPU_VENDOR" == "amd" ]]; then
     mode="AMD GPU"
@@ -971,10 +971,10 @@ print_summary() {
     # _mac_ct_runner_gpu_ready, _mac_ct_runner_bundle_rendered): every training runs on the CPU.
     training="CPU (GPU training on Macs is switched off for now)"
   fi
-  local ns="${TB_NAMESPACE:-default}"
+  local ns="${namespace:-default}"
   local cver; cver="$(_chart_version "$ns")"
-  # Footer log path: HOST_DATA_DIR with $HOME collapsed to ~ (e.g. ~/.tracebloc).
-  local logdisp="${HOST_DATA_DIR:-$HOME/.tracebloc}"
+  # Footer log path: host_data_dir with $HOME collapsed to ~ (e.g. ~/.tracebloc).
+  local logdisp="${host_data_dir:-$HOME/.tracebloc}"
   local kc="" machine="${_TB_MACHINE_NAME:-}" logdir
   if [[ -n "${HOME:-}" && "$logdisp" == "$HOME"* ]]; then logdisp="~${logdisp#"$HOME"}"; fi
   logdir="$(_summary_log_dir)"
@@ -1084,7 +1084,7 @@ _gpu_test_cmd() {
   local vendor="$1" image smi spec
   case "$vendor" in
     nvidia)
-      # The class is the runtime step c's gate found on native k3s (common.sh
+      # The class is the runtime step c's gate found on native k3s (kube.sh's
       # _gpu_runtime_class).
       image="nvidia/cuda:12.3.1-base-ubuntu22.04"; smi="nvidia-smi"
       spec="\"runtimeClassName\":\"$(_gpu_runtime_class)\"," ;;
@@ -1115,7 +1115,7 @@ _log_advanced_info() {
   log "Useful commands:"
   log "  $(tb_kubectl_shown) get nodes -o wide"
   log "  $(tb_kubectl_shown) get pods -A"
-  log "  $(tb_kubectl_shown) get pods -n ${TB_NAMESPACE:-default}"
+  log "  $(tb_kubectl_shown) get pods -n ${namespace:-default}"
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; then
     local ct node
     ct="$(_mac_ct_install_root 2>/dev/null)/bin/container"; node="$(_mac_ct_node_name 2>/dev/null)"

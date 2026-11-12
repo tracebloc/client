@@ -25,7 +25,7 @@
 #   2. on Linux, the record's root copy, when this process reaches it without a
 #      password (tb_substrate_resolve reads the two in the same order);
 #   3. with no record at all: each kubeconfig file ($KUBECONFIG, else
-#      ~/.kube/config) and its context k3d-<CLUSTER_NAME>, which k3d writes for
+#      ~/.kube/config) and its context k3d-<cluster_name>, which k3d writes for
 #      the cluster an install from before the record created.
 # When none of them says so, Docker answers (_reinstall_k3d_live).
 _reinstall_k3d_said() {
@@ -50,14 +50,14 @@ _reinstall_k3d_said() {
       "Move ${dst} aside, then run the installer again:"
     return
   fi
-  ctx="k3d-${CLUSTER_NAME:-}"
+  ctx="k3d-${cluster_name:-}"
   kc="${KUBECONFIG:-${HOME:-}/.kube/config}"
   local IFS=:
   for f in $kc; do
     [[ -n "$f" && -e "$f" ]] || continue
     rc=0; _reinstall_kubeconfig_has "$ctx" "$f" || rc=$?
     case "$rc" in
-      0) TB_REINSTALL_SAID="it has no install record (its install is older than the record), and your kubeconfig ${f} has the context '${ctx}', which k3d writes for a cluster named '${CLUSTER_NAME:-}'"
+      0) TB_REINSTALL_SAID="it has no install record (its install is older than the record), and your kubeconfig ${f} has the context '${ctx}', which k3d writes for a cluster named '${cluster_name:-}'"
          TB_REINSTALL_CTX="$ctx"
          return 0 ;;
       1) ;;
@@ -68,7 +68,7 @@ _reinstall_k3d_said() {
     esac
   done
   IFS=$' \t\n'   # the loop's IFS is this function's local; the probe gets the default
-  _reinstall_k3d_live "${CLUSTER_NAME:-}"
+  _reinstall_k3d_live "${cluster_name:-}"
 }
 
 # _reinstall_k3d_live NAME -- _reinstall_k3d_said's answer from Docker, which keeps
@@ -102,7 +102,7 @@ _reinstall_k3d_live() {
 # not be read), with REMEDY and NEXT as TB_REINSTALL_REMEDY and TB_REINSTALL_NEXT. A substrate the record names decides over its artefacts; a record
 # with no substrate field says k3d when it lists an artefact only k3d records
 # (_reinstall_k3d_artefact). The context is k3d's for the record's cluster, else
-# CLUSTER_NAME's.
+# cluster_name's.
 _reinstall_record_says() {
   local sub name kind
   if sub="$(printf '%s' "$2" | _tb_record_substrate_in)"; then
@@ -118,7 +118,7 @@ _reinstall_record_says() {
   name="$(_tb_record_prior cluster_name "$2")"; name="${name#\"}"; name="${name%\"}"
   [[ "$name" != null ]] || name=""
   [[ -z "$name" ]] || TB_REINSTALL_SAID+=" (cluster '${name}')"
-  TB_REINSTALL_RECORD="$4"; TB_REINSTALL_CTX="k3d-${name:-${CLUSTER_NAME:-}}"
+  TB_REINSTALL_RECORD="$4"; TB_REINSTALL_CTX="k3d-${name:-${cluster_name:-}}"
   return 0
 }
 
@@ -172,7 +172,7 @@ _reinstall_context_in() {
 # _reinstall_exists_as USER FILE -- 0 when FILE exists as USER finds it, 1 when it
 # does not, 2 when this run cannot ask as USER. USER root asks as root (tb_root_n),
 # any other USER as them (tb_root_as); both are the root executor's, so --print asks
-# as this user instead (common.sh, _tb_root_reads).
+# as this user instead (root.sh, _tb_root_reads).
 _reinstall_exists_as() {
   local a
   if [[ "$1" == root ]]; then
@@ -214,19 +214,19 @@ _reinstall_k3d_said_for() {
        return ;;
     2) _reinstall_unread_as root "the install record's root copy ${dst}"; return 2 ;;
   esac
-  ctx="k3d-${CLUSTER_NAME:-}"; kc="${h}/.kube/config"; rc=0
+  ctx="k3d-${cluster_name:-}"; kc="${h}/.kube/config"; rc=0
   _reinstall_exists_as "$u" "$kc" || rc=$?
   case "$rc" in
-    1) _reinstall_k3d_live "${CLUSTER_NAME:-}"; return ;;
+    1) _reinstall_k3d_live "${cluster_name:-}"; return ;;
     2) _reinstall_unread_as "$u" "${u}'s kubeconfig ${kc}"; return 2 ;;
   esac
   rc=0
   if text="$(tb_root_as "$u" cat "$kc" 2>/dev/null)"; then _reinstall_context_in "$ctx" <<<"$text" || rc=$?; else rc=2; fi
   case "$rc" in
-    0) TB_REINSTALL_SAID="${u} has no install record (their install is older than the record), and their kubeconfig ${kc} has the context '${ctx}', which k3d writes for a cluster named '${CLUSTER_NAME:-}'"
+    0) TB_REINSTALL_SAID="${u} has no install record (their install is older than the record), and their kubeconfig ${kc} has the context '${ctx}', which k3d writes for a cluster named '${cluster_name:-}'"
        TB_REINSTALL_CTX="$ctx"
        return 0 ;;
-    1) _reinstall_k3d_live "${CLUSTER_NAME:-}"; return ;;
+    1) _reinstall_k3d_live "${cluster_name:-}"; return ;;
   esac
   TB_REINSTALL_SAID="${u} has no install record, and their kubeconfig ${kc} cannot be read"
   TB_REINSTALL_REMEDY="Make it readable for ${u}, then re-run prepare-host."
@@ -258,7 +258,7 @@ refuse_k3d_machine() {
   declare -F _native_k3s_refuse_host >/dev/null 2>&1 \
     || error "This installer build can't check whether native k3s can run here (stale bootstrap). Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
   # Every exit below is a refusal, so install_cleanup prints no "try again" footer.
-  # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
+  # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (errors.sh)
   TB_EXIT_REFUSED=1
   _native_k3s_refuse_host
   _reinstall_k3d_said || rc=$?
@@ -399,7 +399,7 @@ _reinstall_drop_context() {
 # refuse_k3d_machine over the administrator's own data.
 refuse_k3d_for_user() {
   local rc=0
-  # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
+  # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (errors.sh)
   TB_EXIT_REFUSED=1
   _reinstall_k3d_said_for "$1" "$2" || rc=$?
   _reinstall_refuse "$rc"
@@ -430,7 +430,7 @@ _reinstall_refuse() {
   local head="This machine runs an older tracebloc install" runs="this machine runs an older tracebloc install" whose="your"
   [[ -z "$who" ]] || { runs="${who} runs an older tracebloc install on this machine"; head="$runs"; whose="${who}'s"; }
   [[ "$1" == 1 ]] || _reinstall_log_open
-  # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
+  # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (errors.sh)
   case "$1" in
     1) TB_EXIT_REFUSED=""; return 0 ;;
     2) if [[ -n "$who" ]]; then tb_fail_next "${TB_REINSTALL_NEXT/run the installer again/run prepare-host again}" ""; else tb_fail_next "$TB_REINSTALL_NEXT"; fi

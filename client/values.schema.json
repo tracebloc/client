@@ -377,7 +377,7 @@
           "type": "string",
           "default": "/tracebloc",
           "pattern": "^/",
-          "description": "Base host path of the local hostPath tree: the mysql and logs PVs are <root>/<release>/{mysql,logs}, and an unset datasetPath is root. Default /tracebloc. On native k3s the node is the host, so the installer sets it to HOST_DATA_DIR. Must be absolute, like datasetPath."
+          "description": "Base host path of the local hostPath tree: the mysql and logs PVs are <root>/<release>/{mysql,logs}, and an unset datasetPath is root. Default /tracebloc. On native k3s the node is the host, so the installer sets it to TRACEBLOC_HOST_DATA_DIR. Must be absolute, like datasetPath."
         },
         "datasetPath": {
           "type": [

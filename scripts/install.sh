@@ -50,9 +50,9 @@
 set -euo pipefail
 
 # ── Minimal colours for THIS script's own output ─────────────────────────────
-# common.sh (which owns the shared colour palette + helpers) is one of the files
+# output.sh (which owns the shared colour palette + helpers) is one of the files
 # this bootstrap is about to fetch and verify, so it isn't sourced yet. Define a
-# small local palette, disabled under the same rule as common.sh's: stdout not a
+# small local palette, disabled under the same rule as output.sh's: stdout not a
 # terminal, NO_COLOR, TERM=dumb or TRACEBLOC_PLAIN=1. _tb_anim says
 # whether this script's own spinner frames may redraw in place; plain, each step
 # prints one static line instead.
@@ -67,7 +67,7 @@ fi
 
 # The bootstrap's live line: on a terminal a spinner with the time spent, redrawn in
 # place by a background ticker until _tb_boot_live_end; plain, nothing (the copy has
-# no line for these waits, only their ✔). Mirrors common.sh's tb_live_quiet.
+# no line for these waits, only their ✔). Mirrors progress.sh's tb_live_quiet.
 _tb_boot_live_pid=""; _tb_boot_live_msg=""; _tb_boot_live_t0=0
 _tb_boot_live() {
   _tb_boot_live_end
@@ -104,7 +104,7 @@ _tb_boot_hold() {
   _tb_boot_kill
   printf '\r\033[K'
 }
-# SIGKILL, never TERM (common.sh's _tb_live_kill): until the ticker has reset the traps
+# SIGKILL, never TERM (progress.sh's _tb_live_kill): until the ticker has reset the traps
 # it inherited, a TERM runs this script's EXIT trap inside it, whose rm -rf "$TMPDIR"
 # deletes the files just fetched (bash 5.2: 21-29 of 1000 stops). No trap catches a KILL.
 _tb_boot_kill() {
@@ -164,15 +164,13 @@ BRANCH="${TRACEBLOC_BRANCH:-}"
 [[ "${TRACEBLOC_FORCE_REINSTALL:-0}" == "1" ]] && { _tb_bail_ok=0; _tb_force=1; }
 [[ "${TRACEBLOC_ALLOW_UNVERIFIED:-0}" == "1" ]] && { _tb_bail_ok=0; _tb_force=1; }
 [[ -n "${REF:-}" || -n "${BRANCH:-}" ]] && { _tb_bail_ok=0; _tb_force=1; }
-# `tracebloc upgrade` (TRACEBLOC_UPGRADE_CLI=1; TB_UPGRADE_CLI=1 from a CLI that
-# sets only that spelling, read when the TRACEBLOC_ one is unset or blank): the
-# user explicitly asked to bring the CLI to the latest release. Skip the
-# healthy bailout so we reach install-k8s.sh, whose stop-and-check gate — seeing
-# the same flag — goes on to the normal flow: step b brings the CLI to latest and
-# step c moves the node forward. NOT a forced reinstall: leave _tb_force at 0. A
-# below-floor CLI is the gate's cli-outdated case either way, so the floor keeps
-# its stricter meaning.
-[[ "${TRACEBLOC_UPGRADE_CLI:-${TB_UPGRADE_CLI:-0}}" == "1" ]] && _tb_bail_ok=0
+# `tracebloc upgrade` (TRACEBLOC_UPGRADE_CLI=1): the user explicitly asked to bring
+# the CLI to the latest release. Skip the healthy bailout so we reach install-k8s.sh,
+# whose stop-and-check gate — seeing the same flag — goes on to the normal flow: step
+# b brings the CLI to latest and step c moves the node forward. NOT a forced
+# reinstall: leave _tb_force at 0. A below-floor CLI is the gate's cli-outdated case
+# either way, so the floor keeps its stricter meaning.
+[[ "${TRACEBLOC_UPGRADE_CLI:-0}" == "1" ]] && _tb_bail_ok=0
 # An explicit substrate request (TRACEBLOC_SUBSTRATE set to anything; empty is
 # none, as install-k8s.sh reads it) is install-k8s.sh's to answer, so it skips ONLY
 # the bailout, with no _tb_force. install-k8s.sh hands a healthy
@@ -205,7 +203,7 @@ done
 
 # The bailout answers only a machine whose user record names k3s, the one substrate
 # served here; any other machine is install-k8s.sh's, which refuses one on k3d before
-# its own healthy gate. The parse is common.sh's _tb_record_substrate_in.
+# its own healthy gate. The parse is substrate.sh's _tb_record_substrate_in.
 _tb_record_served() {
   local f="${HOME:-}/.tracebloc/install-record.json" k='"substrate"' flat rest
   [[ -n "${HOME:-}" && -f "$f" && -r "$f" ]] || return 1
@@ -236,7 +234,7 @@ _tb_check_healthy() {
   # ARRAY of glyphs, not a single string: the braille frames are 3-byte UTF-8, and
   # macOS's system bash 3.2 slices `${str:i:1}` and counts `${#str}` by BYTES, so a
   # string form renders mid-glyph garbage. An array indexes whole elements on 3.2
-  # (matches spin() in lib/common.sh).
+  # (matches spin() in lib/progress.sh).
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏') i=0 f
   maxticks=$(( timeout * 5 ))
   # </dev/null: under `curl … | bash` stdin is the install pipe, so a
@@ -265,10 +263,7 @@ _tb_check_healthy() {
 # step reads it to say "run it now" when the CLI's directory was already on it,
 # and "open a new terminal" only when it was not (install-cli.sh,
 # _cli_on_launch_path). Kept when already set, so a nested run keeps the first.
-# TRACEBLOC_LAUNCH_PATH is the name (TB_ is a banned prefix); the
-# legacy TB_LAUNCH_PATH is read as the fallback (remove_by 2026-12-31). Only the
-# canonical is exported: the core libs this bootstrap fetches read it first.
-export TRACEBLOC_LAUNCH_PATH="${TRACEBLOC_LAUNCH_PATH:-${TB_LAUNCH_PATH:-${PATH:-}}}"
+export TRACEBLOC_LAUNCH_PATH="${TRACEBLOC_LAUNCH_PATH:-${PATH:-}}"
 
 # The CLI installer drops the binary in ~/.local/bin when /usr/local/bin isn't
 # writable, and a fresh curl|bash shell doesn't have that on PATH — so mirror
@@ -473,62 +468,45 @@ SIGNER_REPOS='client|client-dev'
 # on a tag ref: every signed release to date (sampled v1.8.2 … v1.9.123 against the
 # published certs on 2026-09-17) carries
 #   https://github.com/tracebloc/<repo>/.github/workflows/release-helm-chart.yaml@refs/tags/vX.Y.Z
-# Anchored at the start so a look-alike host or org cannot prefix its way in;
-# cosign matches the regexp unanchored otherwise.
+# Anchored so a look-alike host or org cannot prefix its way in (cosign matches unanchored).
 SIGNER_ID_RE="^https://github\.com/tracebloc/(${SIGNER_REPOS})/\.github/workflows/release-helm-chart\.yaml@refs/tags/v.*"
 TMPDIR="$(mktemp -d)"
-# The trap must not turn an abort into a success. On macOS /bin/bash 3.2 a
-# `set -u` abort under an EXIT trap exits with the trap's last status (0 after
-# the rm), and `$?` inside the trap is the last COMPLETED command's status, so
-# `rc=$?; ...; exit $rc` exits 0 too (measured on 3.2.57). So the
-# trap fails closed: a 0 becomes 1 unless the script reached its normal end
-# and set _tb_done=1. Every other exit below the trap is `exit 1`. A live line still
-# drawing (a Ctrl-C mid-download) is ended, so the cursor comes back.
+# The trap must not turn an abort into a success. On macOS /bin/bash 3.2 a `set -u` abort under an EXIT
+# trap exits with the trap's last status (0 after the rm), and `$?` inside the trap is the last COMPLETED
+# command's status, so `rc=$?; ...; exit $rc` exits 0 too (measured on 3.2.57). So the trap fails closed:
+# a 0 becomes 1 unless the script reached its normal end and set _tb_done=1. Every other exit below the
+# trap is `exit 1`. A live line still drawing (a Ctrl-C mid-download) is ended.
 _tb_done=0
 trap '_tb_rc=$?; _tb_boot_live_end; rm -rf "$TMPDIR"; if [ "$_tb_rc" -eq 0 ] && [ "$_tb_done" != 1 ]; then _tb_rc=1; fi; exit "$_tb_rc"' EXIT
 
 mkdir -p "$TMPDIR/lib"
 
-# The sub-scripts to fetch. This list is the integrity surface — every entry
-# must have a digest in manifest.sha256 (the manifest is generated from exactly
-# this set at release time; see scripts/gen-manifest.sh). Keep it in sync.
-# scripts/vendor/k3s-install.sh is not a lib: it is upstream k3s's install.sh at
-# the pinned tag, which native k3s runs from here instead of downloading it on
-# every run.
+# The sub-scripts to fetch, the integrity surface: each has a digest in manifest.sha256, generated
+# from exactly this set at release (gen-manifest.sh --check); scripts/vendor/k3s-install.sh is upstream k3s's pinned install.sh, not a lib.
 FILES=(
-  "scripts/install-k8s.sh"
-  "scripts/lib/common.sh"
-  "scripts/lib/telemetry.sh"
-  "scripts/lib/preflight.sh"
-  "scripts/lib/detect-gpu.sh"
-  "scripts/lib/gpu-nvidia.sh"
-  "scripts/lib/gpu-amd.sh"
-  "scripts/lib/setup-macos.sh"
-  "scripts/lib/setup-linux.sh"
-  "scripts/lib/cluster.sh"
-  "scripts/lib/k3s.sh"
-  "scripts/lib/k3s-firewall.sh"
-  "scripts/lib/mac-container.sh"
-  "scripts/lib/gpu-plugins.sh"
-  "scripts/lib/install-client-helm.sh"
-  "scripts/lib/install-cli.sh"
-  "scripts/lib/provision.sh"
-  "scripts/lib/assess.sh"
-  "scripts/lib/reinstall.sh"
-  "scripts/lib/probe.sh"
-  "scripts/lib/summary.sh"
-  "scripts/lib/diagnose.sh"
-  "scripts/vendor/k3s-install.sh"
+  "scripts/install-k8s.sh" "scripts/lib/output.sh" "scripts/lib/progress.sh"
+  "scripts/lib/errors.sh" "scripts/lib/retry.sh" "scripts/lib/download.sh"
+  "scripts/lib/root.sh" "scripts/lib/kube.sh" "scripts/lib/settings.sh"
+  "scripts/lib/host.sh" "scripts/lib/substrate.sh" "scripts/lib/record.sh"
+  "scripts/lib/telemetry.sh" "scripts/lib/preflight.sh" "scripts/lib/preflight-storage.sh"
+  "scripts/lib/detect-gpu.sh" "scripts/lib/gpu-nvidia.sh" "scripts/lib/gpu-amd.sh"
+  "scripts/lib/setup-macos.sh" "scripts/lib/setup-linux.sh" "scripts/lib/cluster.sh"
+  "scripts/lib/k3s.sh" "scripts/lib/k3s-firewall.sh" "scripts/lib/k3s-apparmor.sh"
+  "scripts/lib/k3s-gpu.sh" "scripts/lib/k3s-prepared.sh" "scripts/lib/mac-runtime.sh"
+  "scripts/lib/mac-container.sh" "scripts/lib/mac-login-items.sh" "scripts/lib/gpu-plugins.sh"
+  "scripts/lib/install-client-helm.sh" "scripts/lib/training-fit.sh"
+  "scripts/lib/credentials.sh" "scripts/lib/dashboard-link.sh" "scripts/lib/chart-source.sh" "scripts/lib/helm-release.sh"
+  "scripts/lib/install-cli.sh" "scripts/lib/provision.sh" "scripts/lib/assess.sh"
+  "scripts/lib/reinstall.sh" "scripts/lib/probe.sh" "scripts/lib/summary.sh"
+  "scripts/lib/diagnose.sh" "scripts/vendor/k3s-install.sh"
 )
 
-# ONE backoff schedule for every release download — the sub-scripts below and
-# the optional trust assets fetch_optional gets — so the two can't drift apart.
-# Each entry is the wait before the next attempt, so ${#DL_DELAYS[@]}+1 attempts
-# over ~75 s. It used to be three attempts 5 s apart in each function, ~10 s in
-# all, and a GitHub 500 on a sub-script one minute after a release was published
-# outlasted that and failed a fresh install at "Downloading".
-# Only a failure that a wait can cure is retried: no answer
-# (000 — DNS, a refused connect), 408, 429, or a 5xx. A 4xx other than 408 and
+# ONE backoff schedule for every release download — the sub-scripts below and the optional trust
+# assets fetch_optional gets — so the two can't drift apart. Each entry is the wait before the next
+# attempt, so ${#DL_DELAYS[@]}+1 attempts over ~75 s. It used to be three attempts 5 s apart in each
+# function, ~10 s in all, and a GitHub 500 on a sub-script one minute after a release was published
+# outlasted that and failed a fresh install at "Downloading". Only a failure that a wait can cure is
+# retried: no answer (000 — DNS, a refused connect), 408, 429, or a 5xx. A 4xx other than 408 and
 # 429 is the server's answer and returns at once.
 #
 # The status is read only after curl has FAILED, and curl -f fails on a status
@@ -597,8 +575,7 @@ download_with_retry() {
 # release cut before signing, or before the offline bundle, has no such asset),
 # so it returns at once. A timeout, a reset (before or after the status line), a
 # 5xx is a blip and gets the same schedule download_with_retry gives every
-# sub-script. These fetches used to be
-# single-shot, so one dropped connection on the manifest refused the whole
+# sub-script. These fetches used to be single-shot, so one dropped connection on the manifest refused the whole
 # install as "couldn't fetch the integrity checksums" on a release whose assets
 # had been published for hours.
 fetch_optional() {
@@ -955,7 +932,7 @@ ensure_cosign() {
 verify_installer_manifest
 
 # ── Banner ───────────────────────────────────────────────────────────────────
-# Draw the first-run title here (mirrors common.sh::print_banner) so the
+# Draw the first-run title here (mirrors output.sh::print_banner) so the
 # curl|bash path shows it above "Downloading". Export TRACEBLOC_BANNER_SHOWN
 # so the install-k8s.sh we're about to fetch doesn't draw a SECOND banner, and
 # TRACEBLOC_INSTALL_REF so its title can state the version on the direct path.

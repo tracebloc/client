@@ -59,7 +59,7 @@ the pinned tag:
 | `install.ps1` | release job, `$DefaultRef` stamped to the tag | the Windows entrypoint (pin, §7) |
 | `install.sh.bundle` | `cosign sign-blob --bundle` over the **stamped** `install.sh` | the bootstrap itself, before it runs (§2a) |
 | `install.ps1.bundle` | `cosign sign-blob --bundle` over the **stamped** `install.ps1` | the Windows bootstrap itself, before it runs (§2a) |
-| `manifest.sha256` | `scripts/gen-manifest.sh` | every sub-script's bytes (both platforms) |
+| `manifest.sha256` | `tooling/gen-manifest.sh` | every sub-script's bytes (both platforms) |
 | `manifest.sha256.sig` | `cosign sign-blob` (keyless) | authenticity of the manifest |
 | `manifest.sha256.cert` | `cosign sign-blob` (keyless) | the cert the sig verifies against |
 | `manifest.sha256.bundle` | `cosign sign-blob --bundle` | offline Sigstore bundle (sig+cert+Rekor proof) |
@@ -67,7 +67,7 @@ the pinned tag:
 | the ~20 sub-scripts | attached flat by basename from `gen-manifest.sh --print-files` | the privileged code the manifest hashes |
 
 Sub-script **content** is served as **release assets** too, one flat asset per
-sub-script addressed by basename (`$BASE/install-k8s.sh`, `$BASE/common.sh`, …).
+sub-script addressed by basename (`$BASE/install-k8s.sh`, `$BASE/settings.sh`, …).
 It used to be pulled from the tag *tree* (`raw.githubusercontent.com/.../<tag>/scripts/...`),
 which is **unreliable by construction on the public mirror**, for
 two reasons: the mirror carries no `scripts/` tree at all today (its default
@@ -120,7 +120,7 @@ auto-upgrade both check it, as below; verify a chart yourself with the recipe in
 
 **The installer checks the client chart before it changes anything.** At the end of
 step 1, on a host that already has curl (`verify_client_chart` in
-`scripts/lib/install-client-helm.sh`), it reads the Helm repository's index, takes
+`scripts/lib/chart-source.sh`), it reads the Helm repository's index, takes
 the newest stable `client` chart (the one `helm upgrade --install` takes with no
 `--version`), downloads it and the `<chart>.tgz.bundle` beside it, and verifies the
 chart against the bundle with the identity in §6. It then installs that checked
@@ -172,7 +172,7 @@ download failure, and the next tick tries again.
   whose keys Sigstore has moved on from never reaches the index.
 - **Each release must pass the previous chart's check.** Right after signing, the
   release runs the chart check of the newest released chart below it, with the keys
-  that chart ships, on the new client chart (`scripts/verify-with-previous-trust-root.sh`;
+  that chart ships, on the new client chart (`tooling/verify-with-previous-trust-root.sh`;
   the previous chart is read from the public index and held to its digest). A release
   that clients on that chart would refuse stops there, unpublished. So when Sigstore
   rotates one of these keys, a bridge release ships first: it carries the new keys and
@@ -207,7 +207,7 @@ job (runs on `release: published`, same trigger as the chart publish) that:
 
 1. Checks out the **released tag** (`github.event.release.tag_name`).
 2. Installs cosign (`sigstore/cosign-installer`, pinned `v2.4.1`).
-3. Runs `scripts/gen-manifest.sh` to generate `manifest.sha256` from the
+3. Runs `tooling/gen-manifest.sh` to generate `manifest.sha256` from the
    exact `FILES` the bootstrap fetches — the script cross-checks the two `FILES`
    lists and fails on drift, so a sub-script can never ship unlisted.
 4. `cosign sign-blob` → `manifest.sha256.sig` + `manifest.sha256.cert` (keyless;

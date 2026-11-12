@@ -138,9 +138,9 @@ The dedicated accounts are minted by jobs-manager at startup via runtime DDL (mi
 
 > **One ingestor pin for every prod secure environment.** An ingestor built from the change that removed the `edgeuser` fallback, or later (first released as `v0.8.8`), **requires** `DB_USER`/`DB_PASSWORD`, which jobs-manager injects as `tb_ingest`. With the service accounts always on, every secure environment gets them, so none needs an ingestor from before that change, and the chart pins one prod ingestor: `images.ingestor.prodDigestServiceDb`, on the `channelTags.prod` line (`0.12`). The older `images.ingestor.prodDigest` pin, which held secure environments with the accounts off at `v0.8.2`, is gone with its acknowledged-drift hold; a stored `prodDigest` is ignored. The invariant is checked in CI by `client-runtime/tests/test_ingestor_env_contract.py` against the contract `data-ingestors` publishes as `runtime_env.v1.json`.
 >
-> **The pin is watched.** `scripts/check-digest-drift.sh` runs on a schedule and reports whenever a float stops resolving to the pinned digest — deliberately without asserting anything about `DB_USER`, because the next thing to move will not be `DB_USER`.
+> **The pin is watched.** `tooling/check-digest-drift.sh` runs on a schedule and reports whenever a float stops resolving to the pinned digest — deliberately without asserting anything about `DB_USER`, because the next thing to move will not be `DB_USER`.
 >
-> **The prod pin moves by pull request once the build is re-verified.** When the `channelTags.prod` float names a newer patch on its line, the drift watch runs `scripts/verify-ingestor-release.sh` on it. That script checks, in order:
+> **The prod pin moves by pull request once the build is re-verified.** When the `channelTags.prod` float names a newer patch on its line, the drift watch runs `tooling/verify-ingestor-release.sh` on it. That script checks, in order:
 >
 > - the float, the exact tag and the release's GitHub Release all name one digest;
 > - that digest is an OCI index of exactly linux/amd64 and linux/arm64, whose version, revision and source labels agree on both platforms;
@@ -148,7 +148,7 @@ The dedicated accounts are minted by jobs-manager at startup via runtime DDL (mi
 > - both platforms' SLSA provenance names one successful run of the release workflow, pushed by that protected tag at that revision;
 > - `cosign verify` accepts the digest under the exact keyless signer identity of the release train's publish-path inventory, with GitHub's OIDC issuer.
 >
-> Only when every check passes does `scripts/ingestor-auto-pin.sh` open the pin PR. It moves the pin, its `VERIFIED` note and its `pinnedImageLabels` entry, and it runs the PR's required checks like any other. A read the verifier cannot make is a failed check. A failed check keeps the watch red, names the check in the run, and opens nothing; a person then re-verifies by hand. A newer verified release closes the watch's older pin PR. It never follows the float onto a new line: moving `channelTags.prod` to a new line, and the pin with it, is a person's change.
+> Only when every check passes does `tooling/ingestor-auto-pin.sh` open the pin PR. It moves the pin, its `VERIFIED` note and its `pinnedImageLabels` entry, and it runs the PR's required checks like any other. A read the verifier cannot make is a failed check. A failed check keeps the watch red, names the check in the run, and opens nothing; a person then re-verifies by hand. A newer verified release closes the watch's older pin PR. It never follows the float onto a new line: moving `channelTags.prod` to a new line, and the pin with it, is a person's change.
 
 **Staged retirement:** **S1** mint `tb_meta` + `tb_ingest` (done) → **S2** switch jobs-manager, requests-proxy, and spawned ingestion Jobs off the hardcoded `edgeuser` constants onto the injected identities, and re-parent the `tb_credmgr` bootstrap → **S3** `REVOKE` `edgeuser` to nothing and `DROP USER`, fleet-staged. `edgeuser` must retain `CREATE USER` + `GRANT OPTION` until the bootstrap is re-parented, so the revoke is deliberately last.
 
@@ -305,7 +305,7 @@ runs first, as root.
   neither find nor bootstrap cosign it **fails closed** rather than degrading to
   a same-channel checksum.
 
-**Where implemented:** `scripts/install.sh` (verification), `scripts/gen-manifest.sh`
+**Where implemented:** `scripts/install.sh` (verification), `tooling/gen-manifest.sh`
 (manifest generation), `.github/workflows/release-helm-chart.yaml`
 (`sign-installer-manifest` job: generate + sign + stamp + attach), and the CLI's
 own installer for the leaf binary (`tracebloc/cli` `scripts/install.sh`, made

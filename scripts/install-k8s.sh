@@ -30,7 +30,6 @@
 #    TRACEBLOC_CLUSTER_NAME=myapp  default: tracebloc
 #    TRACEBLOC_NAMESPACE=myns    default: tracebloc  (k8s namespace + local label;
 #                                not prompted — the client is identified by its credentials)
-#    TB_NAMESPACE=myns           legacy alias for TRACEBLOC_NAMESPACE, remove_by 2026-12-31
 #    TRACEBLOC_HELM_VERSION=v4.2.3  default: v4.2.3  (Helm release tag; "latest" resolves at install time)
 #    TRACEBLOC_HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
 #    TRACEBLOC_STORAGE_MODE=hostpath  default: node-local
@@ -80,37 +79,49 @@ SCRIPT_DIR="$(dirname "$(_realpath "$0")")"
 LIB_DIR="${SCRIPT_DIR}/lib"
 
 # ── Source modules ───────────────────────────────────────────────────────────
-source "${LIB_DIR}/common.sh"
-# telemetry.sh is sourced right after common.sh so the install clock starts before any
-# work does, and so common.sh's step_header / install_cleanup hooks find their functions.
-# Guarded like the other late additions: an older bootstrap (e.g. a not-yet-updated
-# tracebloc.io/i.sh, whose FILES list is hand-maintained) may not have fetched it, and an
-# installer that aborted because it could not report on itself would be a poor trade.
+# A stale bootstrap (tracebloc.io/i.sh: its FILES list is hand-maintained) may not have fetched
+# a module. Refuse by name before the first source; plain printf, since errors.sh may be the one missing.
+_tb_missing=""
+for _tb_m in settings output progress errors retry download root kube host substrate record \
+  preflight preflight-storage detect-gpu gpu-nvidia gpu-amd setup-macos setup-linux cluster k3s k3s-firewall \
+  k3s-apparmor k3s-gpu k3s-prepared gpu-plugins install-client-helm training-fit credentials dashboard-link chart-source helm-release summary diagnose; do
+  [[ -f "${LIB_DIR}/${_tb_m}.sh" ]] || _tb_missing="${_tb_missing} ${_tb_m}.sh"
+done
+if [[ -n "$_tb_missing" ]]; then
+  printf 'This installer is missing:%s\nIt came from an out-of-date copy of the bootstrap. Run the installer again:\n  bash <(curl -fsSL https://tracebloc.io/i.sh)\n' "$_tb_missing" >&2
+  exit 1
+fi
+unset _tb_m _tb_missing
+source "${LIB_DIR}/settings.sh"; source "${LIB_DIR}/output.sh"; source "${LIB_DIR}/progress.sh"
+source "${LIB_DIR}/errors.sh"; source "${LIB_DIR}/retry.sh"; source "${LIB_DIR}/download.sh"
+source "${LIB_DIR}/root.sh"; source "${LIB_DIR}/kube.sh"; source "${LIB_DIR}/host.sh"
+source "${LIB_DIR}/substrate.sh"; source "${LIB_DIR}/record.sh"
+# telemetry.sh next, so the install clock starts before any work and step_header / install_cleanup find its
+# hooks. Guarded: a stale bootstrap may lack it, and aborting for want of self-reporting is a poor trade.
 if [[ -f "${LIB_DIR}/telemetry.sh" ]]; then
   source "${LIB_DIR}/telemetry.sh"
 fi
-source "${LIB_DIR}/preflight.sh"
-source "${LIB_DIR}/detect-gpu.sh"
-source "${LIB_DIR}/gpu-nvidia.sh"
-source "${LIB_DIR}/gpu-amd.sh"
-source "${LIB_DIR}/setup-macos.sh"
-source "${LIB_DIR}/setup-linux.sh"
+source "${LIB_DIR}/preflight.sh"; source "${LIB_DIR}/preflight-storage.sh"; source "${LIB_DIR}/detect-gpu.sh"
+source "${LIB_DIR}/gpu-nvidia.sh"; source "${LIB_DIR}/gpu-amd.sh"; source "${LIB_DIR}/setup-macos.sh"; source "${LIB_DIR}/setup-linux.sh"
 source "${LIB_DIR}/cluster.sh"
 source "${LIB_DIR}/k3s.sh"
 source "${LIB_DIR}/k3s-firewall.sh"
-# mac-container.sh (2.1 part 6: native k3s on a Mac, in Apple's VM) may be absent under
-# a stale bootstrap. Guarded like the late additions below; a native k3s request on a
-# Mac without it is refused by name (_native_k3s_refuse_host), and nothing else reads it.
-if [[ -f "${LIB_DIR}/mac-container.sh" ]]; then
+source "${LIB_DIR}/k3s-apparmor.sh"
+source "${LIB_DIR}/k3s-gpu.sh"
+source "${LIB_DIR}/k3s-prepared.sh"
+# The macOS node (2.1 part 6) is three libs, all or none; a stale bootstrap may lack them (refused by name, _native_k3s_refuse_host).
+if [[ -f "${LIB_DIR}/mac-runtime.sh" && -f "${LIB_DIR}/mac-container.sh" && -f "${LIB_DIR}/mac-login-items.sh" ]]; then
+  source "${LIB_DIR}/mac-runtime.sh"
   source "${LIB_DIR}/mac-container.sh"
+  source "${LIB_DIR}/mac-login-items.sh"
 fi
 source "${LIB_DIR}/gpu-plugins.sh"
-source "${LIB_DIR}/install-client-helm.sh"
-# install-cli.sh may be absent if an older bootstrap copy (e.g. a not-yet-
-# updated tracebloc.io/i.sh, whose FILES list is hand-maintained) didn't fetch
-# it. Guard the source so a stale bootstrap degrades gracefully (Step 5 is
-# skipped) instead of aborting the whole installer under `set -e`. Use an `if`
-# block, NOT `[[ -f … ]] && source` — a false `&&` test trips `set -e`.
+source "${LIB_DIR}/install-client-helm.sh"; source "${LIB_DIR}/training-fit.sh"; source "${LIB_DIR}/credentials.sh"; source "${LIB_DIR}/dashboard-link.sh"; source "${LIB_DIR}/chart-source.sh"
+source "${LIB_DIR}/helm-release.sh"
+# install-cli.sh may be absent if an older bootstrap copy (e.g. a not-yet-updated
+# tracebloc.io/i.sh, whose FILES list is hand-maintained) didn't fetch it. Guard the
+# source so a stale bootstrap degrades gracefully (Step 5 is skipped) instead of aborting
+# under `set -e`. An `if` block, NOT `[[ -f … ]] && source`: a false `&&` trips `set -e`.
 if [[ -f "${LIB_DIR}/install-cli.sh" ]]; then
   source "${LIB_DIR}/install-cli.sh"
 fi
@@ -140,7 +151,7 @@ source "${LIB_DIR}/diagnose.sh"
 
 # The run is not finished until it says so: bash 3.2 hands the
 # EXIT trap a 0 for a `set -u` abort, so a 0 counts only with _tb_done=1, which
-# main's normal end and each intended `exit 0` set (tb_exit_rc, common.sh). Set
+# main's normal end and each intended `exit 0` set (tb_exit_rc, errors.sh). Set
 # here, not inherited: an exported _tb_done=1 must not vouch for this run.
 _tb_done=0
 trap 'install_cleanup; exit "${_TB_EXIT_RC:-1}"' EXIT
@@ -150,7 +161,7 @@ trap 'install_cleanup; exit "${_TB_EXIT_RC:-1}"' EXIT
 # stayed invisible, and the user got a generic closer over an empty log.
 # _record_err is the trap's FIRST command so `$?` is still the failure's status;
 # the location is passed in because BASH_SOURCE/LINENO inside the recorder would
-# describe common.sh. Recording only — it never alters control flow.
+# describe errors.sh. Recording only — it never alters control flow.
 set -E
 trap '_record_err "${BASH_SOURCE[0]:-?}:${LINENO}" "$BASH_COMMAND"' ERR
 # Route SIGINT/SIGTERM through a normal exit so the EXIT trap (install_cleanup)
@@ -206,7 +217,7 @@ _main_dispatch() {
   refuse_unsupported_substrate
   refuse_unresolved_substrate
   # tracebloc's WSL distro runs only as the Windows installer runs it: native k3s, and one
-  # of its two runs (common.sh). Any other WSL distro is refused, whatever the substrate.
+  # of its two runs (host.sh). Any other WSL distro is refused, whatever the substrate.
   refuse_wsl_run
   # A Mac below the floor is stopped here, first on every path and as its own
   # refusal: every Mac resolves k3s since 4.1, so
@@ -252,9 +263,9 @@ _main_dispatch() {
     local _a_lf
     for _a_lf in "$@"; do
       case "$_a_lf" in
-        --reuse-data) TB_LEFTOVER_ACTION=reuse ;;
-        --wipe-data)  TB_LEFTOVER_ACTION=wipe ;;
-        --data-dir=*) HOST_DATA_DIR="${_a_lf#*=}" ;;
+        --reuse-data) leftover_action=reuse ;;
+        --wipe-data)  leftover_action=wipe ;;
+        --data-dir=*) host_data_dir="${_a_lf#*=}" ;;
       esac
     done
     if declare -F run_prepare_host >/dev/null 2>&1; then
@@ -291,13 +302,13 @@ _main_begin() {
   local _arg
   for _arg in "$@"; do
     case "$_arg" in
-      --force|--reinstall) TB_FORCE_REINSTALL=1 ;;
+      --force|--reinstall) force_reinstall=1 ;;
       # Leftover-data guard: non-interactive answers to the reuse/wipe/
-      # new-dir prompt. --data-dir=PATH just points HOST_DATA_DIR elsewhere
+      # new-dir prompt. --data-dir=PATH just points host_data_dir elsewhere
       # (validate_config resolves it below), so a fresh dir sidesteps the prompt.
-      --reuse-data) TB_LEFTOVER_ACTION=reuse ;;
-      --wipe-data)  TB_LEFTOVER_ACTION=wipe ;;
-      --data-dir=*) HOST_DATA_DIR="${_arg#*=}" ;;
+      --reuse-data) leftover_action=reuse ;;
+      --wipe-data)  leftover_action=wipe ;;
+      --data-dir=*) host_data_dir="${_arg#*=}" ;;
     esac
   done
 
@@ -319,7 +330,7 @@ _main_begin() {
   if declare -F _native_k3s_release_storage >/dev/null 2>&1; then
     _native_k3s_release_storage early
   fi
-  # Pre-log network-FS guard: setup_log_file mkdirs HOST_DATA_DIR and redirects the whole
+  # Pre-log network-FS guard: setup_log_file mkdirs host_data_dir and redirects the whole
   # session's output onto it — refuse a network-FS target BEFORE that unguarded mkdir can
   # fail (or land root-squashed) on an NFS home. Guarded so a stale bootstrap without the
   # new helper proceeds as before (same pattern as the assess/host_audit gates below).
@@ -337,7 +348,7 @@ _main_begin() {
   # every one goes on to the normal flow below (step c moves a healthy node
   # forward). Guarded so a stale bootstrap that didn't fetch
   # assess.sh — or --force/--reinstall — simply runs the full flow.
-  if [[ "${TB_FORCE_REINSTALL:-0}" != 1 ]] \
+  if [[ "${force_reinstall:-0}" != 1 ]] \
      && declare -F assess_existing_install >/dev/null 2>&1; then
     assess_existing_install
   fi
@@ -407,7 +418,7 @@ _main_steps_a_to_c() {
     if declare -F telemetry_run_handed_on >/dev/null 2>&1; then
       telemetry_run_handed_on
     fi
-    # What the stop-and-check gate found, for the host's account steps (common.sh):
+    # What the stop-and-check gate found, for the host's account steps (host.sh):
     # written last, so a file there means this run reached its exit 0.
     tb_wsl_handover_write
     success "The cluster is ready. The Windows installer registers this machine next."

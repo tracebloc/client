@@ -362,7 +362,7 @@ TB_WSL_GPU_LIB_DIR="/usr/lib/wsl/lib"
 # PATH, so the Windows driver's nvidia-smi could go unseen and a GPU the host judged
 # would read as "does not answer". Appended once, after the distro's own directories,
 # when nvidia-smi is there. Nothing else changes: the GPU itself reaches k3s's pods
-# through the spec tracebloc-cdi writes (k3s.sh, _native_k3s_gpu_wsl_prepare).
+# through the spec tracebloc-cdi writes (k3s-gpu.sh, _native_k3s_gpu_wsl_prepare).
 _gpu_wsl_lib_on_path() {
   [[ -x "${TB_WSL_GPU_LIB_DIR}/nvidia-smi" ]] || return 0
   case ":${PATH:-}:" in *":${TB_WSL_GPU_LIB_DIR}:"*) return 0 ;; esac
@@ -463,7 +463,7 @@ _gpu_container_blind() {
 # read as a blind runtime.
 _GPU_CONTAINER_BLIND_RE='could not select device driver|nvidia-container-cli|Failed to initialize NVML|no adapters were found|capabilities: \[\[gpu\]\]'
 
-# A function so bats can model the /proc path (same idiom as common.sh's
+# A function so bats can model the /proc path (same idiom as host.sh's
 # amd64_emulation_available).
 _nvidia_kernel_module_loaded() { [[ -d /proc/driver/nvidia ]]; }
 

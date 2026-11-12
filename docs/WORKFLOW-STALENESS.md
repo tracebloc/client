@@ -1,6 +1,6 @@
 # Workflow staleness watch
 
-`.github/workflows/workflow-staleness-watch.yml` + `scripts/check-workflow-staleness.sh` + `scripts/alert-workflow-staleness.sh`.
+`.github/workflows/workflow-staleness-watch.yml` + `tooling/check-workflow-staleness.sh` + `tooling/alert-workflow-staleness.sh`.
 
 ## The failure class it closes
 
@@ -43,11 +43,11 @@ Known limitations:
 
 ```bash
 # detect only (reads the live GitHub API; needs gh + jq)
-STALENESS_REPO=tracebloc/client scripts/check-workflow-staleness.sh
+STALENESS_REPO=tracebloc/client tooling/check-workflow-staleness.sh
 
 # preview what would be filed, without filing (no gh writes)
-STALENESS_REPO=tracebloc/client scripts/check-workflow-staleness.sh \
-  | ALERT_REPO=<owner>/<repo> ALERT_DRY_RUN=1 scripts/alert-workflow-staleness.sh
+STALENESS_REPO=tracebloc/client tooling/check-workflow-staleness.sh \
+  | ALERT_REPO=<owner>/<repo> ALERT_DRY_RUN=1 tooling/alert-workflow-staleness.sh
 ```
 
 Or run the workflow with **Run workflow → dry-run = true**. The classification logic is unit-tested offline via the `STALENESS_RUNS_STUB` / `STALENESS_NOW` seams (`scripts/tests/check-workflow-staleness.bats`, `scripts/tests/alert-workflow-staleness.bats`).

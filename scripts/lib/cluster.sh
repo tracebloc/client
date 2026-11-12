@@ -5,19 +5,19 @@
 #  guard. Native k3s's code that reads them lives in k3s.sh and mac-container.sh.
 # =============================================================================
 
-# The xtrace hold (common.sh). A no-op with a common.sh from before it, so a mixed
+# The xtrace hold (output.sh). A no-op with an output.sh from before it, so a mixed
 # set of libs runs, unheld, rather than stopping on a missing command.
 declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
 declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
 
-# Ensure HOST_DATA_DIR and its logs and mysql dirs exist, the chart's hostPath root on native k3s.
-# Only chmod the container data subdirs; do not make HOST_DATA_DIR or files like values.yaml world-readable.
+# Ensure host_data_dir and its logs and mysql dirs exist, the chart's hostPath root on native k3s.
+# Only chmod the container data subdirs; do not make host_data_dir or files like values.yaml world-readable.
 _ensure_tracebloc_dirs() {
-  mkdir -p "$HOST_DATA_DIR" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql"
-  chmod -R 777 "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql" 2>/dev/null || true
+  mkdir -p "$host_data_dir" "$host_data_dir/logs" "$host_data_dir/mysql"
+  chmod -R 777 "$host_data_dir/logs" "$host_data_dir/mysql" 2>/dev/null || true
   # the dataset dir goes under HOST_DATASET_DIR (a network mount,
-  # bind-mounted at /tracebloc-data) when set, else stays local under HOST_DATA_DIR.
-  local data_base="${HOST_DATASET_DIR:-$HOST_DATA_DIR}"
+  # bind-mounted at /tracebloc-data) when set, else stays local under host_data_dir.
+  local data_base="${HOST_DATASET_DIR:-$host_data_dir}"
   mkdir -p "$data_base/data"
   chmod -R 777 "$data_base/data" 2>/dev/null || true
 }
@@ -43,14 +43,14 @@ TB_LOGS_DIR_MODE="3777"
 # layout.
 #
 # the dataset dir goes under HOST_DATASET_DIR (network mount) when set, else
-# stays local. logs (and mysql, below) always stay on the local HOST_DATA_DIR.
+# stays local. logs (and mysql, below) always stay on the local host_data_dir.
 _release_dirs_spec() {
   local release="$1"
   # An installed native-k3s hostpath release keeps the root and dataset dir it was made
   # with (_native_k3s_release_storage): those are the dirs its PVs name,
-  # so those are the ones to prepare, not this run's. _hostpath_root is HOST_DATA_DIR
+  # so those are the ones to prepare, not this run's. _hostpath_root is host_data_dir
   # unless a release's root is kept.
-  local root; root="$(_hostpath_root)"; root="${root:-$HOST_DATA_DIR}"
+  local root; root="$(_hostpath_root)"; root="${root:-$host_data_dir}"
   local ds="${HOST_DATASET_DIR:-}"
   [[ "${TB_HOSTPATH_KEPT:-}" != 1 ]] || ds="${TB_HOSTPATH_DATASET:-}"
   local base="$root/$release"
@@ -61,13 +61,13 @@ _release_dirs_spec() {
 
 # Pre-create the per-release host dirs the chart's hostPath PVs bind to. The PVs use
 # <hostPath.root>/<release>/{data,logs,mysql}, and on native k3s the installer sets that
-# root to HOST_DATA_DIR, the host's own folder. Without pre-creating these as the host
+# root to host_data_dir, the host's own folder. Without pre-creating these as the host
 # user, kubelet's DirectoryOrCreate makes them root:root 0755 and the host user can't drop
 # training data into /data/shared.
 _ensure_release_dirs() {
   local release="$1"
   [[ -z "$release" ]] && return 0
-  local base root; root="$(_hostpath_root)"; base="${root:-$HOST_DATA_DIR}/$release"
+  local base root; root="$(_hostpath_root)"; base="${root:-$host_data_dir}/$release"
   # mysql is deliberately left on the flat recursive 777 this function has always used:
   # it has ONE writer (uid 999) and its own init container in the chart, and its datadir
   # permissions are the database's business — the same reason it is out of scope for
@@ -76,7 +76,7 @@ _ensure_release_dirs() {
   chmod -R 777 "$base/mysql" 2>/dev/null || true
   local entry dir mode
   while IFS= read -r entry; do
-    # Split on the LAST colon at both ends (%:* / ##*:), never the first: HOST_DATA_DIR is
+    # Split on the LAST colon at both ends (%:* / ##*:), never the first: host_data_dir is
     # a host path the operator chose and may legally contain a colon, while the mode never can.
     dir="${entry%:*}"; mode="${entry##*:}"
     mkdir -p "$dir"
@@ -113,7 +113,7 @@ _augment_no_proxy() {
 # both set to the augmented list above. NOTHING when the host sets no HTTP(S)
 # proxy: a NO_PROXY alone proxies nothing. k3s.sh hands them to upstream's
 # install.sh, which writes them into k3s.service.env, and the macOS node runs with them.
-# _node_proxy_env runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _node_proxy_env runs with bash -x held off, the secret it holds out of the trace (output.sh);
 # _tb_untraced__node_proxy_env below is the function itself.
 _node_proxy_env() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__node_proxy_env "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
 _tb_untraced__node_proxy_env() {
@@ -370,7 +370,7 @@ _kubelet_config_path() {
 # a later change; this is the apply side learning the same distinction, through the
 # SAME detector (`_probe_wsl`, scripts/lib/probe.sh) rather than a copy of it.
 # Inside WSL only native k3s has a key; any other substrate there is `unknown`, a
-# run the installer refuses (refuse_wsl_run, common.sh), and no row is measured for
+# run the installer refuses (refuse_wsl_run, host.sh), and no row is measured for
 # it.
 #
 # AN ABSENT DETECTOR IS `unknown`, NEVER `linux`. install-k8s.sh sources probe.sh
@@ -462,7 +462,7 @@ _kubelet_reservation_warn_unmeasured() {
     warn "No node reservation will be written: this installer no longer sets up ${TRACEBLOC_SUBSTRATE_RESOLVED} $(_tb_substrate_where), so no measured reservation applies to this node."
   elif [[ "$platform" == "unknown" ]] && declare -F _probe_wsl >/dev/null 2>&1; then
     # The detector IS loaded, so not "re-run": `unknown` is a host _probe_wsl takes for
-    # WSL, off native k3s in tracebloc's distro. refuse_wsl_run (common.sh) and the k3s
+    # WSL, off native k3s in tracebloc's distro. refuse_wsl_run (host.sh) and the k3s
     # create path refuse it on WSL's kernel; WSL's names alone, on another, reach here.
     warn "No node reservation will be written: this host shows WSL's markers, and no reservation is measured for WSL outside native k3s in tracebloc's distro, so allocatable will equal capacity on this node."
     if declare -F _probe_wsl_kernel >/dev/null 2>&1 && ! _probe_wsl_kernel; then
@@ -550,7 +550,7 @@ _render_kubelet_config() {
 # When a proxy is configured, ensure THIS installer's own kubectl/helm/curl
 # bypass it for the cluster API (127.0.0.1) and the in-cluster ranges. Go
 # already auto-bypasses loopback, but exporting NO_PROXY also covers helm/curl.
-# _export_host_no_proxy runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _export_host_no_proxy runs with bash -x held off, the secret it holds out of the trace (output.sh);
 # _tb_untraced__export_host_no_proxy below is the function itself.
 _export_host_no_proxy() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__export_host_no_proxy "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
 _tb_untraced__export_host_no_proxy() {
@@ -585,18 +585,18 @@ _tb_untraced__export_host_no_proxy() {
 # . Mirrors the openability probe assess.sh already uses.
 _tty_usable() { { : <"$TRACEBLOC_TTY"; } 2>/dev/null; }
 
-# Echo each dir under HOST_DATA_DIR that holds real client data — a MySQL data
+# Echo each dir under host_data_dir that holds real client data — a MySQL data
 # dir or a dataset dir with at least one file — across BOTH on-disk layouts:
-# flat ($HOST_DATA_DIR/{mysql,data}) and per-release ($HOST_DATA_DIR/<rel>/…).
-# Deliberately scoped to HOST_DATA_DIR only: HOST_DATASET_DIR may be a shared
+# flat ($host_data_dir/{mysql,data}) and per-release ($host_data_dir/<rel>/…).
+# Deliberately scoped to host_data_dir only: HOST_DATASET_DIR may be a shared
 # network mount other tools use, so the guard never scans or touches it. Empty
 # dirs, values.yaml and install-*.log are not data and are ignored.
 #
 # On native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) the volumes live in local-path's storage path
-# instead, so the native scan below runs first; HOST_DATA_DIR is still scanned,
+# instead, so the native scan below runs first; host_data_dir is still scanned,
 # because data an earlier install left there is stranded either way.
 _leftover_data_dirs() {
-  local base="${HOST_DATA_DIR:-}" native=""
+  local base="${host_data_dir:-}" native=""
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     native="$(_leftover_k3s_volume_dirs)"
     [[ -z "$native" ]] || printf '%s\n' "$native"
@@ -615,7 +615,7 @@ _leftover_data_dirs() {
     # Skip symlinked per-release dirs: base is physically resolved (validate_config
     # uses `cd -P`), so a real subdir can't escape it — but a symlink could point
     # anywhere, and $base/<link>/mysql would let the wipe's rm -rf follow it
-    # outside HOST_DATA_DIR. Not walking symlinks keeps scope honest.
+    # outside host_data_dir. Not walking symlinks keeps scope honest.
     [[ -d "$sub" && ! -L "${sub%/}" ]] || continue
     # Skip the flat-layout data dirs themselves — they are already candidates
     # above. Descending into them would mislabel a real MySQL datadir's nested
@@ -631,7 +631,7 @@ _leftover_data_dirs() {
   local d
   for d in "${candidates[@]}"; do  # set-u-safe: seeded with mysql and data at its declaration
     # ! -L: never treat a symlink as a data dir — it would let the wipe traverse
-    # outside HOST_DATA_DIR. A symlinked data path is out of scope.
+    # outside host_data_dir. A symlinked data path is out of scope.
     [[ -d "$d" && ! -L "$d" ]] || continue
 
     # Fail closed on an unlistable dir: a root/container-owned mysql/data dir the
@@ -736,23 +736,23 @@ _leftover_k3s_service_stopped() {
 }
 
 # _leftover_where PATH... -- where the found data lies, for the guard's copy:
-# HOST_DATA_DIR, and on native k3s the storage path when a found path is under it.
+# host_data_dir, and on native k3s the storage path when a found path is under it.
 _leftover_where() {
   local storage="" d in_s=0 in_h=0
   [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]] && storage="$(_native_k3s_storage_path)"
   for d in "$@"; do
     if [[ -n "$storage" && ( "$d" == "$storage" || "$d" == "$storage"/* ) ]]; then in_s=1; else in_h=1; fi
   done
-  if (( in_s && in_h )); then printf '%s and %s' "$storage" "$HOST_DATA_DIR"
+  if (( in_s && in_h )); then printf '%s and %s' "$storage" "$host_data_dir"
   elif (( in_s )); then printf '%s' "$storage"
-  else printf '%s' "$HOST_DATA_DIR"
+  else printf '%s' "$host_data_dir"
   fi
 }
 
 # Read one line from $TRACEBLOC_TTY into the named variable, stripping bracketed-paste
 # / CSI escape garbage (arrow keys, pastes survive `read -r`) and trimming
 # surrounding whitespace — so a paste or a spaces-then-Enter can't smuggle
-# control bytes into HOST_DATA_DIR or slip past a non-empty check. Mirrors the
+# control bytes into host_data_dir or slip past a non-empty check. Mirrors the
 # provision.sh client-name handling (_strip_paste_garbage + trim). Returns 1 on a
 # failed read (EOF, no live input), with the variable empty: asking again can't help.
 _read_sanitized() {
@@ -765,7 +765,7 @@ _read_sanitized() {
 }
 
 # Delete the detected leftover data dirs. Only ever removes paths UNDER the
-# already-validated HOST_DATA_DIR (validate_config guarantees it is under $HOME and not a
+# already-validated host_data_dir (validate_config guarantees it is under $HOME and not a
 # system path) — never HOST_DATASET_DIR, never a system path. Returns non-zero if anything
 # survived the wipe (e.g. root/container-owned MySQL files the host user can't remove) so
 # the caller can fail closed instead of letting create_cluster adopt the survivors — a
@@ -775,14 +775,14 @@ _read_sanitized() {
 # storage path, and every removal and its check run as root (through sudo; k3s owns
 # the volumes). It never runs while the k3s service may be running.
 _wipe_leftover_data() {
-  # Belt-and-suspenders: never wipe unless HOST_DATA_DIR is
+  # Belt-and-suspenders: never wipe unless host_data_dir is
   # a non-empty path strictly under $HOME — exactly what validate_config enforces.
   # This guards the rm below even if a future refactor ever calls the guard before
-  # validate_config: an empty HOST_DATA_DIR would collapse the "$HOST_DATA_DIR"/*
+  # validate_config: an empty host_data_dir would collapse the "$host_data_dir"/*
   # case pattern to /* and defeat the scope check. Placed in the destructive
   # function itself so it holds for every caller, not just the current one.
-  [[ -n "${HOST_DATA_DIR:-}" && "$HOST_DATA_DIR" == "$HOME"/* ]] \
-    || error "Refusing to wipe: HOST_DATA_DIR is unset or not under \$HOME (got '${HOST_DATA_DIR:-}')."
+  [[ -n "${host_data_dir:-}" && "$host_data_dir" == "$HOME"/* ]] \
+    || error "Refusing to wipe: the data directory is unset or not under \$HOME (got '${host_data_dir:-}')."
   local d rc=0 storage=""
   local -a as_root=()
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
@@ -801,11 +801,11 @@ _wipe_leftover_data() {
   fi
   for d in "$@"; do
     case "$d" in
-      "$HOST_DATA_DIR"/*)
+      "$host_data_dir"/*)
         # Backstop for the symlink case (detection already skips symlinks): never
-        # rm -rf a symlink — it would delete the target OUTSIDE HOST_DATA_DIR.
+        # rm -rf a symlink — it would delete the target OUTSIDE host_data_dir.
         if [[ -L "$d" ]]; then
-          warn "Refusing to wipe symlink ${d} — it could point outside ${HOST_DATA_DIR}; remove it by hand."
+          warn "Refusing to wipe symlink ${d} — it could point outside ${host_data_dir}; remove it by hand."
           rc=1; continue
         fi
         ;;
@@ -813,7 +813,7 @@ _wipe_leftover_data() {
         # The native storage path's own volume dirs, and nothing else: one level,
         # pvc-*, no `..` (detection lists them with find -type d, so no symlink).
         if [[ -z "$storage" || "$d" != "$storage"/pvc-* || "$d" == *"/.."* || "${d#"$storage"/}" == */* ]]; then
-          warn "Refusing to wipe ${d} — outside ${HOST_DATA_DIR}."
+          warn "Refusing to wipe ${d} — outside ${host_data_dir}."
           rc=1; continue
         fi
         ;;
@@ -834,7 +834,7 @@ _wipe_leftover_data() {
 
 # Guard entry point. Called from create_cluster ONLY when creating a NEW cluster
 # (an existing cluster is an in-place reuse/upgrade whose data stays by design,
-# §3.3). Resolves an action from TB_LEFTOVER_ACTION (set by --reuse-data /
+# §3.3). Resolves an action from leftover_action (set by --reuse-data /
 # --wipe-data, or directly) or, failing that, an interactive prompt. When there
 # is no terminal and no explicit action, it fails safe: abort, never adopt.
 guard_leftover_data() {
@@ -859,9 +859,9 @@ guard_leftover_data() {
   [[ ${#found[@]} -eq 0 ]] && return 0   # clean slate — nothing to guard
 
   # Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) words each line for its own storage: the
-  # data lies in the storage path as well as HOST_DATA_DIR (_leftover_where). Under
+  # data lies in the storage path as well as host_data_dir (_leftover_where). Under
   # node-local (native_nl) a fresh install gives its volumes new directories, so nothing
-  # found is adopted. Under hostpath the chart's PVs name HOST_DATA_DIR itself, so what
+  # found is adopted. Under hostpath the chart's PVs name host_data_dir itself, so what
   # lies there IS adopted; only a k3s volume (pvc-*) is not.
   local where k3s="" native_nl="" frozen=""
   where="$(_leftover_where "${found[@]}")"  # set-u-safe: the empty-found check above returns first
@@ -888,7 +888,7 @@ guard_leftover_data() {
   for d in "${found[@]}"; do hint "  • ${d}"; case "${d##*/}" in pvc-*) vols=1 ;; *) kept=1 ;; esac; done  # set-u-safe: the empty-found check above returns first
   # hostpath on native k3s never mounts a k3s volume, so every line below words what
   # was found: only k3s volumes (hp_vols=all) and nothing is
-  # adopted; k3s volumes beside data under HOST_DATA_DIR (some) and only the data is.
+  # adopted; k3s volumes beside data under host_data_dir (some) and only the data is.
   local hp_vols=""
   if [[ -n "$k3s" && "${TB_STORAGE_MODE:-node-local}" == "hostpath" && -n "$vols" ]]; then
     if [[ -n "$kept" ]]; then hp_vols=some; else hp_vols=all; fi
@@ -902,15 +902,15 @@ guard_leftover_data() {
   elif [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     hint "node-local storage keeps data inside the cluster node — a fresh install does NOT adopt this ~/.tracebloc data; it would be stranded, not used."
   elif [[ "$hp_vols" == all ]]; then
-    hint "A fresh install does NOT adopt these: they are k3s volumes (pvc-*), and hostpath keeps its data under ${HOST_DATA_DIR}, so they would be stranded, not used."
+    hint "A fresh install does NOT adopt these: they are k3s volumes (pvc-*), and hostpath keeps its data under ${host_data_dir}, so they would be stranded, not used."
   else
     hint "A fresh install would silently adopt it, so it would not really be fresh."
     # hostpath never mounts a k3s volume, so one found on native k3s is stranded.
     [[ -z "$k3s" || -z "$vols" ]] \
-      || hint "The k3s volumes (pvc-*) among them are not adopted: hostpath keeps its data under ${HOST_DATA_DIR}, so those would be stranded, not used."
+      || hint "The k3s volumes (pvc-*) among them are not adopted: hostpath keeps its data under ${host_data_dir}, so those would be stranded, not used."
   fi
 
-  local action="${TB_LEFTOVER_ACTION:-}"
+  local action="${leftover_action:-}"
   _guard_leftover_ask
   _guard_leftover_act
 }
@@ -929,7 +929,7 @@ _guard_leftover_ask() {
       elif [[ "$hp_vols" == all ]]; then
         hint "  [r] keep  — leave the k3s volumes on disk, unused (hostpath does not mount them; they are NOT adopted)"
       elif [[ "$hp_vols" == some ]]; then
-        hint "  [r] reuse — keep and adopt the data under ${HOST_DATA_DIR}; the k3s volumes stay on disk, NOT adopted"
+        hint "  [r] reuse — keep and adopt the data under ${host_data_dir}; the k3s volumes stay on disk, NOT adopted"
       else
         hint "  [r] reuse — keep and adopt the existing data"
       fi
@@ -964,7 +964,7 @@ _guard_leftover_ask() {
       [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]] && \
         reuse_desc="keep the data on disk, NOT adopted (node-local starts empty in-node)"
       [[ -n "$native_nl" ]] && reuse_desc="keep the data on disk, NOT adopted (a fresh install starts empty)"
-      [[ "$hp_vols" == some ]] && reuse_desc="adopt the data under ${HOST_DATA_DIR}; the k3s volumes (pvc-*) stay on disk, NOT adopted"
+      [[ "$hp_vols" == some ]] && reuse_desc="adopt the data under ${host_data_dir}; the k3s volumes (pvc-*) stay on disk, NOT adopted"
       [[ "$hp_vols" == all ]] && reuse_desc="keep the k3s volumes on disk, NOT adopted (hostpath does not mount them)"
       local newdir_line="
   TRACEBLOC_HOST_DATA_DIR=<new-path> ...  install into a different directory"
@@ -993,15 +993,15 @@ _guard_leftover_act() {
         # node-local starts empty in-node — the host data is NOT adopted (the local
         # storage model). Keep the files on disk but say so plainly, so "reuse" never
         # silently claims an adoption that node-local can't actually do.
-        warn "node-local storage can't adopt ${HOST_DATA_DIR} — the new cluster starts empty inside the node."
+        warn "node-local storage can't adopt ${host_data_dir} — the new cluster starts empty inside the node."
         hint "Your existing data is left on disk, untouched but unused. Re-ingest it after setup ('tracebloc data ingest'), or use hostpath storage (TRACEBLOC_STORAGE_MODE=hostpath) to keep using it in place."
-        log "node-local: left ${HOST_DATA_DIR} on disk (NOT adopted — no host bind-mount)."
+        log "node-local: left ${host_data_dir} on disk (NOT adopted — no host bind-mount)."
       elif [[ "$hp_vols" == all ]]; then
-        warn "hostpath can't adopt the k3s volumes under ${where} — it keeps its data under ${HOST_DATA_DIR}."
+        warn "hostpath can't adopt the k3s volumes under ${where} — it keeps its data under ${host_data_dir}."
         hint "They are left on disk, untouched but unused. Re-ingest the data after setup ('tracebloc data ingest')."
         log "hostpath: left the k3s volumes under ${where} on disk (NOT adopted)."
       else
-        log "Reusing existing data under ${HOST_DATA_DIR} (user choice)."
+        log "Reusing existing data under ${host_data_dir} (user choice)."
         [[ "$hp_vols" != some ]] || log "hostpath: the k3s volumes (pvc-*) found beside it are left on disk (NOT adopted)."
       fi
       ;;
@@ -1010,7 +1010,7 @@ _guard_leftover_act() {
       # through to create_cluster, which would adopt the survivors and silently
       # break the "wipe means gone" guarantee.
       if ! _wipe_leftover_data "${found[@]}"; then  # set-u-safe: the caller's empty-found check returns first
-        local rm_tail=" ${HOST_DATA_DIR}'"
+        local rm_tail=" ${host_data_dir}'"
         [[ -n "$k3s" ]] && rm_tail="' on each path listed above, with k3s stopped"
         local or_dir=", or choose a different directory"
         [[ -n "$frozen" ]] && or_dir=""   # config.yaml froze the volumes' directory: there is no other to choose
@@ -1036,10 +1036,10 @@ _guard_leftover_act() {
         tb_fail_next "Set TRACEBLOC_HOST_DATA_DIR to a directory under \$HOME, then run the installer again:"
         error_said "No new data directory was given" "No new data directory was given at the prompt (the read failed). Set TRACEBLOC_HOST_DATA_DIR to a directory under \$HOME, then run the installer again."
       fi
-      HOST_DATA_DIR="$newdir"
+      host_data_dir="$newdir"
       # Re-resolve + re-validate the new path, then re-check it for leftovers too.
       if declare -F validate_config >/dev/null 2>&1; then validate_config; fi
-      log "Switched HOST_DATA_DIR to ${HOST_DATA_DIR}; re-checking it for leftover data."
+      log "Switched the data directory to ${host_data_dir}; re-checking it for leftover data."
       guard_leftover_data
       ;;
     abort|*)

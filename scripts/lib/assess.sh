@@ -28,7 +28,7 @@
 #               floor but behind the latest release.
 # =============================================================================
 
-# The xtrace hold (common.sh). A no-op with a common.sh from before it, so a mixed
+# The xtrace hold (output.sh). A no-op with an output.sh from before it, so a mixed
 # set of libs runs, unheld, rather than stopping on a missing command.
 declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
 declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
@@ -36,10 +36,7 @@ declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
 # --force / --reinstall (or TRACEBLOC_FORCE_REINSTALL=1) bypasses the gate and
 # runs the full flow. Defaulted here so the gate is safe to consult even if the
 # arg scan never set it; main()'s arg parsing flips it to 1 on the flag.
-# Settings naming: TRACEBLOC_FORCE_REINSTALL is the canonical and
-# is read FIRST; TB_FORCE_REINSTALL is the legacy hand-off name (remove_by
-# 2026-12-31), which the bootstrap (install.sh) now exports beside the canonical.
-TB_FORCE_REINSTALL="${TRACEBLOC_FORCE_REINSTALL:-${TB_FORCE_REINSTALL:-0}}"
+force_reinstall="${TRACEBLOC_FORCE_REINSTALL:-0}"
 
 # Bound on the readiness probe's API call — short so a stopped/unreachable API
 # can never make the gate hang. Overridable for tests.
@@ -90,12 +87,12 @@ _assess_cli_present() {
   _assess_cli_bin >/dev/null
 }
 
-# _version_lt lives in common.sh: other libs compare versions too,
+# _version_lt lives in kube.sh: other libs compare versions too,
 # and assess.sh is sourced CONDITIONALLY by
-# install-k8s.sh (`[[ -f ]]`, for stale checkouts) while common.sh is not. A
+# install-k8s.sh (`[[ -f ]]`, for stale checkouts) while kube.sh is not. A
 # second copy here would be the restated-rule defect, so there is exactly one.
-# assess.sh's callers get it because install-k8s.sh sources common.sh first and
-# the bats helper's `load_lib` chains common.sh.
+# assess.sh's callers get it because install-k8s.sh sources kube.sh first and
+# the bats helper's `load_lib` chains kube.sh.
 
 # _assess_cli_outdated — is the installed CLI below the floor the installer will
 # actively repair?
@@ -164,14 +161,11 @@ _assess_cli_outdated() {
 # which is exactly what the user asked for. Only a latest we can read AND that the
 # installed CLI already meets returns "not behind".
 _assess_cli_behind_latest() {
-  # TRACEBLOC_UPGRADE_CLI / TRACEBLOC_CLI_LATEST are read first, their TB_
-  # spellings only when the TRACEBLOC_ one is unset or blank: CLIs that set only
-  # the TB_ names still reach this live installer.
-  [[ "${TRACEBLOC_UPGRADE_CLI:-${TB_UPGRADE_CLI:-0}}" == 1 ]] || return 1
+  [[ "${TRACEBLOC_UPGRADE_CLI:-0}" == 1 ]] || return 1
   local bin ver latest
   bin="$(_assess_cli_bin)" || return 1     # absent — cli-missing already covers it
   ver="$(_assess_cli_version "$bin")"
-  latest="${TRACEBLOC_CLI_LATEST:-${TB_CLI_LATEST:-}}"; latest="${latest#v}"
+  latest="${TRACEBLOC_CLI_LATEST:-}"; latest="${latest#v}"
   # Can't prove current (missing/unparseable latest, or unreadable version) -> update.
   [[ "$latest" =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 0
   [[ "$ver"    =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 0
@@ -226,7 +220,7 @@ _assess_release_client_env() {
 # that same stage. So the probe only judges a release installed for that stage: a
 # dev or staging client re-checked from a shell without its env would read
 # `invalid` on prod and have a working credential rotated.
-# _assess_credential_rejected runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _assess_credential_rejected runs with bash -x held off, the secret it holds out of the trace (output.sh);
 # _tb_untraced__assess_credential_rejected below is the function itself.
 _assess_credential_rejected() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__assess_credential_rejected "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
 _tb_untraced__assess_credential_rejected() {
@@ -433,7 +427,7 @@ _assess_k3s_on_context() {
 # the normal flow to set up (fresh) or reconcile (degraded, healthy).
 assess_existing_install() {
   # --force / --reinstall (or the env override): skip the gate entirely.
-  if [[ "${TB_FORCE_REINSTALL:-0}" == 1 ]]; then
+  if [[ "${force_reinstall:-0}" == 1 ]]; then
     log "assess: --force/--reinstall set — bypassing the stop-and-check gate."
     return 0
   fi

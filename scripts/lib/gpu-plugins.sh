@@ -22,14 +22,14 @@ verify_gpu() {
   # with no GPU wired in. There is then nothing for a node poll to find, and running it
   # would stall the finish with a misleading "advertises no GPU" warning. Guarded with
   # `declare -F` so gpu-plugins.sh can still be sourced standalone (its bats suite does)
-  # without common.sh's _gpu_wired. amd has no wiring flag, so it verifies on detection.
+  # without kube.sh's _gpu_wired. amd has no wiring flag, so it verifies on detection.
   if [[ "$GPU_VENDOR" == "nvidia" ]] && declare -F _gpu_wired >/dev/null 2>&1 && ! _gpu_wired; then
     log "NVIDIA GPU detected but not wired into the cluster — skipping node GPU verification (CPU mode)."
     return
   fi
 
   # Native k3s counts the GPUs through the same reader (_gpu_alloc_count, below), and
-  # says what a count of 0 means there: k3s.sh _native_k3s_gpu_verify (1.1i) names the
+  # says what a count of 0 means there: k3s-gpu.sh _native_k3s_gpu_verify (1.1i) names the
   # remedy S-G measured and marks the summary "not confirmed".
   if [[ "$GPU_VENDOR" == "nvidia" && "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     _native_k3s_gpu_verify

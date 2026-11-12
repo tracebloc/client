@@ -237,7 +237,7 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
     fleet-wide, with no probe to flag it. Comparing against the hostPath root
     (tracebloc.hostPathRoot, /tracebloc by default) is what keeps this to
     installs that moved the tree somewhere real: native k3s sets both to
-    HOST_DATA_DIR, and its datasets have not moved.
+    TRACEBLOC_HOST_DATA_DIR, and its datasets have not moved.
 
   The collector de-duplicates by backing device, so a datasetPath that turns out
   to share a disk with the root mount is measured once rather than doubled --
@@ -363,7 +363,7 @@ client-pvc
   hostPath base for the mysql and logs PVs: <root>/<release>/{mysql,logs}. The
   historical /tracebloc by default, so a release that sets no root renders
   byte-identically. On native k3s the node IS the host, so the installer sets it
-  to HOST_DATA_DIR itself. It is also what an unset
+  to TRACEBLOC_HOST_DATA_DIR itself. It is also what an unset
   datasetPath falls back to, and what tracebloc.resourceMonitorDatasetPath
   compares datasetPath against: the dataset tree moved only if it left the root.
   Nil-guarded (default dict) for `--reuse-values` upgrades predating the key.

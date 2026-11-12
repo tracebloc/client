@@ -292,7 +292,7 @@ install_nvidia_drivers() {
 # ── Container Toolkit ────────────────────────────────────────────────────────
 # Signature of the installed GPU stack (toolkit + driver versions). Empty when it
 # can't be determined -> the caller then never caches, so it always re-verifies.
-# k3s.sh's GPU gate (_native_k3s_gpu_wire) compares it with the last wired run's.
+# k3s-gpu.sh's GPU gate (_native_k3s_gpu_wire) compares it with the last wired run's.
 _gpu_stack_signature() {
   local ctk drv ctk_out drv_out
   # BOUNDED: a half-ready driver or a stuck device node can make these
@@ -323,7 +323,7 @@ TB_NVIDIA_TOOLKIT_YUM_REPO="/etc/yum.repos.d/nvidia-container-toolkit.repo"
 
 # _nvidia_toolkit_repo_files_readable [FILE...] -- every FILE that exists and is not
 # readable by all is set to 0644; with no FILE, the toolkit's three repository files.
-# The core runs under `umask 077` (common.sh), which `sudo gpg -o` and
+# The core runs under `umask 077` (settings.sh), which `sudo gpg -o` and
 # `sudo tee` inherit, so these files came out 0600. apt reads a source list and checks
 # its keyring as the unprivileged _apt user: with a 0600 keyring it refused the
 # repository as "not signed" (NO_PUBKEY) and the install stopped, and the 0600 files it
@@ -353,7 +353,7 @@ _nvidia_toolkit_repo_fetch() {
 
 # _nvidia_container_toolkit_package -- nvidia-container-toolkit from NVIDIA's
 # repository, unless an nvidia-ctk that answers is already here. It touches no
-# container runtime: k3s.sh's _native_k3s_gpu_prepare runs it, then writes the CDI
+# container runtime: k3s-gpu.sh's _native_k3s_gpu_prepare runs it, then writes the CDI
 # spec (slim client 1.1i).
 _nvidia_container_toolkit_package() {
   log "Setting up NVIDIA container toolkit"

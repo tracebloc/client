@@ -2,10 +2,10 @@
 # =============================================================================
 #  install-client-helm.sh — Install Tracebloc client (steps 3 & 4)
 #  Generates values from defaults + user prompts (workspace, clientId, clientPassword)
-#  and GPU detection. Values file is written to HOST_DATA_DIR/values.yaml.
+#  and GPU detection. Values file is written to host_data_dir/values.yaml.
 # =============================================================================
 
-# The xtrace hold (common.sh). A no-op with a common.sh from before it, so a mixed
+# The xtrace hold (output.sh). A no-op with an output.sh from before it, so a mixed
 # set of libs runs, unheld, rather than stopping on a missing command.
 declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
 declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
@@ -39,2631 +39,6 @@ _ensure_helm_runnable() {
   error "Installation tools could not be run. Try: sudo chmod 755 $helm_bin then re-run this script."
 }
 
-# ── Training-size default (option A; floored) ─────
-# One knob. MEMORY is requests == limits; CPU is a request-only share weight
-# with no limit, so on a CPU edge the pod is BURSTABLE, not Guaranteed QoS --
-# see the L0.2 rationale at `_training_limits` below, which this header used to
-# contradict outright.
-#
-# ON A GPU EDGE IT IS BestEffort, NOT BURSTABLE, and saying BURSTABLE flat here
-# was the same overshoot this branch fixed in the schema, in the file it was not
-# fixed for. `_gpu_request_value` emits
-# `nvidia.com/gpu=1` / `amd.com/gpu=1`, and client-runtime's `_get_gpu_resources`
-# returns ONLY that plus ephemeral-storage -- it never reads RESOURCE_REQUESTS /
-# RESOURCE_LIMITS on that path. QoS is computed from cpu and memory alone
-# (`isSupportedQoSComputeResource`), so both accumulators are empty and the pod
-# lands in the worst class: first choice for OOM kill and eviction, on a node it
-# shares with mysql and jobs-manager.
-#
-# THE TICKET IS CLOSED WITH THIS HALF UNFIXED, which is why it is written here
-# rather than left as a reference. An earlier ticket raised both GPU BestEffort
-# workloads; a fix covered the DEVICE-PLUGIN half (both DaemonSets are now
-# Guaranteed) and the issue was closed, while the TRAINING-pod half stayed open
-# and lost its record. `scripts/tests/pod-qos-class.py` asserts the shape from
-# this side -- "gpu + ephemeral-storage only, no cpu/memory -> BestEffort" -- but
-# the fix belongs in client-runtime.
-#
-# The old static default
-# ("cpu=2,memory=8Gi") was wrong at both ends: dead on arrival on nodes under
-# 8 GiB (the WSL2 field case, and a default Docker Desktop VM — nothing could
-# ever schedule) and ~12% of a 64 GiB box. Precedence:
-#   1. TRACEBLOC_TRAINING_RESOURCES  (explicit install-time override)
-#   2. the installed release's current value — a `tracebloc resources set`
-#      choice must survive re-install, never be clobbered back to a default
-#   3. sized to this machine: LARGEST node allocatable − platform overhead
-#      (~1 CPU / 3 GiB, the cli's constants; a pod schedules onto ONE node, so
-#      summing nodes would over-count)
-#   4. the contract FLOOR (tiny or undeterminable machines) — the fallback the
-#      installer writes when it cannot do better. Was the 8Gi literal above,
-#      which exceeded a default Docker Desktop and sat Pending forever, so
-#      floored it. _TRAINING_DEFAULT is DERIVED from the embedded
-#      floor constants (below, so it cannot drift from the contract).
-
-# k8s cpu quantity -> millicores ("12" -> 12000, "11500m" -> 11500, "0.5" -> 500);
-# empty on junk.
-#
-# The fractional-cores arm exists for _measured_system_requests:
-# node allocatable is always serialised as whole cores or `m`, but a third-party
-# system pod may request `0.5`, and a quantity this cannot read makes the whole
-# measurement unusable rather than silently counting as zero. Digits after the
-# point beyond the third are truncated (floored), never rounded up.
-_cpu_to_milli() {
-  local v="$1" whole frac
-  case "$v" in
-    *m) case "${v%m}" in ''|*[!0-9]*) : ;; *) printf '%s' "${v%m}" ;; esac ;;
-    *.*)
-      # `.5` and `5.` are valid quantities (Kubernetes reads them as 0.5 and 5),
-      # so either side of the dot may be empty but not both -- and a glob
-      # `[0-9]*` means ONE digit then anything, which is how the old arm
-      # refused `.5` while its comment said otherwise (measured).
-      whole="${v%%.*}"; frac="${v#*.}"
-      case "$whole$frac" in ''|*[!0-9]*|*.*) return 0 ;; esac
-      frac="${frac}000"; frac="${frac:0:3}"
-      # `10#` -- a fraction like 050 would otherwise be read as octal; an empty
-      # whole is 0.
-      printf '%s' "$(( 10#${whole:-0} * 1000 + 10#$frac ))" ;;
-    ''|*[!0-9]*) : ;;
-    *) printf '%s' "$(( v * 1000 ))" ;;
-  esac
-}
-# k8s memory quantity -> bytes (binary Ki/Mi/Gi/Ti/Pi, decimal k/M/G/T/P, or
-# plain bytes); empty on junk. The decimal arms were added for the same reason as
-# the fractional-cores arm above: the chart and kubelet speak `Mi`, but a system
-# pod may say `250M`, and an unreadable quantity must be a refusal, not a zero.
-# The Pi/P arms exist because the retired PowerShell core had them and this did
-# not: this reader replays
-# scripts/tests/fixtures/quantity_vectors.json, so the grammar is held by a
-# test, not by a comment claiming it.
-_mem_to_bytes() {
-  local v="$1" n
-  case "$v" in
-    *Ki|*Mi|*Gi|*Ti|*Pi) n="${v%??}" ;;
-    *k|*M|*G|*T|*P)      n="${v%?}" ;;
-    *)                   n="$v" ;;
-  esac
-  case "$n" in ''|*[!0-9]*) return 0 ;; esac
-  case "$v" in
-    *Ki) printf '%s' "$(( n * 1024 ))" ;;
-    *Mi) printf '%s' "$(( n * 1024 * 1024 ))" ;;
-    *Gi) printf '%s' "$(( n * 1024 * 1024 * 1024 ))" ;;
-    *Ti) printf '%s' "$(( n * 1024 * 1024 * 1024 * 1024 ))" ;;
-    *Pi) printf '%s' "$(( n * 1024 * 1024 * 1024 * 1024 * 1024 ))" ;;
-    *k)  printf '%s' "$(( n * 1000 ))" ;;
-    *M)  printf '%s' "$(( n * 1000 * 1000 ))" ;;
-    *G)  printf '%s' "$(( n * 1000 * 1000 * 1000 ))" ;;
-    *T)  printf '%s' "$(( n * 1000 * 1000 * 1000 * 1000 ))" ;;
-    *P)  printf '%s' "$(( n * 1000 * 1000 * 1000 * 1000 * 1000 ))" ;;
-    *)   printf '%s' "$n" ;;
-  esac
-}
-
-# ONE lookup of the installed release's carried training values, echoing
-# "<size>|<provenance>" or NOTHING.
-#
-# The two used to be read by two independent `helm get values` calls. That is
-# fail-unsafe in BOTH directions, and each installer found a different half of
-# it: on PowerShell a failed provenance read reported `installer` for a carried
-# size, inviting a ladder to overrule a human; on bash a failed provenance read
-# reported `unknown`, which consumers treat as a human pin — so an
-# installer-sized edge was PERMANENTLY STRANDED as a deliberate choice, the very
-# outcome scope bullet 4 exists to prevent.
-#
-# One lookup removes both: either it succeeds and the size and the marker come
-# from the same read, or it fails and NOTHING is carried, so the caller machine-
-# sizes and `installer` is then the correct verdict. They cannot disagree.
-#
-# Handles both the quoted form our values file writes and the unquoted form
-# helm re-serializes (`helm get values` strips quotes).
-# Provenance is normalised here: anything unrecognised, including absent, is
-# `unknown`, never a guess.
-_existing_training_values() {
-  local ns="${TB_NAMESPACE:-}" out
-  [[ -n "$ns" ]] || return 0
-  # helm get has no request timeout, so gate it behind a BOUNDED probe: a
-  # wedged API degrades to machine sizing / the static default instead of
-  # hanging values generation. A missing namespace also means there
-  # is no release to carry — skip the helm call entirely.
-  kubectl get namespace "$ns" --request-timeout=5s >/dev/null 2>&1 || return 0
-  # The stored values hold clientPassword and the chart's other secrets, so they are
-  # read inside the pipe and never held: only the three keys below leave it. A trace
-  # (bash -x, which the install log keeps) then shows "<size>|<provenance>", never
-  # the values. pipefail: a helm that fails carries nothing. The awk reads to EOF
-  # (no early exit), so helm is never SIGPIPE'd into a false failure.
-  #
-  # READ RESOURCE_REQUESTS, FALL BACK TO RESOURCE_LIMITS.
-  #
-  # This used to read RESOURCE_LIMITS only, which was fine while both fields
-  # held the same string. Since L0.2 the limits half is memory-only, so reading
-  # it here breaks a REINSTALL two ways:
-  #
-  #   * the carried "size" comes back as `memory=29Gi`, and the caller writes
-  #     that into RESOURCE_REQUESTS — silently DROPPING the cpu request, so the
-  #     pod asks for no CPU share at all;
-  #   * the historic-literal gate below compares against `cpu=2,memory=8Gi`, so
-  #     a carried `memory=8Gi` no longer matches. The post-filter default is
-  #     then mistaken for a deliberate human choice and the machine is never
-  #     re-sized.
-  #
-  # RESOURCE_REQUESTS still carries the WHOLE envelope, so it is the field to
-  # read. LIMITS remains the fallback for a release installed before requests
-  # was written, or a chart-direct install that set only that key.
-  #
-  # Each key is its FIRST line, read whole; an empty RESOURCE_REQUESTS falls back to
-  # LIMITS. No carried size prints nothing: nothing to attribute, the caller sizes
-  # the machine.
-  out="$(set -o pipefail; helm get values "$ns" -n "$ns" 2>/dev/null </dev/null | awk '
-    function val(   v) { v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); gsub(/"/, "", v); return v }
-    /^[[:space:]]*RESOURCE_REQUESTS:/   && !sr { sr = 1; req = val() }
-    /^[[:space:]]*RESOURCE_LIMITS:/     && !sl { sl = 1; lim = val() }
-    /^[[:space:]]*RESOURCE_PROVENANCE:/ && !sp { sp = 1; prov = val() }
-    END {
-      size = (req != "" ? req : lim)
-      if (size == "") exit
-      if (prov != "installer" && prov != "user") prov = "unknown"
-      printf "%s|%s", size, prov
-    }')" || return 0
-  printf '%s' "$out"
-}
-
-# The installed release's carried ENVELOPE (RESOURCE_REQUESTS, or LIMITS when
-# that is absent), or nothing. Thin reader over the one shared lookup, kept
-# because it is the tested, readable entry point.
-_existing_training_resources() {
-  local v
-  v="$(_existing_training_values)"
-  [[ -n "$v" ]] || return 0
-  printf '%s' "${v%%|*}"
-}
-
-# ── envelope contract (GENERATED — do not hand-edit) ─────────────────────────
-#
-# These four numbers used to be typed out
-# here, again in the PowerShell core, and a third time in cli's set.go, with a
-# fourth policy in client-runtime's node_sizing.py. Four copies, none derived
-# from the others.
-#
-# They now come from ONE place — client-runtime/envelope_contract.json, whose
-# arithmetic lives in node_sizing.envelope_from_allocatable. bash cannot parse
-# JSON (jq is not a guaranteed prerequisite — see the helm-namespace note
-# below) and the bootstrap is signed and must not fetch anything unsigned, so
-# the constants are EMBEDDED here.
-#
-# What keeps an embed honest is the drift guard, not the comment:
-#   * scripts/tests/install-client-helm.bats replays the contract's golden
-#     vectors through _machine_training_resources, so a constant edited here
-#     and nowhere else reddens immediately;
-#   * .github/workflows/envelope-contract-drift.yml re-checks the vendored
-#     fixture against client-runtime at scripts/.client-runtime-ref.
-#
-# Regenerate after an upstream contract change:
-#   scripts/gen-envelope-embed.sh
-_TB_ENVELOPE_CONTRACT_VERSION=10
-_TB_ENVELOPE_OVERHEAD_CPU_MILLI=650
-_TB_ENVELOPE_OVERHEAD_MEM_BYTES=2516582400
-_TB_ENVELOPE_FLOOR_CPU_MILLI=1000
-_TB_ENVELOPE_FLOOR_MEM_BYTES=2147483648
-# The ingestion Job's requests, one component of the overhead above. The fit
-# verdict keeps them free beside the training run (_fit_verdict).
-_TB_ENVELOPE_INGESTION_CPU_MILLI=0
-_TB_ENVELOPE_INGESTION_MEM_BYTES=268435456
-# ── end generated ───────────────────────────────────────────────────────────
-
-# ── the chart's own control-plane footprint (GENERATED — do not hand-edit) ──
-#
-# What the chart's steady-state control plane REQUESTS -- every
-# Deployment/StatefulSet/DaemonSet container, the scheduler's max(sum(app),
-# max(init)) per pod, one-shot hook Jobs excluded -- summed from `helm template`
-# by scripts/tests/control-plane-footprint.sh and embedded here by
-# scripts/gen-footprint-embed.sh. The overhead constant above is what the
-# envelope SUBTRACTS for the platform; this is what the platform actually ASKS
-# the scheduler for, and since 2026-09 the two disagree (the footprint is larger).
-# _fit_training_envelope compares the envelope against allocatable minus THIS,
-# so a chart change that raises a request shrinks the envelope on the next
-# install instead of leaving the training pod Pending.
-#
-# Embedded, not summed at install time, for the same reason as the block above:
-# the runtime installer guarantees neither jq nor python3, and the bootstrap is
-# signed. What keeps it honest is `scripts/gen-footprint-embed.sh --check` in
-# `make drift` (the required Source-of-truth drift job): the value below must
-# equal a fresh render of the chart in the same tree, or CI reddens.
-_TB_CP_FOOTPRINT_MEM_BYTES=2248146944
-_TB_CP_FOOTPRINT_CPU_MILLI=650
-# The TRANSIENT the chart's CronJobs may have resident on top of the steady state
-# (auto-upgrade + image-refresh, both Forbid, routinely co-resident), summed by
-# `control-plane-footprint.sh --print-transient`. Not part of the
-# per-node envelope overhead -- a CronJob pod is not a training pod's neighbour
-# for long -- but part of what the VM beneath the nodes must hold for the
-# smallest rung to stay schedulable at the moment both fire.
-_TB_CP_TRANSIENT_MEM_BYTES=402653184
-_TB_CP_TRANSIENT_CPU_MILLI=700
-# ── end generated ───────────────────────────────────────────────────────────
-
-# ── when the training envelope reserves that transient ──
-#
-# A training run lasts hours, so an hourly CronJob that has to wait for it stays
-# Pending the whole run: on an 8.4 GiB / 10-CPU machine the auto-upgrade failed
-# at its deadline behind one. _fit_verdict therefore reserves _TB_CP_TRANSIENT_*
-# beside the chart's steady state -- but only on a node whose allocatable CPU is
-# at least this much. Below it the envelope is today's and upgrades wait while a
-# run trains: reserving 700 m there refuses a 2-core machine outright (1900 m
-# allocatable leaves 350 m, under one core) and takes a core off every 4-core
-# one. Hand-typed, not generated: a product threshold, not a chart fact.
-_TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI=8000
-
-# ── k3s's own addons, as a FLOOR ──────────────────
-#
-# What k3s's bundled addons request on the node native k3s sets up: coredns
-# 100m / 70Mi and metrics-server 100m / 70Mi (k3s's packaged manifests). k3s.sh's
-# config drops traefik and servicelb, and the
-# local-path-provisioner, where it is kept, requests nothing, so these two are
-# the whole of it. Hand-typed, not generated: the numbers live in k3s's
-# binary, not in this tree. A k3s bump that changes them is caught only by `tracebloc doctor`
-# on a small machine -- which is how this was found.
-#
-# WHY A FLOOR. _fit_training_envelope already MEASURES the system pods -- but
-# only the ones that are scheduled when values are generated. On a fresh native
-# k3s the addons can still be Pending (no nodeName) or not yet created at that
-# moment, so the measurement came back 0 and the envelope was checked against
-# the chart alone. On a 2 vCPU / 7 GB machine that is 5250 MiB allocatable -
-# 2112 MiB chart = 3138 MiB, which "fits" with nothing to spare; once
-# the addons land, 2998 MiB is free and doctor says Not ready. The floor makes
-# the fit count what WILL be on the node, whatever has been scheduled so far.
-_TB_K3S_ADDON_MEM_BYTES=146800640
-_TB_K3S_ADDON_CPU_MILLI=200
-
-# Echo "<mem bytes> <cpu m>" -- the system-pod floor native k3s guarantees will be
-# on the node -- or NOTHING when there is no known floor (a substrate this
-# installer does not set up).
-_system_requests_floor() {
-  case "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" in
-    k3s) ;;
-    *) return 0 ;;
-  esac
-  printf '%s %s' "$_TB_K3S_ADDON_MEM_BYTES" "$_TB_K3S_ADDON_CPU_MILLI"
-}
-
-# ── the fallback training envelope (precedence step 4) ──────────────────────
-# The contract FLOOR — cpu=1,memory=2Gi — DERIVED from the embedded floor
-# constants so it cannot drift from envelope_contract.json. Written when the
-# machine is unschedulable or unreadable. Was cpu=2,memory=8Gi, which exceeded a
-# default Docker Desktop VM and left a fresh install Pending forever; the floor
-# is the largest fallback that still fits the smallest host we support
-# The bats suite pins it to the embedded floor.
-_TRAINING_DEFAULT="cpu=$(( _TB_ENVELOPE_FLOOR_CPU_MILLI / 1000 )),memory=$(( _TB_ENVELOPE_FLOOR_MEM_BYTES / 1024 / 1024 / 1024 ))Gi"
-
-# The historic fallback literal (pre-floor). FROZEN — NOT the current
-# default — kept only so the carry gate in _resolve_training_size still
-# RECOGNISES it: existing field installs carry cpu=2,memory=8Gi as their
-# absence-of-a-choice default and must re-derive on re-install rather than
-# freeze an unschedulable 8Gi. The current floor default is deliberately NOT
-# matched by that gate — a human may legitimately `tracebloc resources set` the
-# floor, and precedence step 2 says that choice must survive.
-_TRAINING_DEFAULT_HISTORIC="cpu=2,memory=8Gi"
-
-# The node line contract, in ONE place.
-#
-# Three whitespace-separated fields per node: allocatable cpu, allocatable
-# memory, and `.spec.unschedulable`. Kubernetes declares Unschedulable with
-# `omitempty`, so a normal node emits nothing for the third field and the line
-# carries a trailing space; only a CORDONED node emits the literal `true`. The
-# reader therefore tests for `true` rather than for emptiness.
-#
-# Extended from two fields to three later: the contract's
-# skipped_nodes has always said `spec.unschedulable (cordoned)` is skipped, but
-# neither installer ASKED the API for the field, so neither could honour it.
-# The cluster states it is read on are pinned by the shared fixture,
-# scripts/tests/fixtures/installer_parity.json.
-_TB_NODE_JSONPATH='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{" "}{.spec.unschedulable}{"\n"}{end}'
-
-# ONE ranking of the cluster's nodes, shared by _machine_training_resources and
-# _machine_training_ceiling.
-#
-# The anchor is the contract's ANCHOR_LARGEST: a training pod takes all its
-# resources from ONE node, so this question is single-node by nature and must
-# never sum across the cluster. The tie-break is (cpu, memory) — the contract's
-# order, and a fix: this used to rank nodes (memory, cpu) while cli's nodeLarger
-# ranked them (cpu, memory), so on a cluster of 8c/16Gi + 4c/32Gi the installer
-# and `tracebloc resources set` anchored on DIFFERENT nodes and disagreed about
-# the same machine. Nobody chose that; it fell out of two independent
-# implementations.
-#
-# Extracted because the loop was written out TWICE, once per
-# caller, and the cordon skip would have had to be added to both. Two copies of
-# a selection rule is exactly how the (memory, cpu) / (cpu, memory) split above
-# happened; one copy cannot drift from itself.
-#
-# The contract's skipped_nodes, both honoured here:
-#   * spec.unschedulable (cordoned) — a cordoned node accepts no new pods, so
-#     anchoring on one writes an envelope that cannot schedule. On a
-#     heterogeneous cluster a cordoned LARGE node would otherwise win the
-#     anchor outright and every training pod would sit Pending with no obvious
-#     cause. The cordon skip matters on any cluster with a cordoned node.
-#   * allocatable cpu or memory unparseable — skipped rather than coerced to 0,
-#     so a node whose memory unit we do not speak cannot take the anchor and
-#     drag a perfectly sizeable sibling down to the literal.
-#
-# Sets _TB_ANCHOR_CPU_MILLI / _TB_ANCHOR_MEM_BYTES and returns 0 when at least
-# one node was measured; returns 1 when the cluster is unreadable or no node
-# survived the skips. Callers must treat 1 as "I could not measure the machine",
-# which is NOT the same as "the machine is too small".
-_anchor_largest_schedulable() {
-  has kubectl || return 1
-  local lines cpu mem unsched cpu_m mem_b best_cpu=0 best_mem=0 seen=0
-  # Bounded: a wedged API server must degrade to the static default, never
-  # hang values generation.
-  lines="$(kubectl get nodes --request-timeout=10s -o jsonpath="$_TB_NODE_JSONPATH" 2>/dev/null)" || return 1
-  [[ -n "$lines" ]] || return 1
-  while read -r cpu mem unsched; do
-    [[ -n "$cpu" && -n "$mem" ]] || continue
-    # Cordoned: skipped BEFORE ranking, so it can never win the anchor.
-    # Written `!= ... || continue`, not `== ... && continue`: the latter
-    # evaluates to 1 for every SCHEDULABLE node, which under the installer's
-    # `set -euo pipefail` aborts the whole run (the shape the shared
-    # `early-close` gate in tracebloc/org-config's code-quality.yml catches).
-    [[ "$unsched" != "true" ]] || continue
-    cpu_m="$(_cpu_to_milli "$cpu")"
-    mem_b="$(_mem_to_bytes "$mem")"
-    [[ -n "$cpu_m" && -n "$mem_b" ]] || continue
-    if (( seen == 0 )) || (( cpu_m > best_cpu )) \
-       || { (( cpu_m == best_cpu )) && (( mem_b > best_mem )); }; then
-      best_cpu=$cpu_m
-      best_mem=$mem_b
-    fi
-    seen=1
-  done <<< "$lines"
-  (( seen == 1 )) || return 1
-  _TB_ANCHOR_CPU_MILLI=$best_cpu
-  _TB_ANCHOR_MEM_BYTES=$best_mem
-}
-
-# Echo "cpu=N,memory=MMi" sized to the largest schedulable node, or nothing when
-# the cluster is unreadable / the machine cannot give a run the contract floor.
-#
-# Node selection lives in _anchor_largest_schedulable; this function is the
-# arithmetic and the rendering only.
-_machine_training_resources() {
-  _anchor_largest_schedulable || return 0
-  local run_cpu_m=$(( _TB_ANCHOR_CPU_MILLI - _TB_ENVELOPE_OVERHEAD_CPU_MILLI ))
-  local run_mem_b=$(( _TB_ANCHOR_MEM_BYTES - _TB_ENVELOPE_OVERHEAD_MEM_BYTES ))
-  (( run_cpu_m < 0 )) && run_cpu_m=0
-  (( run_mem_b < 0 )) && run_mem_b=0
-  # Below the contract floor the machine is NOT VIABLE. Emit nothing and let
-  # the caller fall back to _TRAINING_DEFAULT. That fallback used to be the 8Gi
-  # literal — larger than such a machine, a known bug; since
-  # it is the contract floor, which fits. The fallback structure is
-  # deliberately kept revertable — only the value it writes changed.
-  { (( run_cpu_m >= _TB_ENVELOPE_FLOOR_CPU_MILLI )) \
-    && (( run_mem_b >= _TB_ENVELOPE_FLOOR_MEM_BYTES )); } || return 0
-  printf 'cpu=%d,memory=%dMi' "$(( run_cpu_m / 1000 ))" "$(( run_mem_b / 1024 / 1024 ))"
-}
-
-# The LIMITS half of a training envelope: memory only, never cpu.
-#
-# WHY THE TWO HALVES DIFFER. CPU and memory are not the same kind of resource:
-#
-#   * CPU is time-shared. A `requests` with NO `limits` becomes a cgroup
-#     `cpu.weight` -- a share of the machine under contention, and the whole
-#     machine when nobody else wants it. With `requests == limits` it becomes a
-#     `cpu.max` QUOTA instead, which throttles at the ceiling even on a
-#     completely idle box. On an 8-core machine a run sized to 7 cores was
-#     capped at 7 while the 8th sat idle, for no benefit to anyone.
-#   * Memory is NOT time-shared. There is no "borrow it back": exceeding the
-#     limit is an OOM kill. So `requests == limits` is the load-bearing safety
-#     property and it does NOT move.
-#
-# Guaranteed QoS is lost by design -- a pod is Guaranteed only when every
-# container has limits for both dimensions. That is the trade L0.2 makes: the
-# memory guarantee is what mattered, and CPU burstability is what lets a second
-# job exist at all.
-#
-# ORDERING CONSTRAINT, not optional: this requires a jobs-manager that treats
-# RESOURCE_LIMITS as the COMPLETE limits envelope. An older
-# image MERGES the parsed pairs onto its built-in cpu=2,memory=8Gi literal, so
-# an omitted `cpu` comes back as a 2-core LIMIT under a 7-core REQUEST -- which
-# Kubernetes rejects outright, and the pod never schedules. Do not ship this
-# chart to an edge whose client-runtime predates the limits ordering fix.
-_training_limits() {
-  local size="$1" out="" pair
-  local IFS=,
-  for pair in $size; do
-    # TRIM FIRST. `case " cpu=7 " in cpu=*)` does NOT match, so an operator who
-    # wrote `TRACEBLOC_TRAINING_RESOURCES="cpu=7, memory=29Gi"` would keep the
-    # cpu limit -- silently, and in the dangerous direction. The retired
-    # PowerShell core trimmed via `.Trim()`, so skipping it here was also a twin
-    # DIVERGENCE: the same shared contract, two different control flows, which is
-    # the same bug class as the other shared-contract copies. jobs-manager's own parser
-    # strips too, so trimmed output is what it would have read anyway.
-    pair="${pair#"${pair%%[![:space:]]*}"}"
-    pair="${pair%"${pair##*[![:space:]]}"}"
-    [[ -n "$pair" ]] || continue
-    # CASE-INSENSITIVE, via character classes rather than `${pair,,}` — this
-    # bootstrap has to run under macOS's bash 3.2, which has no case conversion.
-    #
-    # It was a twin DIVERGENCE: the PowerShell core's
-    # `-like 'cpu=*'` was case-insensitive, so `CPU=7,memory=29Gi` dropped the
-    # cpu limit on Windows and kept it on Linux/macOS. Same class as the
-    # whitespace-trim divergence, and every parity fixture row is lowercase, so
-    # nothing pinned it.
-    case "$pair" in
-      [Cc][Pp][Uu]=*) continue ;;
-    esac
-    out="${out:+$out,}$pair"
-  done
-  # Nothing survived the filter -- a cpu-only envelope, which is not something
-  # to guess at. Return the INPUT UNCHANGED rather than an empty string: an
-  # empty RESOURCE_LIMITS reads to jobs-manager as "unset", which since
-  # mirrors the requests side back and resurrects the very
-  # cpu limit this function exists to drop.
-  #
-  # `$size` itself is never empty on any reachable path: _training_resources'
-  # four-way fallback chain (env override -> installed release -> machine sizing
-  # -> the contract-floor literal) always yields a value. An empty input would
-  # return empty here, and that is the honest answer -- there is nothing to say
-  # about an envelope that does not exist.
-  printf '%s' "${out:-$size}"
-}
-
-# Echo "<size>|viable" or "<size>|undersized" for the largest node, or NOTHING
-# when the cluster is unreadable.
-#
-# The distinction this adds is the whole point: "I cannot see the machine" and
-# "I can see it and it is too small" used to collapse into the same empty
-# answer, so both fell through to the fallback literal. When that literal was
-# cpu=2,memory=8Gi, on a machine with ~4 GiB allocatable it was LARGER THAN THE
-# MACHINE, so every training pod stayed Pending forever -- and preflight lets
-# exactly those machines install: it hard-fails below 5 GB on Linux and only
-# WARNS on macOS/Windows (PF_MIN_MEM_GB=5), while its own comment notes a job's
-# limit is ~8 GiB+. So the permitted band and the unschedulable band overlapped.
-#
-# Unreadable is still unreadable and still gets the fallback -- we genuinely
-# cannot do better without measuring. That fallback is the
-# contract floor, not the 8Gi literal, so it now FITS; the "read it, it is
-# small" case likewise gets the honest remainder, which fits too.
-#
-# Node selection is the SAME _anchor_largest_schedulable the sizing path uses,
-# so the warning the caller prints can never describe a different node than the
-# value it wrote.
-_machine_training_ceiling() {
-  _anchor_largest_schedulable || return 0
-
-  local run_cpu_m=$(( _TB_ANCHOR_CPU_MILLI - _TB_ENVELOPE_OVERHEAD_CPU_MILLI ))
-  local run_mem_b=$(( _TB_ANCHOR_MEM_BYTES - _TB_ENVELOPE_OVERHEAD_MEM_BYTES ))
-  (( run_cpu_m < 0 )) && run_cpu_m=0
-  (( run_mem_b < 0 )) && run_mem_b=0
-
-  # Memory in floored MiB, the contract's writing unit (v10): whole GiB threw
-  # away up to 1023 MiB of the run's room.
-  local cores=$(( run_cpu_m / 1000 ))
-  local mib=$(( run_mem_b / 1024 / 1024 ))
-
-  if (( run_cpu_m >= _TB_ENVELOPE_FLOOR_CPU_MILLI )) \
-     && (( run_mem_b >= _TB_ENVELOPE_FLOOR_MEM_BYTES )); then
-    printf 'cpu=%d,memory=%dMi|viable' "$cores" "$mib"
-    return 0
-  fi
-
-  # Below the contract floor. Report the honest remainder when it is a
-  # REQUESTABLE shape -- at least one whole core and one whole GiB. Reachable
-  # only on macOS/Windows, where the memory preflight warns instead of failing.
-  if (( cores >= 1 && mib >= 1024 )); then
-    printf 'cpu=%d,memory=%dMi|undersized' "$cores" "$mib"
-    return 0
-  fi
-
-  # A node WAS parsed and the remainder is not even a requestable shape (cpu=0 is
-  # not a training request). Reported as its own verdict rather than as silence,
-  # because silence here is indistinguishable from "I could not read the
-  # cluster" -- and those must not be treated alike. Warning that a machine is
-  # too small when we never managed to measure it is a fabrication, and the
-  # caller used to do exactly that by re-probing `kubectl get nodes -o name`:
-  # any listable node, including one whose allocatable would not parse or which
-  # is not Ready yet, tripped the hard warning. The PowerShell core only flagged
-  # it after a PARSED node, so the two disagreed on the same cluster -- the
-  # divergence class the shared helper exists to remove.
-  printf '|unschedulable'
-  return 0
-}
-
-# The installed release's RESOURCE_PROVENANCE (nested under env:), or nothing.
-# Same awk shape as _existing_training_resources — `helm get values` strips the
-# quotes our values file writes.
-# The installed release's RESOURCE_PROVENANCE, or nothing. Thin reader over the
-# same shared lookup, so it can never disagree with the size beside it.
-_existing_training_provenance() {
-  local v
-  v="$(_existing_training_values)"
-  [[ -n "$v" ]] || return 0
-  printf '%s' "${v##*|}"
-}
-
-# Resolve the per-run training size AND who chose it, in one pass.
-#
-# Split out of _training_resources (which is now a thin wrapper over it) because
-# the two answers come from the same branch decision and the caller needs both.
-# Deriving them separately would mean either running the cluster probes twice or
-# re-implementing the branch logic beside itself — the exact duplication
-# exists to delete.
-#
-# Sets, in the CALLER's scope (so a subshell cannot swallow them):
-#   _TB_TRAINING_SIZE       "cpu=N,memory=MMi" (or the user's own)
-#   _TB_TRAINING_PROVENANCE installer | user | unknown
-#
-# Why provenance is needed at all: RESOURCE_* has no unset state once helm's
-# --reset-then-reuse-values has seen it, so an installer-written value and a
-# deliberate `tracebloc resources set` are indistinguishable once the value
-# differs from the historic literal. Without a marker, any future ladder that
-# re-derives sizes would silently overrule human choices. With one, it can
-# re-derive `installer` values and leave the rest alone.
-_resolve_training_size() {
-  _TB_TRAINING_SIZE=""
-  _TB_TRAINING_PROVENANCE=""
-  # Set when the machine is readable but below the training floor. The WARNING
-  # lives in the caller, never here: _training_resources / _training_provenance
-  # are captured with $(...) and their tests compare the whole output, so a warn
-  # emitted from this function would corrupt every one of them.
-  _TB_TRAINING_UNDERSIZED=0
-  _TB_TRAINING_UNSCHEDULABLE=0
-
-  # 1. An explicit install-time override IS a human choice, same as the CLI's.
-  if [[ -n "${TRACEBLOC_TRAINING_RESOURCES:-}" ]]; then
-    _TB_TRAINING_SIZE="$TRACEBLOC_TRAINING_RESOURCES"
-    _TB_TRAINING_PROVENANCE="user"
-    return 0
-  fi
-
-  # ONE lookup, both fields — see _existing_training_values. Calling the two
-  # readers separately here would reintroduce exactly the split this fixes.
-  local carried prev prev_prov
-  carried="$(_existing_training_values)"
-  prev="${carried%%|*}"
-  [[ -n "$carried" ]] || prev=""
-  # The historic static default was the ABSENCE of a choice, not a choice —
-  # carrying it would keep the unschedulable 8Gi on exactly the machines this
-  # sizing exists to fix. Only a value that differs from it survives.
-  # Matched against the FROZEN historic literal, NOT _TRAINING_DEFAULT: since
-  # the latter is the contract floor, which a human may deliberately
-  # pin — and precedence step 2 says that choice must survive re-install, so the
-  # gate must not re-derive it. A field install predating the floor still carries the
-  # 8Gi literal; that is what this recognises as a non-choice and re-sizes.
-  if [[ -n "$prev" && "$prev" != "$_TRAINING_DEFAULT_HISTORIC" ]]; then
-    _TB_TRAINING_SIZE="$prev"
-    prev_prov="${carried##*|}"
-    case "$prev_prov" in
-      installer|user)
-        # A marker already on the release is authoritative — preserve it, or a
-        # re-install would quietly downgrade a `user` choice to `unknown`.
-        _TB_TRAINING_PROVENANCE="$prev_prov"
-        ;;
-      *)
-        # Carried forward from before this key existed. We genuinely cannot tell
-        # who set it, and saying so is better than guessing: consumers treat
-        # `unknown` as `user` and leave it alone.
-        _TB_TRAINING_PROVENANCE="unknown"
-        ;;
-    esac
-    return 0
-  fi
-
-  # 2. Sized to this machine, or 3. the static default — both are OUR choice.
-  local ceiling
-  ceiling="$(_machine_training_ceiling)"
-  case "$ceiling" in
-    *'|viable')
-      _TB_TRAINING_SIZE="${ceiling%|viable}"
-      ;;
-    *'|undersized')
-      # The machine is real and readable but below the training floor. Write the
-      # honest remainder: it FITS, which the 8 GiB literal does not, so a run can
-      # at least be scheduled and fail for a reason instead of sitting Pending.
-      _TB_TRAINING_SIZE="${ceiling%|undersized}"
-      _TB_TRAINING_UNDERSIZED=1
-      ;;
-    '|unschedulable')
-      # Measured, and the machine cannot host even a 1-core/1-GiB run. Keep the
-      # literal -- there is no honest number to write -- and let the caller warn.
-      _TB_TRAINING_SIZE="$_TRAINING_DEFAULT"
-      _TB_TRAINING_UNSCHEDULABLE=1
-      ;;
-    *)
-      # We could not read the cluster (no kubectl, a wedged API, or nothing
-      # parseable). Keep the historical default and stay SILENT about machine
-      # size: we never measured it, so any claim about it would be invented.
-      _TB_TRAINING_SIZE="$_TRAINING_DEFAULT"
-      ;;
-  esac
-  _TB_TRAINING_PROVENANCE="installer"
-  return 0
-}
-
-# The per-run training size for the generated values ("cpu=N,memory=MMi").
-# Thin wrapper kept because it is the tested, readable entry point; the values
-# generation calls _resolve_training_size directly so it gets both answers from
-# a single pass of the cluster probes.
-_training_resources() {
-  _resolve_training_size
-  printf '%s' "$_TB_TRAINING_SIZE"
-}
-
-# Who chose the size _training_resources reports (installer | user | unknown).
-_training_provenance() {
-  _resolve_training_size
-  printf '%s' "$_TB_TRAINING_PROVENANCE"
-}
-
-# _envelope_display SIZE -- a training envelope ("cpu=12,memory=10854Mi") as a person
-# reads it: "12 CPU cores · 10.6 GB memory", GB in tenths to the nearest. Nothing when
-# SIZE has no readable cpu and memory pair.
-_envelope_display() {
-  local cpu_m mem_b tenths cores gb unit="CPU cores"
-  cpu_m="$(_cpu_to_milli "$(_envelope_dimension "${1:-}" cpu)")"
-  mem_b="$(_mem_to_bytes "$(_envelope_dimension "${1:-}" memory)")"
-  [[ "$cpu_m" =~ ^[0-9]+$ && "$mem_b" =~ ^[0-9]+$ ]] || return 0
-  cores="$(( cpu_m / 1000 ))"
-  if (( cpu_m % 1000 != 0 )); then cores="${cores}.$(( cpu_m % 1000 / 100 ))"; fi
-  if [[ "$cores" == 1 ]]; then unit="CPU core"; fi
-  tenths=$(( (mem_b / 1048576 * 10 + 512) / 1024 ))
-  gb="$(( tenths / 10 ))"
-  if (( tenths % 10 != 0 )); then gb="${gb}.$(( tenths % 10 ))"; fi
-  printf '%s %s · %s GB memory' "$cores" "$unit" "$gb"
-}
-
-# The training envelope this run wrote, as _envelope_display reads it, for the summary:
-# empty until step e writes one, and when it wrote none a run can schedule.
-_TB_COMPUTE_SHOWN=""
-
-# _compute_preview -- at the end of step c, the envelope step e is going to write, from
-# the same resolution and fit, in a subshell so nothing it sets reaches step e. Nothing
-# when the fit refuses it, cannot read the node, or finds no size a run can schedule.
-_compute_preview() {
-  (
-    _resolve_training_size
-    _fit_training_envelope
-    case "${_TB_FIT_VERDICT:-}" in refused|unverified) exit 0 ;; esac
-    (( ${_TB_TRAINING_UNSCHEDULABLE:-0} == 0 )) || exit 0
-    _envelope_display "$_TB_TRAINING_SIZE"
-  ) 2>>"${LOG_FILE:-/dev/null}" || true
-}
-
-# print_environment_created -- step c's last lines: the secure environment is there,
-# and training has a size that fits it (_compute_preview). The size itself is the
-# summary's Compute row.
-print_environment_created() {
-  local compute
-  compute="$(_compute_preview)"
-  success "Secure environment created"
-  if [[ -n "$compute" ]]; then
-    success "Compute resources configured"
-  fi
-}
-
-# ── is the envelope actually schedulable here? ────────────────
-#
-# Everything above sizes the envelope against ALLOCATABLE and stops. Nothing then
-# asked whether the number written can be scheduled beside what else runs on the
-# node: the chart's own control plane (the embedded _TB_CP_FOOTPRINT_* constants,
-# generated from the render by scripts/gen-footprint-embed.sh) plus the
-# distribution's system pods (~140 MiB / 200 m of coredns and metrics-server on
-# k3s). When this was written the chart requested 3136 MiB / 900 m -- MORE than
-# the 3 GiB reserve the envelope subtracts -- so `allocatable - 3 GiB` over-asked
-# at EVERY machine size and the training pod sat `Pending / Insufficient memory`
-# while the installer printed `Training size: ...` and cli doctor said OK.
-# The interim trim (chart 1.9.112) brought the control plane under the
-# reserve, so today the fit below is a no-op on every golden vector; it stays
-# because the constants are generated, not promised, and the next chart that
-# out-requests the reserve should be reduced here rather than sit Pending again.
-#
-# The two functions below make the installer own that question at the moment it
-# writes the envelope. The 3 GiB constant itself is not touched here: fixing the
-# number is this is the check that makes a wrong number visible.
-
-# The pod lines contract for _measured_system_requests. `|`-separated, NOT
-# whitespace: a Pending pod has no nodeName, and `read` would collapse the empty
-# field and shift every column right. Per pod:
-#   <namespace>|<phase>|<nodeName>|<app requests>|<init requests>
-# where each requests field is `cpu/memory,` repeated per container -- an empty
-# cpu or memory reads as "no request", which is what Kubernetes means by it.
-_TB_PODS_JSONPATH='{range .items[*]}{.metadata.namespace}{"|"}{.status.phase}{"|"}{.spec.nodeName}{"|"}{range .spec.containers[*]}{.resources.requests.cpu}{"/"}{.resources.requests.memory}{","}{end}{"|"}{range .spec.initContainers[*]}{.resources.requests.cpu}{"/"}{.resources.requests.memory}{","}{end}{"\n"}{end}'
-# Namespaces and who owns them: `<name>|<meta.helm.sh/release-name>` per line.
-_TB_NAMESPACES_JSONPATH='{range .items[*]}{.metadata.name}{"|"}{.metadata.annotations.meta\.helm\.sh/release-name}{"\n"}{end}'
-
-# The raw value of ONE dimension of an envelope string: `_envelope_dimension
-# "cpu=7, Memory=29Gi" memory` -> `29Gi`. Keys match case-insensitively and pairs
-# are trimmed, the same tolerance _training_limits extends to a human-typed
-# override. Echoes nothing when the key is absent. IFS is local to this function
-# on purpose: a `local IFS` in the caller would leak into every `read` in the
-# functions it calls next (bash scoping is dynamic).
-_envelope_dimension() {
-  local size="$1" want="$2" pair k
-  local IFS=,
-  for pair in $size; do
-    pair="${pair#"${pair%%[![:space:]]*}"}"; pair="${pair%"${pair##*[![:space:]]}"}"
-    k="${pair%%=*}"
-    case "$want:$k" in
-      cpu:[Cc][Pp][Uu]|memory:[Mm][Ee][Mm][Oo][Rr][Yy]) printf '%s' "${pair#*=}"; return 0 ;;
-    esac
-  done
-}
-
-# The effective request of ONE pod's worth of `cpu/memory,` container fields:
-# sum(app containers) for the first argument, max(init containers) for the
-# second, per resource -- the scheduler's formula, the same one
-# control-plane-footprint.sh applies to the render. Echoes "<mem bytes> <cpu m>"
-# or NOTHING when a quantity is present but unreadable, which the caller must
-# treat as "this measurement is unusable", never as zero.
-_pod_effective_requests() {
-  local apps="$1" inits="$2" field c m cm mm
-  local app_m=0 app_c=0 init_m=0 init_c=0
-  local IFS=,
-  for field in $apps; do
-    [[ -n "$field" ]] || continue
-    c="${field%%/*}"; m="${field#*/}"
-    cm=0; mm=0
-    if [[ -n "$c" ]]; then cm="$(_cpu_to_milli "$c")"; [[ -n "$cm" ]] || return 0; fi
-    if [[ -n "$m" ]]; then mm="$(_mem_to_bytes "$m")"; [[ -n "$mm" ]] || return 0; fi
-    app_c=$(( app_c + cm )); app_m=$(( app_m + mm ))
-  done
-  for field in $inits; do
-    [[ -n "$field" ]] || continue
-    c="${field%%/*}"; m="${field#*/}"
-    cm=0; mm=0
-    if [[ -n "$c" ]]; then cm="$(_cpu_to_milli "$c")"; [[ -n "$cm" ]] || return 0; fi
-    if [[ -n "$m" ]]; then mm="$(_mem_to_bytes "$m")"; [[ -n "$mm" ]] || return 0; fi
-    # `if`, never `(( )) && x=`, as the last command of a loop body: the false
-    # arm leaves the loop with status 1 (see _print_fit_lines).
-    if (( cm > init_c )); then init_c=$cm; fi
-    if (( mm > init_m )); then init_m=$mm; fi
-  done
-  if (( init_m > app_m )); then app_m=$init_m; fi
-  if (( init_c > app_c )); then app_c=$init_c; fi
-  printf '%s %s' "$app_m" "$app_c"
-}
-
-# What the pods ALREADY ON THE CLUSTER request, that the chart derivation does
-# not already count. Sets _TB_SYS_MEM_BYTES / _TB_SYS_CPU_MILLI / _TB_SYS_NOTE and
-# returns 0 when measured; returns 1 (and sets _TB_SYS_NOTE to say why) when the
-# cluster could not be read or a quantity could not be parsed. The caller then
-# verifies against the chart derivation alone AND SAYS SO -- an unreadable pod
-# list is not a footprint of zero, but it is also not a reason to refuse an
-# install on a cluster whose nodes we could read.
-#
-# EXCLUDED, because the chart derivation already counts them (a re-install would
-# otherwise count the control plane twice): every pod in the release namespace
-# -- the chart's own workloads AND the training pods jobs-manager spawns there,
-# which are the very envelope being sized -- and every pod in a namespace whose
-# `meta.helm.sh/release-name` annotation names this release (the node-agents
-# namespace the chart creates for its DaemonSets). Pod templates carry only an
-# `app` label, so ownership is read off the NAMESPACE, not the pod. Terminal
-# pods (Succeeded/Failed) hold no reservation and are skipped; a pod with no
-# nodeName is not on any node yet.
-#
-# PER NODE, then the MAX across nodes. A training pod takes everything from ONE
-# node and this reader does not know which node the anchor is by name (the node
-# contract is pinned to three fields). On the
-# single-node edge this ticket is about the two are the same number; on a
-# multi-node cluster the max is conservative -- it can only make the envelope
-# smaller than strictly necessary, never larger than what schedules.
-_measured_system_requests() {
-  _TB_SYS_MEM_BYTES=0
-  _TB_SYS_CPU_MILLI=0
-  _TB_SYS_NOTE=""
-  has kubectl || { _TB_SYS_NOTE="kubectl is not available"; return 1; }
-
-  # Namespaces this release owns. Failing to read them is NOT fatal to the
-  # measurement: only the release namespace is then excluded, which on a
-  # re-install can over-count the node-agents DaemonSets -- the conservative
-  # direction -- and the note says so.
-  local own_ns="${TB_NAMESPACE:-}" ns_lines ns owner
-  if ns_lines="$(kubectl get namespaces --request-timeout=10s -o jsonpath="$_TB_NAMESPACES_JSONPATH" 2>/dev/null)"; then
-    while IFS='|' read -r ns owner; do
-      [[ -n "$ns" ]] || continue
-      [[ "$owner" == "${TB_NAMESPACE:-}" && -n "$owner" ]] || continue
-      own_ns="$own_ns $ns"
-    done <<< "$ns_lines"
-  else
-    _TB_SYS_NOTE="namespace ownership unreadable; only the release namespace was excluded"
-  fi
-
-  local lines
-  lines="$(kubectl get pods --all-namespaces --request-timeout=10s -o jsonpath="$_TB_PODS_JSONPATH" 2>/dev/null)" \
-    || { _TB_SYS_NOTE="the pod list could not be read"; return 1; }
-  [[ -n "$lines" ]] || { _TB_SYS_NOTE="the pod list was empty"; return 1; }
-
-  # Two parallel indexed arrays, not an associative one -- this must run under
-  # macOS bash 3.2.
-  local -a node_names=() node_mem=() node_cpu=()
-  local phase node apps inits eff em ec i found pods=0
-  while IFS='|' read -r ns phase node apps inits; do
-    [[ -n "$ns" && -n "$node" ]] || continue
-    case " $own_ns " in *" $ns "*) continue ;; esac
-    case "$phase" in Succeeded|Failed) continue ;; esac
-    eff="$(_pod_effective_requests "$apps" "$inits")"
-    if [[ -z "$eff" ]]; then
-      _TB_SYS_NOTE="a pod in ${ns} carries a request quantity this installer cannot parse (${apps}${inits})"
-      return 1
-    fi
-    read -r em ec <<< "$eff"
-    found=-1
-    for i in "${!node_names[@]}"; do
-      if [[ "${node_names[$i]}" == "$node" ]]; then found=$i; break; fi
-    done
-    if (( found < 0 )); then
-      node_names+=("$node"); node_mem+=("$em"); node_cpu+=("$ec")
-    else
-      node_mem[$found]=$(( ${node_mem[$found]} + em ))
-      node_cpu[$found]=$(( ${node_cpu[$found]} + ec ))
-    fi
-    pods=$(( pods + 1 ))
-  done <<< "$lines"
-  (( pods > 0 )) || { _TB_SYS_NOTE="no pod outside this release is scheduled yet"; return 1; }
-
-  for i in "${!node_names[@]}"; do
-    if (( ${node_mem[$i]} > _TB_SYS_MEM_BYTES )); then _TB_SYS_MEM_BYTES=${node_mem[$i]}; fi
-    if (( ${node_cpu[$i]} > _TB_SYS_CPU_MILLI )); then _TB_SYS_CPU_MILLI=${node_cpu[$i]}; fi
-  done
-  [[ -n "$_TB_SYS_NOTE" ]] || _TB_SYS_NOTE="measured from ${pods} pod(s) across ${#node_names[@]} node(s)"
-  return 0
-}
-
-# Verify -- and if it is ours, correct -- the envelope _resolve_training_size
-# chose, against what this machine can actually schedule beside the platform.
-#
-# Reads _TB_TRAINING_SIZE and _TB_TRAINING_PROVENANCE. Sets, in the caller's
-# scope:
-#   _TB_FIT_VERDICT   fits | reduced | refused | pinned-over | unverified
-#   _TB_FIT_CAUSE     on refused, what a person is told (_print_fit_refusal):
-#                     memory | cpu | unreadable | broken
-#   _TB_FIT_LINES     the arithmetic, one fact per line, for the caller to print
-# and on `reduced` REWRITES _TB_TRAINING_SIZE to the largest whole-core /
-# whole-MiB envelope that fits (never larger than what was chosen). The
-# reduction can land below the contract floor while still being a requestable
-# shape (>= 1 core, >= 1 GiB); that keeps the existing `undersized` semantics
-# and sets _TB_TRAINING_UNDERSIZED so the caller warns.
-#
-# The verdicts, and who they apply to:
-#   * installer-chosen (fresh or carried): fits, or reduced with the arithmetic,
-#     or REFUSED when not even a 1-core/1-GiB run fits -- the caller must not
-#     write the envelope. Refused too when the machine WAS measured but the
-#     footprint constants are unreadable, or when the cluster cannot be read
-#     and the chosen size is anything but the contract floor: an envelope this
-#     installer picked and cannot verify is not written (fail closed).
-#   * the contract floor with an unreadable cluster: `unverified`. It is the
-#     smallest envelope the platform supports and the fallback that existed
-#     before this check; the caller warns rather than refusing, so a cluster
-#     whose nodes the installer may not list (restricted RBAC on a BYO cluster)
-#     still installs, loudly.
-#   * a human's choice (TRACEBLOC_TRAINING_RESOURCES, `tracebloc resources
-#     set`, or an unattributable carry): never altered -- precedence rules 1
-#     and 2 say a human choice survives. A pin that does not fit is
-#     `pinned-over`, warned with the arithmetic; one the installer cannot
-#     verify is `unverified`.
-#
-# Like the resolver, this emits NOTHING on stdout: _training_resources is
-# captured with $(...), and text here would end up inside the value.
-#
-# Printing is the caller's job, through _print_fit_lines. That helper uses an
-# `if`, not `[[ -n ]] && printer`, and ends in `return 0`: _TB_FIT_LINES can end
-# in a newline, so the last `read` yields an empty line and a `&&` list leaves
-# the loop with status 1. MEASURED on bash 3.2 and 5: such a loop survives
-# `set -e` inline, but as the LAST statement of a function it makes the function
-# return 1 and the caller's errexit fires -- here, on a machine whose envelope
-# FITS, on the way to saying so. Same trap _anchor_largest_schedulable records.
-_print_fit_lines() {   # $1 = printer: hint (on screen) or log (log file only); $2 = lines (default: _TB_FIT_LINES)
-  local _l
-  while IFS= read -r _l; do
-    if [[ -n "$_l" ]]; then
-      if [[ "$1" == "log" ]]; then log "envelope fit: $_l"; else "$1" "  $_l"; fi
-    fi
-  done <<< "${2-$_TB_FIT_LINES}"
-  return 0
-}
-
-# The refusal, worded ONCE for both places it can fire: the fit
-# after values generation and the estimate before the cluster is created. Same
-# arithmetic lines, same remedy, same TRACEBLOC_TRAINING_RESOURCES way out -- so
-# an operator refused early reads exactly what a late refusal would have said.
-# $1 = the headline, $2 = the lines to print, $3 = the closing error,
-# $4 = the cause (_TB_FIT_CAUSE), which picks the ✖ line and the remedy.
-_print_fit_refusal() {
-  # The addons k3s schedules beside the platform are part
-  # of what the node must hold, so they are part of what the remedy asks for.
-  local _rf _rf_mem=0 _rf_cpu=0
-  _rf="$(_system_requests_floor)"
-  if [[ -n "$_rf" ]]; then read -r _rf_mem _rf_cpu <<< "$_rf"; fi
-  # The arithmetic is for machines and the log (e2e reads its grammar); a person
-  # reads one ✖ line and, in the end block, what to do about its cause.
-  tb_machine_lines warn "$1"
-  tb_machine_lines _print_fit_lines hint "$2"
-  tb_machine_lines hint "  The secure environment needs ~$(( (_TB_CP_FOOTPRINT_MEM_BYTES + _rf_mem + _TB_ENVELOPE_FLOOR_MEM_BYTES) / 1024 / 1024 )) MiB and $(( _TB_CP_FOOTPRINT_CPU_MILLI + _rf_cpu + _TB_ENVELOPE_FLOOR_CPU_MILLI )) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
-  case "${4:-}" in
-    memory)
-      # The figure preflight's memory gate names (_pf_machine_need_gb).
-      local _rf_gb=""
-      if declare -F _pf_machine_need_gb >/dev/null 2>&1; then
-        _rf_gb="$(_pf_machine_need_gb 2>/dev/null)" || _rf_gb=""
-      fi
-      if [[ "$_rf_gb" =~ ^[0-9]+(\.[0-9])?$ ]]; then
-        tb_fail_next "Use a machine with at least ${_rf_gb} GB of memory." ""
-      else
-        tb_fail_next "Use a machine with more memory." ""
-      fi
-      error_said "Not enough memory to run a training" "$3"
-      ;;
-    cpu)
-      # No core count: nothing derives a machine-core figure, and a restated one drifts.
-      tb_fail_next "Use a machine with more CPU cores." ""
-      error_said "Not enough CPU to run a training" "$3"
-      ;;
-    unreadable)
-      tb_fail_next "It's safe to run the installer again:"
-      error_said "Couldn't read this machine's resources" "$3"
-      ;;
-    *)
-      # broken, and a refusal that names no cause: either way the installer is at fault.
-      tb_fail_next "Run the latest installer:"
-      error_said "This installer is broken" "$3"
-      ;;
-  esac
-}
-
-# FAIL CLOSED on the footprint: a blank or non-numeric embed is a broken
-# installer, and nothing sensible can be verified against it. Shared by the fit
-# and the pre-create estimate, so both refuse on the same condition. Returns 0
-# (and sets the verdict) when it refused.
-_fit_footprint_refused() {
-  if [[ ! "${_TB_CP_FOOTPRINT_MEM_BYTES:-}" =~ ^[0-9]+$ || ! "${_TB_CP_FOOTPRINT_CPU_MILLI:-}" =~ ^[0-9]+$ ]]; then
-    _TB_FIT_VERDICT="refused"; _TB_FIT_CAUSE="broken"
-    _TB_FIT_LINES="the chart footprint constants (_TB_CP_FOOTPRINT_*) are missing or not numeric -- this installer cannot verify any envelope"
-    return 0
-  fi
-  if [[ ! "${_TB_CP_TRANSIENT_MEM_BYTES:-}" =~ ^[0-9]+$ || ! "${_TB_CP_TRANSIENT_CPU_MILLI:-}" =~ ^[0-9]+$ || ! "${_TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI:-}" =~ ^[0-9]+$ ]]; then
-    _TB_FIT_VERDICT="refused"; _TB_FIT_CAUSE="broken"
-    _TB_FIT_LINES="the hourly-job constants (_TB_CP_TRANSIENT_*) are missing or not numeric -- this installer cannot verify any envelope"
-    return 0
-  fi
-  if [[ ! "${_TB_ENVELOPE_INGESTION_MEM_BYTES:-}" =~ ^[0-9]+$ || ! "${_TB_ENVELOPE_INGESTION_CPU_MILLI:-}" =~ ^[0-9]+$ ]]; then
-    _TB_FIT_VERDICT="refused"; _TB_FIT_CAUSE="broken"
-    _TB_FIT_LINES="the ingestion Job constants (_TB_ENVELOPE_INGESTION_*) are missing or not numeric -- this installer cannot verify any envelope"
-    return 0
-  fi
-  return 1
-}
-
-_fit_training_envelope() {
-  _TB_FIT_VERDICT=""
-  _TB_FIT_CAUSE=""
-  _TB_FIT_LINES=""
-  _TB_FIT_INGEST_WAITS=0
-  local size="${_TB_TRAINING_SIZE:-}" prov="${_TB_TRAINING_PROVENANCE:-}"
-  local ours=0
-  [[ "$prov" == "installer" ]] && ours=1
-
-  # FAIL CLOSED on the footprint (see _fit_footprint_refused).
-  if _fit_footprint_refused; then return 0; fi
-
-  # The envelope's own two dimensions. Case-insensitive keys, trimmed pairs --
-  # the same tolerance _training_limits extends to a human-typed override.
-  local env_cpu_m env_mem_b
-  env_cpu_m="$(_cpu_to_milli "$(_envelope_dimension "$size" cpu)")"
-  env_mem_b="$(_mem_to_bytes "$(_envelope_dimension "$size" memory)")"
-
-  # The machine. Unreadable is decided by who chose the size (see the header).
-  if ! _anchor_largest_schedulable; then
-    if (( ours )) && [[ "$size" != "$_TRAINING_DEFAULT" ]]; then
-      _TB_FIT_VERDICT="refused"; _TB_FIT_CAUSE="unreadable"
-      _TB_FIT_LINES="node allocatable could not be read, and ${size} is an installer-chosen envelope that cannot be verified without it"
-    else
-      _TB_FIT_VERDICT="unverified"
-      _TB_FIT_LINES="node allocatable could not be read; ${size} was written without checking that it can schedule beside the platform"
-    fi
-    return 0
-  fi
-  local alloc_mem_b="$_TB_ANCHOR_MEM_BYTES" alloc_cpu_m="$_TB_ANCHOR_CPU_MILLI"
-
-  if [[ -z "$env_cpu_m" || -z "$env_mem_b" ]]; then
-    if (( ours )); then
-      _TB_FIT_VERDICT="refused"; _TB_FIT_CAUSE="broken"
-      _TB_FIT_LINES="the installer-chosen envelope '${size}' has no readable cpu and memory pair -- refusing to write what cannot be verified"
-    else
-      _TB_FIT_VERDICT="unverified"
-      _TB_FIT_LINES="'${size}' has no readable cpu and memory pair, so its fit on this machine was not checked"
-    fi
-    return 0
-  fi
-
-  # What else the node must hold: the chart's control plane, plus whatever
-  # system pods are already scheduled and are not the chart's.
-  local sys_mem_b=0 sys_cpu_m=0 sys_how
-  if _measured_system_requests; then
-    sys_mem_b="$_TB_SYS_MEM_BYTES"; sys_cpu_m="$_TB_SYS_CPU_MILLI"
-    sys_how="measured: ${_TB_SYS_NOTE}"
-  else
-    sys_how="NOT measured (${_TB_SYS_NOTE}); verified against the chart derivation only"
-  fi
-  # Native k3s: never count less than the addons k3s is about to
-  # schedule (see _TB_K3S_ADDON_*). Per dimension, so
-  # a measurement that already includes them -- or more -- is used as-is.
-  local floor floor_mem_b floor_cpu_m
-  floor="$(_system_requests_floor)"
-  if [[ -n "$floor" ]]; then
-    read -r floor_mem_b floor_cpu_m <<< "$floor"
-    if (( sys_mem_b < floor_mem_b || sys_cpu_m < floor_cpu_m )); then
-      if (( sys_mem_b < floor_mem_b )); then sys_mem_b=$floor_mem_b; fi
-      if (( sys_cpu_m < floor_cpu_m )); then sys_cpu_m=$floor_cpu_m; fi
-      sys_how="${sys_how}; raised to the k3s addon floor ($(( floor_mem_b / 1024 / 1024 )) MiB / ${floor_cpu_m} m: coredns + metrics-server, which may not be scheduled yet)"
-    fi
-  fi
-  _fit_verdict "allocatable on the largest schedulable node" "$alloc_mem_b" "$alloc_cpu_m" \
-    "$sys_mem_b" "$sys_cpu_m" "$sys_how" "$size" "$env_mem_b" "$env_cpu_m" "$ours" "$prov"
-}
-
-# THE FIT RULE, over numbers only. Split out of
-# _fit_training_envelope so the estimate that runs BEFORE the cluster is created
-# (_precreate_fit_estimate) calls the rule itself rather than a copy of it:
-# given what one node offers, what else it must hold, and the envelope, decide
-# fits | reduced | refused | pinned-over and write the arithmetic. Everything
-# about READING the machine stays in the callers.
-#
-# Args: ALLOC_LABEL ALLOC_MEM_B ALLOC_CPU_M SYS_MEM_B SYS_CPU_M SYS_HOW SIZE
-#       ENV_MEM_B ENV_CPU_M OURS PROV
-# Reads the embedded _TB_CP_FOOTPRINT_* (the caller has already refused a broken
-# embed) and the contract floor. On a node with at least
-# _TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI allocatable it also reserves the hourly
-# CronJobs' _TB_CP_TRANSIENT_*; below that, nothing changes. Sets _TB_FIT_VERDICT / _TB_FIT_LINES and, on
-# `reduced`, _TB_TRAINING_SIZE (and _TB_TRAINING_UNDERSIZED) -- in the CALLER's
-# scope, so a caller that must not leave a size behind shadows them with locals.
-#
-# The ingestion Job (_TB_ENVELOPE_INGESTION_*) is a data upload, which can start
-# while a run trains. An installer-chosen run is sized to leave its requests
-# free, but never below the contract floor in a dimension where the run alone
-# would have reached it: a smaller run that never trains is worse than an upload
-# that waits. Where the Job does not fit beside the size written -- that, or a
-# human's pin -- _TB_FIT_INGEST_WAITS=1 so the caller says an upload waits for
-# training. Whether the run itself fits or is refused is decided without it.
-_fit_verdict() {
-  local alloc_label="$1" alloc_mem_b="$2" alloc_cpu_m="$3" sys_mem_b="$4" sys_cpu_m="$5" sys_how="$6"
-  local size="$7" env_mem_b="$8" env_cpu_m="$9" ours="${10}" prov="${11}"
-  local fp_mem_b="$_TB_CP_FOOTPRINT_MEM_BYTES" fp_cpu_m="$_TB_CP_FOOTPRINT_CPU_MILLI"
-  local mib=$(( 1024 * 1024 )) gib=$(( 1024 * 1024 * 1024 ))
-  # The hourly CronJobs' transient, reserved only on a node large enough
-  # (_TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI).
-  local tr_mem_b=0 tr_cpu_m=0 tr_part=""
-  if (( alloc_cpu_m >= _TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI )); then
-    tr_mem_b="$_TB_CP_TRANSIENT_MEM_BYTES"; tr_cpu_m="$_TB_CP_TRANSIENT_CPU_MILLI"
-    tr_part=" + hourly jobs (auto-upgrade, image refresh) $(( tr_mem_b / mib )) MiB / ${tr_cpu_m} m"
-  fi
-  local need_mem_b=$(( fp_mem_b + tr_mem_b + sys_mem_b ))
-  local need_cpu_m=$(( fp_cpu_m + tr_cpu_m + sys_cpu_m ))
-  local ing_mem_b="$_TB_ENVELOPE_INGESTION_MEM_BYTES" ing_cpu_m="$_TB_ENVELOPE_INGESTION_CPU_MILLI"
-  _TB_FIT_INGEST_WAITS=0
-
-  _TB_FIT_LINES="${alloc_label}: $(( alloc_mem_b / mib )) MiB / ${alloc_cpu_m} m"$'\n'
-  _TB_FIT_LINES+="control plane (chart) $(( fp_mem_b / mib )) MiB / ${fp_cpu_m} m${tr_part} + system pods $(( sys_mem_b / mib )) MiB / ${sys_cpu_m} m = $(( need_mem_b / mib )) MiB / ${need_cpu_m} m (${sys_how})"$'\n'
-  _TB_FIT_LINES+="envelope ${size} = $(( env_mem_b / mib )) MiB / ${env_cpu_m} m"$'\n'
-
-  local mem_over=$(( env_mem_b + need_mem_b - alloc_mem_b ))
-  local cpu_over=$(( env_cpu_m + need_cpu_m - alloc_cpu_m ))
-  local mem_fits=0 cpu_fits=0
-  (( mem_over <= 0 )) && mem_fits=1
-  (( cpu_over <= 0 )) && cpu_fits=1
-  if (( mem_fits )); then
-    _TB_FIT_LINES+="memory: $(( env_mem_b / mib )) + $(( need_mem_b / mib )) = $(( (env_mem_b + need_mem_b) / mib )) MiB <= $(( alloc_mem_b / mib )) MiB ($(( -mem_over / mib )) MiB headroom)"$'\n'
-  else
-    _TB_FIT_LINES+="memory: $(( env_mem_b / mib )) + $(( need_mem_b / mib )) = $(( (env_mem_b + need_mem_b) / mib )) MiB > $(( alloc_mem_b / mib )) MiB ($(( mem_over / mib )) MiB OVER)"$'\n'
-  fi
-  if (( cpu_fits )); then
-    _TB_FIT_LINES+="cpu: ${env_cpu_m} + ${need_cpu_m} = $(( env_cpu_m + need_cpu_m )) m <= ${alloc_cpu_m} m ($(( -cpu_over )) m headroom)"$'\n'
-  else
-    _TB_FIT_LINES+="cpu: ${env_cpu_m} + ${need_cpu_m} = $(( env_cpu_m + need_cpu_m )) m > ${alloc_cpu_m} m (${cpu_over} m OVER)"$'\n'
-  fi
-
-  # Does the ingestion Job fit beside this envelope as well?
-  local ing_fits=0
-  (( env_mem_b + need_mem_b + ing_mem_b <= alloc_mem_b && env_cpu_m + need_cpu_m + ing_cpu_m <= alloc_cpu_m )) && ing_fits=1
-  local ing_part="ingestion Job (a data ingest) $(( ing_mem_b / mib )) MiB / ${ing_cpu_m} m"
-
-  if (( mem_fits && cpu_fits && ing_fits )); then
-    _TB_FIT_VERDICT="fits"
-    _TB_FIT_LINES+="${ing_part}: fits beside the run"
-    return 0
-  fi
-
-  if (( ! ours )); then
-    if (( mem_fits && cpu_fits )); then
-      _TB_FIT_VERDICT="fits"
-      _TB_FIT_INGEST_WAITS=1
-      _TB_FIT_LINES+="${ing_part}: does not fit beside ${size}, which was chosen by a human (${prov}) and is written as-is"
-      return 0
-    fi
-    _TB_FIT_VERDICT="pinned-over"
-    _TB_FIT_LINES+="this size was chosen by a human (${prov}), so it is written as-is; training pods will stay Pending on this machine until it is lowered"
-    return 0
-  fi
-
-  # Ours: the largest whole-core / whole-MiB envelope that fits -- floored (a
-  # ceiling that rounds up is not a ceiling), and never larger than what was
-  # chosen in either dimension -- first beside the platform alone, then with
-  # the ingestion Job's requests left free too.
-  local fit_mem_b=$(( alloc_mem_b - need_mem_b )) fit_cpu_m=$(( alloc_cpu_m - need_cpu_m ))
-  (( fit_mem_b < 0 )) && fit_mem_b=0
-  (( fit_cpu_m < 0 )) && fit_cpu_m=0
-  local new_mib=$(( fit_mem_b / mib )) new_cores=$(( fit_cpu_m / 1000 ))
-  local old_mib=$(( env_mem_b / mib )) old_cores=$(( env_cpu_m / 1000 ))
-  (( new_mib > old_mib )) && new_mib=$old_mib
-  (( new_cores > old_cores )) && new_cores=$old_cores
-
-  if (( new_cores < 1 || new_mib < gib / mib )); then
-    _TB_FIT_VERDICT="refused"
-    # Short of memory, the CPU too or not, is memory's; only CPU short is the CPU's.
-    if (( new_mib < gib / mib )); then _TB_FIT_CAUSE="memory"; else _TB_FIT_CAUSE="cpu"; fi
-    _TB_FIT_LINES+="what fits is $(( fit_mem_b / mib )) MiB / ${fit_cpu_m} m -- not even a 1-core / 1-GiB run; there is no honest envelope to write"
-    return 0
-  fi
-
-  local ing_fit_mem_b=$(( fit_mem_b - ing_mem_b )) ing_fit_cpu_m=$(( fit_cpu_m - ing_cpu_m ))
-  (( ing_fit_mem_b < 0 )) && ing_fit_mem_b=0
-  (( ing_fit_cpu_m < 0 )) && ing_fit_cpu_m=0
-  local ing_mib=$(( ing_fit_mem_b / mib )) ing_cores=$(( ing_fit_cpu_m / 1000 ))
-  (( ing_mib > new_mib )) && ing_mib=$new_mib
-  (( ing_cores > new_cores )) && ing_cores=$new_cores
-  # Never below the floor for the Job's sake: per dimension, the run keeps
-  # min(what fits alone, the floor) when leaving the Job free would cut deeper.
-  local floor_mib=$(( _TB_ENVELOPE_FLOOR_MEM_BYTES / mib )) floor_cores=$(( _TB_ENVELOPE_FLOOR_CPU_MILLI / 1000 ))
-  local keep_mib=$new_mib keep_cores=$new_cores
-  (( keep_mib > floor_mib )) && keep_mib=$floor_mib
-  (( keep_cores > floor_cores )) && keep_cores=$floor_cores
-  (( ing_mib > keep_mib )) && keep_mib=$ing_mib
-  (( ing_cores > keep_cores )) && keep_cores=$ing_cores
-  if (( keep_mib * mib + need_mem_b + ing_mem_b > alloc_mem_b || keep_cores * 1000 + need_cpu_m + ing_cpu_m > alloc_cpu_m )); then
-    _TB_FIT_INGEST_WAITS=1
-  fi
-
-  if (( mem_fits && cpu_fits && keep_mib == old_mib && keep_cores == old_cores )); then
-    # Already as small as the floor allows: the size stands, the upload waits.
-    _TB_FIT_VERDICT="fits"
-    _TB_FIT_LINES+="${ing_part}: does not fit beside ${size}, which is already the smallest run this machine is given"
-    return 0
-  fi
-
-  _TB_TRAINING_SIZE="cpu=${keep_cores},memory=${keep_mib}Mi"
-  _TB_FIT_VERDICT="reduced"
-  _TB_FIT_LINES+="reduced ${size} -> ${_TB_TRAINING_SIZE}: $(( alloc_mem_b / mib )) - $(( need_mem_b / mib )) = $(( fit_mem_b / mib )) MiB -> ${new_mib} MiB; ${alloc_cpu_m} - ${need_cpu_m} = ${fit_cpu_m} m -> ${new_cores} core(s)"
-  if (( keep_mib != new_mib || keep_cores != new_cores )); then
-    _TB_FIT_LINES+="; less the ${ing_part}: $(( ing_fit_mem_b / mib )) MiB -> ${keep_mib} MiB, ${ing_fit_cpu_m} m -> ${keep_cores} core(s) (never below the floor for it)"
-  fi
-  if (( _TB_FIT_INGEST_WAITS )); then
-    _TB_FIT_LINES+=$'\n'"${ing_part}: does not fit beside ${_TB_TRAINING_SIZE} without cutting the run below the floor"
-  else
-    _TB_FIT_LINES+=$'\n'"${ing_part}: fits beside the run"
-  fi
-  if (( keep_cores * 1000 < _TB_ENVELOPE_FLOOR_CPU_MILLI || keep_mib * mib < _TB_ENVELOPE_FLOOR_MEM_BYTES )); then
-    _TB_TRAINING_UNDERSIZED=1
-  fi
-  return 0
-}
-
-# ── the fit, estimated BEFORE the cluster exists ──────────────
-#
-# The fit above runs when the values are generated, which is AFTER the cluster is
-# created. A host that cannot hold even a 1-core / 1-GiB run beside the platform
-# got the right verdict there -- and was left with an empty cluster to remove by
-# hand. Every fact the refusal rests on is already known before anything is
-# created, so this asks the same question first:
-#
-#   * what one node will offer: its memory and CPU (on Linux the host's; on a
-#     Mac the node VM's; in WSL the WSL VM's), minus the node reservation this platform's
-#     kubelet is about to be given (cluster.sh's generated TRACEBLOC_KUBELET_* block),
-#     subtracted the way the kubelet subtracts it: capacity - kubeReserved -
-#     systemReserved - evictionHard. An UNMEASURED platform gets no
-#     reservation, here as on the node, and the arithmetic says so;
-#   * what the node must hold: the embedded chart footprint, plus the k3s addon
-#     floor (_system_requests_floor) -- the addons do not exist yet, but they
-#     will, and the post-create fit never counts less than that floor
-#     So this is still never PESSIMISTIC: it never
-#     refuses a host the post-create fit would accept, and the fit after create
-#     stays the authority for everything else (system pods beyond the addons);
-#   * the envelope: the contract floor, the size the installer writes when a
-#     machine cannot be sized. Refusal does not depend on it -- the fit refuses
-#     only when what is left beside the platform is under one core or one GiB
-#     -- so the floor asks exactly that.
-#
-# The decision is _fit_verdict itself, the rule the post-create fit applies, so
-# the two cannot drift (rules 1 and 9); install-client-helm.bats drives both over
-# one canned-host table and asserts the estimate never refuses what the fit
-# accepts.
-#
-# NEVER REFUSES WHAT THE FIT WOULD NOT: a size from TRACEBLOC_TRAINING_RESOURCES
-# is a human's, which the fit warns about (pinned-over) and never refuses; a
-# caller's own TRACEBLOC_VALUES_FILE never meets the fit at all; an unreadable
-# runtime is "cannot tell", not "too small". All three are `skipped`.
-#
-# Args: VM_MEM_BYTES VM_CPU_MILLI. Sets _TB_PRECREATE_VERDICT
-# (refused | clear | skipped), _TB_PRECREATE_CAUSE (the fit's _TB_FIT_CAUSE, on
-# refused) and _TB_PRECREATE_LINES. Leaves _TB_FIT_* and
-# _TB_TRAINING_SIZE as it found them: the real fit must not inherit a verdict or
-# a reduced size from an estimate.
-_precreate_fit_estimate() {
-  _TB_PRECREATE_VERDICT=""
-  _TB_PRECREATE_CAUSE=""
-  _TB_PRECREATE_LINES=""
-  local vm_mem_b="${1:-}" vm_cpu_m="${2:-}"
-  if [[ -n "${TRACEBLOC_TRAINING_RESOURCES:-}" ]]; then
-    _TB_PRECREATE_VERDICT="skipped"
-    _TB_PRECREATE_LINES="TRACEBLOC_TRAINING_RESOURCES is set: the size is a human's choice, which the fit warns about and never refuses"
-    return 0
-  fi
-  if [[ -n "${TRACEBLOC_VALUES_FILE:-}" ]]; then
-    _TB_PRECREATE_VERDICT="skipped"
-    _TB_PRECREATE_LINES="TRACEBLOC_VALUES_FILE is set: this install writes no training envelope, so there is nothing to fit"
-    return 0
-  fi
-  if [[ ! "$vm_mem_b" =~ ^[0-9]+$ || ! "$vm_cpu_m" =~ ^[0-9]+$ ]] || (( vm_mem_b == 0 || vm_cpu_m == 0 )); then
-    _TB_PRECREATE_VERDICT="skipped"
-    _TB_PRECREATE_LINES="the container runtime's memory and CPU could not be read, so nothing is refused here; the fit after the cluster is created decides"
-    return 0
-  fi
-
-  # Shadowed: the rule writes these in its caller's scope.
-  local _TB_FIT_VERDICT="" _TB_FIT_CAUSE="" _TB_FIT_LINES="" _TB_TRAINING_SIZE="$_TRAINING_DEFAULT" _TB_TRAINING_UNDERSIZED=0 _TB_FIT_INGEST_WAITS=0
-  if _fit_footprint_refused; then
-    _TB_PRECREATE_VERDICT="refused"
-    _TB_PRECREATE_CAUSE="$_TB_FIT_CAUSE"
-    _TB_PRECREATE_LINES="$_TB_FIT_LINES"
-    return 0
-  fi
-
-  local mib=$(( 1024 * 1024 ))
-  local platform="unknown" res_mem_b=0 res_cpu_m=0 res_how kc="" km="" ks=""
-  if declare -F _kubelet_reservation_platform >/dev/null 2>&1; then
-    platform="$(_kubelet_reservation_platform)"
-  fi
-  if declare -F _kubelet_reservation_measured >/dev/null 2>&1 && _kubelet_reservation_measured "$platform"; then
-    if ! read -r kc km ks < <(_kubelet_reservation_values "$platform" 2>/dev/null) || [[ -z "$ks" ]]; then
-      _TB_PRECREATE_VERDICT="skipped"
-      _TB_PRECREATE_LINES="the ${platform} node reservation cannot be read (a broken generated block, which the create path refuses on its own)"
-      return 0
-    fi
-    res_cpu_m="$kc"
-    res_mem_b=$(( (km + ks + TRACEBLOC_KUBELET_EVICTION_MEM_MIB) * mib ))
-    res_how="the ${platform} node reservation (kubeReserved ${km} MiB / ${kc} m, systemReserved ${ks} MiB, eviction ${TRACEBLOC_KUBELET_EVICTION_MEM_MIB} MiB)"
-  else
-    res_how="no node reservation (none is measured for platform '${platform}', so the node will report allocatable == capacity)"
-  fi
-  local alloc_mem_b=$(( vm_mem_b - res_mem_b )) alloc_cpu_m=$(( vm_cpu_m - res_cpu_m ))
-  if (( alloc_mem_b < 0 )); then alloc_mem_b=0; fi
-  if (( alloc_cpu_m < 0 )); then alloc_cpu_m=0; fi
-
-  # The addons the post-create fit will count whether or not they are scheduled
-  # by then (its floor), so a host refused only because of them is refused here,
-  # before there is a cluster to delete.
-  local sys_mem_b=0 sys_cpu_m=0 sys_how floor
-  floor="$(_system_requests_floor)"
-  if [[ -n "$floor" ]]; then
-    read -r sys_mem_b sys_cpu_m <<< "$floor"
-    sys_how="the k3s addon floor ($(( sys_mem_b / mib )) MiB / ${sys_cpu_m} m: coredns + metrics-server, which the fit after create counts too); other system pods do not exist until the cluster does"
-  else
-    sys_how="NOT counted: the k3s addons do not exist until the cluster does, so this estimate can only be optimistic"
-  fi
-
-  local env_cpu_m env_mem_b
-  env_cpu_m="$(_cpu_to_milli "$(_envelope_dimension "$_TRAINING_DEFAULT" cpu)")"
-  env_mem_b="$(_mem_to_bytes "$(_envelope_dimension "$_TRAINING_DEFAULT" memory)")"
-  _fit_verdict \
-    "estimated allocatable per node, before the cluster exists (runtime $(( vm_mem_b / mib )) MiB / ${vm_cpu_m} m, minus ${res_how})" \
-    "$alloc_mem_b" "$alloc_cpu_m" "$sys_mem_b" "$sys_cpu_m" \
-    "$sys_how" \
-    "$_TRAINING_DEFAULT" "$env_mem_b" "$env_cpu_m" 1 installer
-  _TB_PRECREATE_LINES="$_TB_FIT_LINES"
-  if [[ "$_TB_FIT_VERDICT" == "refused" ]]; then
-    _TB_PRECREATE_VERDICT="refused"
-    _TB_PRECREATE_CAUSE="$_TB_FIT_CAUSE"
-  else
-    _TB_PRECREATE_VERDICT="clear"
-  fi
-  return 0
-}
-
-# The gate native k3s runs before a new k3s's first step (k3s.sh
-# _native_k3s_create_cluster). Reads the node's size through preflight.sh's runtime
-# readers and refuses with the fit's own message shape.
-#
-# On native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) the readers answer from the host, which
-# is the node (preflight.sh), and the reservation is the `linux_k3s` key's,
-# measured on native k3s. On macOS they answer the node's size, the
-# VM mac-container.sh's rule gives, and the key is `unknown` until darwin_k3s is
-# measured (2.1 part 5b). In tracebloc's WSL distro they read the distro's own
-# /proc, which is the WSL VM's size, and the key is `windows_k3s`, a row 3.3's
-# Windows cell measures. This gate is the first step of the
-# create path that knows the key, so a table without that row is said here,
-# once per run (cluster.sh).
-_precreate_fit_gate() {
-  local kb="" ncpu=""
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]] && declare -F _kubelet_reservation_warn_unmeasured >/dev/null 2>&1; then
-    _kubelet_reservation_warn_unmeasured
-  fi
-  if declare -F _pf_runtime_mem_kb >/dev/null 2>&1; then kb="$(_pf_runtime_mem_kb)"; fi
-  if declare -F _pf_runtime_ncpu >/dev/null 2>&1; then ncpu="$(_pf_runtime_ncpu)"; fi
-  [[ "$kb" =~ ^[0-9]+$ ]] || kb=0
-  [[ "$ncpu" =~ ^[0-9]+$ ]] || ncpu=0
-  _precreate_fit_estimate "$(( kb * 1024 ))" "$(( ncpu * 1000 ))"
-  case "$_TB_PRECREATE_VERDICT" in
-    refused)
-      _print_fit_refusal \
-        "This machine cannot schedule a training beside the platform, so the cluster is not created:" \
-        "$_TB_PRECREATE_LINES" \
-        "Refusing before creating the cluster, so there is no cluster to delete." \
-        "$_TB_PRECREATE_CAUSE"
-      ;;
-    clear)   _print_fit_lines log "$_TB_PRECREATE_LINES" ;;
-    *)       log "pre-create fit estimate skipped: ${_TB_PRECREATE_LINES}" ;;
-  esac
-  return 0
-}
-
-# YAML single-quoted-scalar escaping, in one place.
-#
-# A YAML single-quoted string escapes a quote by DOUBLING it: a'b -> 'a''b'.
-# Both directions must build the replacement from a VARIABLE, never a `\'`
-# literal: bash 3.2 (the macOS system bash) keeps the backslash in an escaped-quote
-# REPLACEMENT, so "${v//\'/\'\'}" yields a\'\'b and corrupts the value. A variable
-# expands to a bare quote on 3.2 and 4/5 alike. Verified on GNU bash 3.2.57:
-#   input a'b -> escaped-literal form a\'\'b (WRONG) · variable form a''b (right)
-#
-# Keep these two as the ONLY place that rule is encoded — every credential written
-# into or read back out of the generated values file goes through them, so the
-# portability constraint can't drift between call sites.
-_yaml_sq_escape() {                      # raw value -> body of a '...' scalar
-  local _sq="'"
-  printf '%s' "${1//$_sq/$_sq$_sq}"
-}
-_yaml_sq_unescape() {                    # body of a '...' scalar -> raw value
-  local _sq="'"
-  printf '%s' "${1//$_sq$_sq/$_sq}"
-}
-
-# _extract_yaml_value — value of top-level scalar key $2 in values file $1 (`-`
-# reads STDIN, so a caller can pipe values in without writing them to a file).
-# CONTRACT: echoes nothing and returns 0 when the key is absent (or the file is
-# unreadable). Callers rely on "empty means no value"; they must not have to
-# distinguish absent-key from read-error, and none of them do.
-_extract_yaml_value() {
-  local file="$1" key="$2"
-  local line
-  # `|| line=""`: on an ABSENT key grep exits 1 and, under `set -o pipefail`,
-  # that rc propagates out of the pipeline and out of the assignment — so under
-  # `set -e` the installer would abort HERE and never reach the empty-check on
-  # the next line, the very line that exists to handle "key not found".
-  # Latent until now only because every call site wraps this in `$( )`, which
-  # suspends errexit for the function body; a bare call aborts the install
-  # mid-step. Same house idiom as assess.sh / common.sh `_chart_version`.
-  #
-  # NO `| head -1` on the pipeline: with head in play, a DUPLICATE key makes
-  # head exit after the first line and SIGPIPE grep (141) — and under pipefail
-  # `|| line=""` would then wipe the successfully captured value, so
-  # detect_installed_client could miss a clientId and fail open toward
-  # overwrite. Capture every match, then take the first line in
-  # the shell, where nothing can signal anything: grep's rc is 1 only when
-  # there is genuinely no match.
-  line=$(grep -E "^${key}:" "$file" 2>/dev/null) || line=""
-  line="${line%%$'\n'*}"
-  [[ -z "$line" ]] && return
-  line="${line#*:}"
-  line="${line#"${line%%[![:space:]]*}"}"
-  if [[ "$line" == \'*\' ]]; then
-    line="${line#\'}"
-    line="${line%\'}"
-    line="$(_yaml_sq_unescape "$line")"
-  else
-    line="${line#\"}"
-    line="${line%\"}"
-  fi
-  # Defend against self-perpetuation: a previous corrupted save may have the
-  # bracketed-paste markers and/or C0 controls. _strip_paste_garbage
-  # handles both. UTF-8 (0x80+) preserved.
-  _strip_paste_garbage "$line"
-}
-
-# _client_id_from_secret_rows ROWS — the base64 client id out of
-# `NAME TRACEBLOC_CLIENT_ID CLIENT_ID` rows (the custom-columns read below), or
-# nothing. PURE, so the guard and the tests can drive it without a cluster.
-# CANONICAL KEY FIRST: the chart writes the id under TRACEBLOC_CLIENT_ID (both
-# keys from 1.9.180, the canonical only since then); a Secret
-# written by an older chart has only CLIENT_ID, so the legacy column is the
-# fallback when the canonical prints `<none>`. Exactly ONE row may carry an id: none is a release whose
-# Secret is not there, and two cannot be told apart, so either is "couldn't read
-# it" -- never a guess. A Secret without either key (the registry pull Secret)
-# prints `<none>` and is not a candidate.
-_client_id_from_secret_rows() {
-  local rows="$1" name canon legacy b64 hit="" n=0
-  while read -r name canon legacy _; do
-    b64="$canon"
-    [[ -n "$b64" && "$b64" != "<none>" ]] || b64="$legacy"
-    [[ -n "$name" && -n "$b64" && "$b64" != "<none>" ]] || continue
-    hit="$b64"; n=$((n + 1))
-  done <<<"$rows"
-  (( n == 1 )) || return 0
-  printf '%s' "$hit"
-  return 0
-}
-
-# _client_id_from_secret — CLIENT_ID out of release $1's chart-managed Secret in
-# namespace $2, or empty. THE SECOND PLACE THE ID CAN LIVE: the chart lets
-# clientId resolve from the Secret instead of release values, and the chart now
-# recommends dropping it from values once it is there — so "no clientId in
-# values" stopped meaning "not a client" and detect_installed_client has to look
-# here before it may conclude anything.
-# THE SECRET IS READ FROM THE RELEASE, NEVER NAMED. The chart
-# names it `tracebloc.secretName` -- `<fullnameOverride or release>-secrets` --
-# and rebuilding that here restated the chart's rule from `helm get values`, so
-# the lookup was right only while the two copies agreed and nothing compared
-# them. The Secrets are listed by `app.kubernetes.io/instance=<release>` instead
-# (the label the chart's `tracebloc.labels` puts on it, which by the chart's own
-# table never follows the override), and the one carrying the id is the one --
-# under TRACEBLOC_CLIENT_ID, else CLIENT_ID (see _client_id_from_secret_rows).
-# Same shape as _client_workloads, custom-columns rather than a
-# jsonpath like it (chosen while the retired PowerShell core had to quote the
-# same read). Guard:
-# scripts/tests/client-secret-read-not-built.sh.
-# CONTRACT: echoes the id or nothing, and ALWAYS returns 0. Callers assign it
-# inside `$( )`; a non-zero rc there would abort the installer under `set -e`
-# (the same trap _extract_yaml_value documents above), and "couldn't read it" is
-# a state the caller handles, not an error it should die on.
-_client_id_from_secret() {
-  local rel="$1" ns="$2" rows b64 out=""
-  # kubectl is not guaranteed this early (the pre-provision pre-flight runs
-  # before the cluster exists), and its absence is "couldn't read", not "absent".
-  has kubectl || return 0
-  # BOUNDED, because this call is now on the COMMON path. Once
-  # clientId is dropped from release values — which this chart recommends — every
-  # scanned release reaches here, so an unbounded read against a wedged API would
-  # hang a headless install or assess with no further output. kubectl's default
-  # is no timeout at all; 5s matches the other existence probes in this repo.
-  # A timeout exits
-  # non-zero and is handled by the same `|| return 0` as any other unreadable
-  # Secret: "couldn't read it" is a state the caller already knows how to treat,
-  # and the caller's fail-closed path turns it into an unidentifiable client
-  # rather than an absent one.
-  rows="$(kubectl get secret -n "$ns" -l "app.kubernetes.io/instance=${rel}" \
-            -o 'custom-columns=NAME:.metadata.name,TRACEBLOC_CLIENT_ID:.data.TRACEBLOC_CLIENT_ID,CLIENT_ID:.data.CLIENT_ID' \
-            --no-headers --request-timeout=5s 2>/dev/null)" || return 0
-  b64="$(_client_id_from_secret_rows "$rows")"
-  [[ -n "$b64" ]] || return 0
-  # -d is GNU/coreutils and modern macOS; -D is the older BSD spelling, so both
-  # are tried in turn.
-  out="$(printf '%s' "$b64" | base64 -d 2>/dev/null)" \
-    || out="$(printf '%s' "$b64" | base64 -D 2>/dev/null)" \
-    || out=""
-  printf '%s' "$out"
-  return 0
-}
-
-# _client_password_from_secret REL NS — the machine credential the client's pods
-# authenticate with, from the release's Secret (canonical key first, the legacy
-# one as fallback). Same bounded, one-Secret read as _client_id_from_secret; the
-# value never reaches argv (verify_credentials feeds it to curl on stdin).
-# CONTRACT: echoes the password and returns 0; echoes nothing and returns 0 when
-# the release has no Secret carrying a password (a first install); echoes
-# nothing and returns 2 when it CANNOT TELL -- no kubectl, a failed or timed-out
-# read, two Secrets carrying one, a value that does not decode. The two empties
-# are different facts: the restart after helm reads "absent" as "no pod holds an
-# old credential" and "cannot tell" as "maybe one does".
-# Callers in `$( )` under `set -e` must handle the 2 (`|| …`).
-# _client_password_from_secret runs with bash -x held off, the secret it holds out of the trace (common.sh);
-# _tb_untraced__client_password_from_secret below is the function itself.
-_client_password_from_secret() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__client_password_from_secret "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
-_tb_untraced__client_password_from_secret() {
-  local rel="$1" ns="$2" rows b64 out="" name canon legacy n=0
-  has kubectl || return 2
-  rows="$(kubectl get secret -n "$ns" -l "app.kubernetes.io/instance=${rel}" \
-            -o 'custom-columns=NAME:.metadata.name,TRACEBLOC_CLIENT_PASSWORD:.data.TRACEBLOC_CLIENT_PASSWORD,CLIENT_PASSWORD:.data.CLIENT_PASSWORD' \
-            --no-headers --request-timeout=5s 2>/dev/null)" || return 2
-  b64="$(_client_id_from_secret_rows "$rows")"
-  if [[ -z "$b64" ]]; then
-    # No row carrying a password is "absent"; more than one is "cannot tell".
-    while read -r name canon legacy _; do
-      [[ -n "$name" ]] || continue
-      [[ -n "$canon" && "$canon" != "<none>" ]] || canon="$legacy"
-      [[ -n "$canon" && "$canon" != "<none>" ]] || continue
-      n=$((n + 1))
-    done <<<"$rows"
-    (( n == 0 )) && return 0
-    return 2
-  fi
-  out="$(printf '%s' "$b64" | base64 -d 2>/dev/null)" \
-    || out="$(printf '%s' "$b64" | base64 -D 2>/dev/null)" \
-    || out=""
-  [[ -n "$out" ]] || return 2
-  printf '%s' "$out"
-  return 0
-}
-
-# _restart_credential_consumers REL — roll the workloads that authenticate with the
-# machine credential: the release's Deployments except MySQL (`mysql-client`,
-# which never uses it) and its node-agent DaemonSets (they read the mirrored
-# Secret). The DaemonSets are found by the release's instance label across ALL
-# namespaces, never by a namespace named here, so a chart that moves them does not
-# silently leave them on the rejected credential. Bounded and best-effort, but
-# never silent: a listing that fails or finds no Deployment counts as a failed
-# restart, because "nothing to roll" is the state that leaves every pod on the old
-# credential. Returns 1 when any restart failed: the Secret already holds the new,
-# valid credential, so no later run classifies `credential-rejected` and nothing
-# would roll these pods again. The caller makes that fatal; the hint is the fix.
-_restart_credential_consumers() {
-  local rel="$1" d ns nm row failed=0 listed rows
-  listed="$(kubectl get deployment -n "$rel" -l "app.kubernetes.io/instance=${rel}" \
-              -o 'jsonpath={.items[*].metadata.name}' --request-timeout=15s 2>/dev/null)" || failed=1
-  [[ -n "$listed" ]] || failed=1
-  for d in $listed; do
-    [[ "$d" == mysql-client ]] && continue
-    kubectl rollout restart "deployment/$d" -n "$rel" --request-timeout=15s >>"${LOG_FILE:-/dev/null}" 2>&1 || failed=1
-  done
-  rows="$(kubectl get daemonset -A -l "app.kubernetes.io/instance=${rel}" \
-            -o 'custom-columns=NS:.metadata.namespace,NAME:.metadata.name' \
-            --no-headers --request-timeout=15s 2>/dev/null)" || failed=1
-  while read -r ns nm; do
-    [[ -n "$ns" && -n "$nm" ]] || continue
-    kubectl rollout restart "daemonset/$nm" -n "$ns" --request-timeout=15s >>"${LOG_FILE:-/dev/null}" 2>&1 || failed=1
-  done <<<"$rows"
-  if [[ "$failed" == 1 ]]; then
-    warn "Couldn't restart every tracebloc service onto the new credential, so this machine stays offline until they restart. Re-running the installer won't redo it. Run:"
-    hint "  $(tb_kubectl_shown) rollout restart deployment -n ${rel} -l app.kubernetes.io/instance=${rel}"
-    hint "  $(tb_kubectl_shown) get daemonset -A -l app.kubernetes.io/instance=${rel}   # then: $(tb_kubectl_shown) rollout restart daemonset/<name> -n <namespace>"
-    return 1
-  fi
-  log "restarted the services that authenticate, onto the new credential"
-  return 0
-}
-
-# _credential_changed_under_pods PREV NOW — 0 when the release Secret held a
-# password before this run's helm call (PREV) and holds a different one after it
-# (NOW), i.e. pods already running were started on a credential that is gone.
-# The reissue flag covers only the credential-rejected repair; a preset (the
-# ID-only prompt, the env pair) or any other route that writes a new password into
-# a running release's Secret changes it just the same, so the
-# restart keys on the observed change, not on the route. An empty PREV is a first
-# install: no pod holds an old credential -- so the caller must never hand an
-# UNREADABLE previous read in as PREV; it restarts on that itself
-# An empty NOW (the read after helm failed) with a PREV is
-# "cannot tell", and that restarts: a needless roll is cheap, pods left on a dead
-# credential are offline.
-_credential_changed_under_pods() {
-  [[ -n "${1:-}" && "${1:-}" != "${2:-}" ]]
-}
-
-# detect_installed_client — report the tracebloc client already installed on this
-# cluster, if any, via the globals INSTALLED_CLIENT_ID / INSTALLED_CLIENT_NS
-# (both empty when none is found). Enumerate client-chart releases across ALL
-# namespaces WITHOUT jq (not a guaranteed prerequisite): helm's NAME/NAMESPACE are
-# the first two whitespace-free columns and the CHART column matches
-# `client-<ver>`, the same jq-free parse _chart_version uses. Shared by the
-# pre-provision ownership pre-flight and the Helm-step one-client guard so
-# the two can never disagree on "what already runs here". Always returns 0. A
-# missing helm just yields the empty (no-client) result — but a helm/API FAILURE
-# is reported as INSTALLED_CLIENT_UNKNOWN=1 (not "no client"), so guards can fail
-# CLOSED instead of silently overwriting a client they couldn't see. The id is
-# read from release values first and from the release Secret second
-# (_client_id_from_secret): since either place is legitimate, and a
-# client-chart release that names an id in NEITHER is UNKNOWN, not absent.
-detect_installed_client() {
-  # shellcheck disable=SC2034  # INSTALLED_CLIENT_RELEASE is consumed cross-file by assess.sh
-  INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; INSTALLED_CLIENT_RELEASE=""; INSTALLED_CLIENT_UNKNOWN=0
-  # No helm => nothing helm-installed here; a genuine (documented) "no client".
-  has helm || return 0
-  local _rel _ns _id _list _unreadable=0
-  # Capture `helm list`'s exit code: a FAILED enumeration (wedged/unreachable API,
-  # kubeconfig glitch) must NOT read as "no client here" — that fails OPEN and lets
-  # a re-install silently overwrite an existing client. `helm list` returns 0 with
-  # empty output when there are genuinely no releases, so only a non-zero exit is
-  # "unknown".
-  # Name the states explicitly: Helm 3 lists only deployed by default while
-  # Helm 4 (the pinned v4.2.3) lists all — so relying on the default hides a wedged
-  # client on one version or the other. We enumerate the full "a client is present"
-  # set — deployed, failed, and every wedge state (pending-*, uninstalling) that
-  # _recover_pending_helm_release knows how to clear — so a killed-mid-flight client
-  # stays visible and the one-client guard can't wave through an overwrite.
-  if ! _list="$(helm list -A --deployed --failed --pending --uninstalling 2>/dev/null)"; then
-    INSTALLED_CLIENT_UNKNOWN=1; return 0
-  fi
-  while read -r _rel _ns; do
-    [[ -z "$_rel" ]] && continue
-    # The values hold clientPassword and the chart's other secrets, so clientId is
-    # read inside the pipe: no file an interrupted run would leave behind, and no
-    # variable a trace would print. pipefail: a helm that fails is an unreadable
-    # client. _extract_yaml_value's grep reads to EOF, so helm is never SIGPIPE'd.
-    if _id="$(set -o pipefail; helm get values "$_rel" -n "$_ns" 2>/dev/null </dev/null | _extract_yaml_value - clientId)"; then
-      # VALUES READABLE BUT NO clientId IS NO LONGER "not a client":
-      # clientId stopped being `required` and the chart now tells
-      # operators to drop it from release values once the Secret carries it — so
-      # under the new contract a perfectly live client legitimately has no
-      # clientId in its values, and reading that as "not a match" let the
-      # one-client guard wave through an install that re-points the machine.
-      # Fall back to where the id now lives.
-      #
-      # THE SECRET'S NAME IS NOT ALWAYS THE RELEASE NAME (the name
-      # differs): `tracebloc.secretName` follows `fullnameOverride`. So the
-      # Secret is found by the RELEASE, whatever the chart named it
-      # -- rebuilding the name from the override in these
-      # values restated the chart's rule, and was right only while it matched.
-      [[ -z "$_id" ]] && _id="$(_client_id_from_secret "$_rel" "$_ns")"
-      # shellcheck disable=SC2034  # INSTALLED_CLIENT_RELEASE: consumed by assess.sh
-      [[ -n "$_id" ]] && { INSTALLED_CLIENT_ID="$_id"; INSTALLED_CLIENT_NS="$_ns"; INSTALLED_CLIENT_RELEASE="$_rel"; break; }
-      # A client-chart release with no id in EITHER place is a client we cannot
-      # NAME, not an absent one. Record it and keep scanning; if nothing else
-      # names one, the fail-closed check below reports UNKNOWN.
-      _unreadable=1
-    else
-      # Couldn't read THIS client release's values -> an UNIDENTIFIABLE client.
-      # Record it and keep scanning (a later release may give a definitive id);
-      # if none does, fail closed below rather than read it as "no client here".
-      _unreadable=1
-    fi
-  done < <(printf '%s\n' "$_list" | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
-  # A client release existed but we couldn't read its clientId, and no OTHER
-  # release gave a definitive id -> unknown (fail closed).
-  [[ -z "$INSTALLED_CLIENT_ID" && "$_unreadable" == 1 ]] && INSTALLED_CLIENT_UNKNOWN=1
-  return 0
-}
-
-# _strip_paste_garbage now lives in common.sh (shared with provision.sh's client-
-# name prompt); install-k8s.sh sources common.sh before this file, so it's in
-# scope here for _sanitize_credential below.
-
-# Sanitize a user-entered credential. Calls _strip_paste_garbage and notifies
-# the user on stderr (NOT stdout — this function is called from inside $(...),
-# so stdout is captured into the credential value itself).
-_sanitize_credential() {
-  local input="$1"
-  local clean
-  clean=$(_strip_paste_garbage "$input")
-  if [[ "$clean" != "$input" ]]; then
-    warn "Stripped non-printable / paste-mode characters from input." >&2
-  fi
-  printf '%s' "$clean"
-}
-
-# Sanitize workspace name to comply with DNS-1123 (lowercase, alphanumeric + hyphens)
-_sanitize_workspace_name() {
-  local input="$1"
-  local sanitized
-  sanitized=$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')
-  sanitized="${sanitized// /-}"
-  sanitized="${sanitized//_/-}"
-  sanitized=$(printf '%s' "$sanitized" | sed 's/[^a-z0-9-]//g')
-  sanitized=$(printf '%s' "$sanitized" | sed 's/--*/-/g')
-  sanitized=$(printf '%s' "$sanitized" | sed 's/^-//; s/-$//')
-  if [[ -z "$sanitized" ]]; then
-    sanitized="default"
-  fi
-  if [[ ${#sanitized} -gt 63 ]]; then
-    sanitized="${sanitized:0:63}"
-    sanitized=$(printf '%s' "$sanitized" | sed 's/-$//')
-  fi
-  printf '%s' "$sanitized"
-}
-
-# ── Credential verification ────────────────────────────────────────
-# Resolve the backend base URL the same way jobs-manager does
-# (client-runtime/controller.py: TRACEBLOC_ENV → backend), defaulting to prod.
-_backend_url() {
-  # Reduce aliases FIRST: a raw `staging` fell through to the
-  # prod branch, so verify_credentials() checked staging credentials against
-  # the production backend and reported them invalid.
-  # Bare call: tb_client_env reads the ambient TRACEBLOC_ENV, and the *)
-  # branch below is the prod-equivalent for any unset/unrecognised result.
-  case "$(tb_client_env)" in
-    dev) printf 'https://dev-api.tracebloc.io/' ;;
-    stg) printf 'https://stg-api.tracebloc.io/' ;;
-    *)   printf 'https://api.tracebloc.io/' ;;
-  esac
-}
-
-# Validate the entered Client ID / password against the backend's
-# api-token-auth/ endpoint — the same call jobs-manager makes at runtime —
-# using curl (already a dependency). Echoes: valid | invalid | inactive | unverified.
-# verify_credentials runs with bash -x held off, the secret it holds out of the trace (common.sh);
-# _tb_untraced_verify_credentials below is the function itself.
-verify_credentials() { { _tb_trace_off; } 2>/dev/null; _tb_untraced_verify_credentials "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
-_tb_untraced_verify_credentials() {
-  local client_id="$1" client_password="$2" backend code
-  backend="$(_backend_url)"
-  # SECURITY: never put the password on curl's argv — it would be world-readable
-  # via `ps` / /proc/<pid>/cmdline for the request's lifetime, and tracebloc runs
-  # on shared institutional/on-prem compute where a co-tenant could scrape it
-  # (CWE-214). Feed it through stdin instead: `--data-urlencode password@-` reads
-  # the value from stdin and URL-encodes it, so the secret never appears in the
-  # process table. `printf '%s'` is a bash builtin (no fork, no argv exposure) and
-  # emits no trailing newline (a here-string `<<<` would append one and corrupt
-  # the password). The username (client_id, a UUID) isn't secret, so it stays inline.
-  # curl_secure (not bare curl) pins the minimum TLS version: this request carries
-  # the client's password, and a TLS-inspecting proxy in front of it would happily
-  # negotiate whatever the client accepts. -m 60 keeps the tighter
-  # deadline this call already had.
-  code=$(printf '%s' "$client_password" | curl_secure -sS -m 60 -o /dev/null -w '%{http_code}' \
-    --data-urlencode "username=${client_id}" \
-    --data-urlencode "password@-" \
-    "${backend}api-token-auth/" 2>/dev/null) || code="000"
-  case "$code" in
-    200) printf 'valid' ;;
-    400) printf 'invalid' ;;
-    401) printf 'inactive' ;;
-    *)   printf 'unverified' ;;   # 429 throttled, 000 unreachable, 5xx, …
-  esac
-}
-
-# ── Open the dashboard as "this machine" (the install link) ─────────────────
-# At the end of an interactive install the installer opens the dashboard with a
-# one-time link that marks the browser as on this machine, so the page shows
-# "You're on this machine" without asking the local API first.
-#
-#   1. api-token-auth/ with the machine credential -> the client's token (the
-#      same call verify_credentials and jobs-manager make; for a client it is the
-#      token jobs-manager already uses, never a new one, so nothing is revoked);
-#   2. POST local-session/link/ with that token -> {"url": ...}, a dashboard URL
-#      whose fragment carries a one-time ticket: five minutes, one use, and only
-#      for a signed-in user who may reach this client;
-#   3. open it: `open` on macOS, `xdg-open` on a Linux desktop, Start-Process
-#      through interop in WSL. With no browser to open it in, it is printed.
-#
-# THE LINK IS A BEARER CAPABILITY. It never reaches the install log, telemetry
-# or argv-visible curl flags: the password goes to curl on stdin, the token as a
-# header read from stdin, and a link that must be printed goes to the terminal
-# ($TRACEBLOC_TTY) only, never to stdout, which the install log tees.
-#
-# IT NEVER FAILS THE INSTALL. Every step answers "no link" on any failure (a
-# backend without the endpoint answers 404, an older one or a proxy something
-# else), and the caller carries on silently: the summary already printed the
-# plain dashboard URL. Every function here returns 0 unless it says otherwise.
-
-# The one shape of URL this installer will hand to a browser: https, a host, a
-# path, and the ticket in the fragment as url-safe base64. Anything else (an
-# unexpected answer, a host the backend did not mean) is not opened or printed.
-_dashboard_link_url_ok() {
-  [[ "${1:-}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9/_-]*#local-session-link=[A-Za-z0-9_-]{32,128}$ ]]
-}
-
-# _dashboard_link_json_field JSON KEY -- a string field of a compact JSON object,
-# or nothing. No jq or python3 here (neither is a prerequisite); every value read
-# with it is a token or a URL, which carry no quote or backslash.
-_dashboard_link_json_field() {
-  local out
-  out="$(sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"\\\\]*\)\".*/\1/p" <<<"${1:-}")"
-  printf '%s' "${out%%$'\n'*}"
-}
-
-# _dashboard_link_mint ID PASSWORD -- the install link's URL on stdout, or nothing.
-# _dashboard_link_mint runs with bash -x held off, the secret it holds out of the trace (common.sh);
-# _tb_untraced__dashboard_link_mint below is the function itself.
-_dashboard_link_mint() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__dashboard_link_mint "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
-_tb_untraced__dashboard_link_mint() {
-  local client_id="${1:-}" client_password="${2:-}" backend body token scheme url
-  [[ -n "$client_id" && -n "$client_password" ]] || return 0
-  backend="$(_backend_url)"
-  body="$(printf '%s' "$client_password" | curl_secure -sS -f -m 30 \
-    --data-urlencode "username=${client_id}" \
-    --data-urlencode "password@-" \
-    "${backend}api-token-auth/" 2>/dev/null)" || return 0
-  token="$(_dashboard_link_json_field "$body" token)"
-  scheme="$(_dashboard_link_json_field "$body" token_scheme)"
-  [[ -n "$token" ]] || return 0
-  case "$scheme" in Token|Bearer) ;; *) scheme="Token" ;; esac
-  body="$(printf 'Authorization: %s %s\n' "$scheme" "$token" | curl_secure -sS -f -m 30 \
-    -H @- -H "Accept: application/json" --data "" \
-    "${backend}local-session/link/" 2>/dev/null)" || return 0
-  url="$(_dashboard_link_json_field "$body" url)"
-  _dashboard_link_url_ok "$url" || return 0
-  printf '%s' "$url"
-}
-
-# _dashboard_link_credential -- "ID<newline>PASSWORD" for this machine's client:
-# the release's Secret first (what its pods authenticate with, on every path,
-# the adopt and re-run ones included), else this run's TB_CLIENT_ID /
-# TB_CLIENT_PASSWORD. Nothing when neither is readable.
-# _dashboard_link_credential runs with bash -x held off, the secret it holds out of the trace (common.sh);
-# _tb_untraced__dashboard_link_credential below is the function itself.
-_dashboard_link_credential() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__dashboard_link_credential "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
-_tb_untraced__dashboard_link_credential() {
-  local ns="${TB_NAMESPACE:-}" id="" pw=""
-  if [[ -n "$ns" ]]; then
-    id="$(_client_id_from_secret "$ns" "$ns")"
-    pw="$(_client_password_from_secret "$ns" "$ns")" || pw=""
-  fi
-  if [[ -z "$id" || -z "$pw" ]]; then
-    id="${TB_CLIENT_ID:-}"; pw="${TB_CLIENT_PASSWORD:-}"
-  fi
-  [[ -n "$id" && -n "$pw" ]] || return 0
-  printf '%s\n%s' "$id" "$pw"
-}
-
-# _dashboard_link_open URL -- hand URL to this machine's browser. 0 when an opener
-# took it, 1 when there is none to take it (no desktop, root, no opener) or the run
-# came over ssh: a browser here would open on this machine's screen, not in front
-# of whoever runs the install (tb_over_ssh).
-_dashboard_link_open() {
-  local url="$1" ps="" fallback
-  _dashboard_link_url_ok "$url" || return 1
-  ! tb_over_ssh || return 1
-  if declare -F _probe_wsl >/dev/null 2>&1 && _probe_wsl; then
-    # The browser is the Windows host's. The URL is validated above, so it
-    # carries no quote to break out of the single-quoted PowerShell string.
-    fallback="${TRACEBLOC_WINDOWS_POWERSHELL:-/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe}"
-    if command -v powershell.exe >/dev/null 2>&1; then ps="powershell.exe"
-    elif [[ -x "$fallback" ]]; then ps="$fallback"
-    fi
-    [[ -n "$ps" ]] || return 1
-    _bounded "${TB_WSL_INTEROP_TIMEOUT:-20}" "$ps" -NoProfile -NonInteractive \
-      -Command "Start-Process '$url'" >/dev/null 2>&1 || return 1
-    return 0
-  fi
-  # A browser started as root is the wrong user's (or refuses to start).
-  [[ "$(id -u 2>/dev/null)" != 0 ]] || return 1
-  case "${OS:-$(uname -s)}" in
-    Darwin)
-      has open || return 1
-      open "$url" >/dev/null 2>&1 || return 1
-      ;;
-    Linux)
-      # A desktop session. XWayland sets DISPLAY on the common Wayland desktops
-      # too; with no DISPLAY the link is printed instead.
-      [[ -n "${DISPLAY:-}" ]] || return 1
-      has xdg-open || return 1
-      _bounded 15 xdg-open "$url" >/dev/null 2>&1 || return 1
-      ;;
-    *) return 1 ;;
-  esac
-  return 0
-}
-
-# _dashboard_link_interactive -- a person is at this install: a terminal that can
-# really be OPENED, for reading and for the print. Mode bits say yes for a
-# /dev/tty with no controlling terminal (the house probe, _tty_usable and
-# _login_tty_ok, opens it for that reason), and `>` would truncate a regular file
-# a case names as TRACEBLOC_TTY, so this opens it for append.
-_dashboard_link_interactive() {
-  local tty="${TRACEBLOC_TTY:-/dev/tty}"
-  { : <"$tty" >>"$tty"; } 2>/dev/null
-}
-
-# open_dashboard_link -- before the summary of a connected install: opens the
-# dashboard, and says so to the summary (_TB_DASHBOARD_OPENED, its first next step),
-# or keeps a link with no browser to open it in for print_dashboard_link. Prints
-# nothing itself.
-_TB_DASHBOARD_OPENED=""; _TB_DASHBOARD_LINK=""
-# open_dashboard_link runs with bash -x held off, the secret it holds out of the trace (common.sh);
-# _tb_untraced_open_dashboard_link below is the function itself.
-open_dashboard_link() { { _tb_trace_off; } 2>/dev/null; _tb_untraced_open_dashboard_link "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
-_tb_untraced_open_dashboard_link() {
-  _TB_DASHBOARD_OPENED=""; _TB_DASHBOARD_LINK=""
-  [[ "${TRACEBLOC_CLIENT_STATE:-}" == "connected" ]] || return 0
-  _dashboard_link_interactive || return 0
-  local cred id pw url
-  cred="$(_dashboard_link_credential)"
-  id="${cred%%$'\n'*}"; pw="${cred#*$'\n'}"
-  url="$(_dashboard_link_mint "$id" "$pw")"
-  cred=""; pw=""
-  if [[ -z "$url" ]]; then
-    log "Dashboard link: not available; the summary's dashboard URL stands."
-    return 0
-  fi
-  if _dashboard_link_open "$url"; then
-    log "Dashboard link: opened in the browser."
-    _TB_DASHBOARD_OPENED=1
-    return 0
-  fi
-  log "Dashboard link: no browser to open it in; printed to the terminal only."
-  _TB_DASHBOARD_LINK="$url"
-  return 0
-}
-
-# print_dashboard_link -- after the summary: the link open_dashboard_link had no
-# browser to open in, to the terminal only (never the log; it signs in once).
-print_dashboard_link() {
-  [[ -n "${_TB_DASHBOARD_LINK:-}" ]] || return 0
-  {
-    printf '  Open your dashboard in a browser on this machine.\n'
-    printf '  This link works once, for 5 minutes:\n'
-    printf '    %s\n\n' "$_TB_DASHBOARD_LINK"
-  } >"${TRACEBLOC_TTY:-/dev/tty}" 2>/dev/null || true
-  _TB_DASHBOARD_LINK=""
-  return 0
-}
-
-# ── Corporate-proxy passthrough into the chart ───────────────────────
-# The node gets the host's HTTP(S)_PROXY (cluster.sh, _node_proxy_env) so
-# containerd can pull images behind a corporate proxy. But the client
-# *workloads* — jobs-manager (api + pods-monitor), the egress gate, the
-# image-refresh / auto-upgrade cronjobs — only get proxy egress if the CHART
-# renders it, and the chart's tracebloc.proxyEnv helper is driven by the SPLIT
-# keys (HTTP_PROXY_HOST/_PORT/_USERNAME/_PASSWORD), not a raw HTTP_PROXY URL.
-# Without them every backend-dialing pod CrashLoopBackOffs on api-token-auth/
-# behind a corporate proxy (observed on a hospital / proxy-only tenant, 2026-06-09). This fills the workload half
-# of the proxy support that node-level propagation alone missed.
-#
-# We deliberately emit the SPLIT form, not a raw env.HTTP_PROXY: on the released
-# 1.6.0 chart a raw env.HTTP_PROXY with no HTTP_PROXY_HOST is dropped by the
-# proxy-key exclusion (a past regression). HTTP_PROXY_HOST drives
-# proxyEnv and is correct on every released chart.
-#
-# Reads the first set of HTTP_PROXY/HTTPS_PROXY (upper- then lower-case);
-# supports authenticated proxies (http://user:pass@host:port), splitting on the
-# LAST '@' so a ':' or '@' inside the password is tolerated. Echoes YAML lines
-# for the env: block (each prefixed with a newline, 2-space indent), or nothing
-# when the host has no proxy set.
-# _chart_proxy_env_yaml runs with bash -x held off, the secret it holds out of the trace (common.sh);
-# _tb_untraced__chart_proxy_env_yaml below is the function itself.
-_chart_proxy_env_yaml() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__chart_proxy_env_yaml "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
-_tb_untraced__chart_proxy_env_yaml() {
-  local raw="" var
-  for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
-    if [[ -n "${!var:-}" ]]; then raw="${!var}"; break; fi
-  done
-  [[ -z "$raw" ]] && return 0
-
-  local rest="${raw#*://}"      # strip scheme
-  rest="${rest%%/*}"            # strip any trailing /path
-  local creds="" hostport="$rest" host port="" user="" pass=""
-  if [[ "$rest" == *"@"* ]]; then
-    creds="${rest%@*}"          # everything before the LAST '@'
-    hostport="${rest##*@}"      # host:port after the LAST '@'
-  fi
-  host="${hostport%%:*}"
-  [[ "$hostport" == *:* ]] && port="${hostport##*:}"
-  [[ -z "$host" ]] && return 0
-  if [[ -n "$creds" ]]; then
-    user="${creds%%:*}"
-    [[ "$creds" == *:* ]] && pass="${creds#*:}"
-  fi
-
-  printf '\n  HTTP_PROXY_HOST: "%s"' "$host"
-  [[ -n "$port" ]] && printf '\n  HTTP_PROXY_PORT: "%s"' "$port"
-  [[ -n "$user" ]] && printf '\n  HTTP_PROXY_USERNAME: "%s"' "$user"
-  [[ -n "$pass" ]] && printf '\n  HTTP_PROXY_PASSWORD: "%s"' "$pass"
-  # Pass the host's NO_PROXY through; tracebloc.proxyEnv unions it with the
-  # cluster-internal bypass list (mirrors cluster.sh's node-side _augment_no_proxy).
-  local hostnp="${NO_PROXY:-${no_proxy:-}}"
-  [[ -n "$hostnp" ]] && printf '\n  NO_PROXY: "%s"' "$hostnp"
-  return 0
-}
-
-# _image_mirror_yaml — emit the top-level chart values that point every image the
-# chart pulls at a private registry mirror (restricted-network installs).
-# TRACEBLOC_IMAGE_REGISTRY sets global.imageRegistry: the chart's
-# global.imageRegistry convention re-homes tracebloc/*, the spawned ingestor and
-# training-job images, and the alpine/* utility images onto that host (the
-# egress gateway's squid-tracebloc is a tracebloc/* image), so an air-gapped /
-# mirror-only network pulls nothing from a public
-# registry. When the mirror needs authentication, TRACEBLOC_REGISTRY_USERNAME /
-# TRACEBLOC_REGISTRY_PASSWORD also mint the chart's imagePullSecret
-# (dockerRegistry), whose server defaults to the mirror host. Emits nothing when
-# no mirror is configured, so a default install's values are unchanged.
-# _image_mirror_yaml runs with bash -x held off, the secret it holds out of the trace (common.sh);
-# _tb_untraced__image_mirror_yaml below is the function itself.
-_image_mirror_yaml() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__image_mirror_yaml "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
-_tb_untraced__image_mirror_yaml() {
-  local mirror="${TRACEBLOC_IMAGE_REGISTRY:-}"
-  local reg_user="${TRACEBLOC_REGISTRY_USERNAME:-}"
-  local reg_pass="${TRACEBLOC_REGISTRY_PASSWORD:-}"
-  [[ -z "$mirror" && -z "$reg_user" && -z "$reg_pass" ]] && return 0
-
-  # global.imageRegistry is a BARE host (mirror.corp.example[:port]) — it becomes the
-  # prefix of every image reference, so strip a pasted scheme to keep <host>/repo
-  # well-formed.
-  local mirror_host="${mirror#*://}"
-
-  if [[ -n "$mirror_host" ]]; then
-    printf '\nglobal:\n  imageRegistry: '\''%s'\''\n' "$(_yaml_sq_escape "$mirror_host")"
-  fi
-  if [[ -n "$reg_user" || -n "$reg_pass" ]]; then
-    # dockerRegistry.server is the imagePullSecret's auths key and the chart schema
-    # REQUIRES it whenever create is true (format:uri), so it must ALWAYS be
-    # emitted here. Precedence: an explicit TRACEBLOC_REGISTRY_SERVER wins (e.g. a
-    # registry whose auth realm differs from the image host); else derive
-    # https://<mirror-host> when a mirror is set; else fall back to Docker Hub so
-    # creds-only (authenticate to docker.io, no mirror) still renders a valid
-    # secret instead of a schema error.
-    local server="${TRACEBLOC_REGISTRY_SERVER:-}"
-    if [[ -z "$server" ]]; then
-      if [[ -n "$mirror_host" ]]; then
-        server="https://$mirror_host"
-      else
-        server="https://index.docker.io/v1/"
-      fi
-    fi
-    printf '\ndockerRegistry:\n  create: true\n'
-    printf '  server: '\''%s'\''\n' "$(_yaml_sq_escape "$server")"
-    printf '  username: '\''%s'\''\n' "$(_yaml_sq_escape "$reg_user")"
-    printf '  password: '\''%s'\''\n' "$(_yaml_sq_escape "$reg_pass")"
-    printf '  email: '\''%s'\''\n' "$(_yaml_sq_escape "${TRACEBLOC_REGISTRY_EMAIL:-}")"
-  fi
-  return 0
-}
-
-# ── The chart is tracebloc's (verify_client_chart) ───────────────────────────
-# Who may sign the chart, and the cosign build that checks it: install.sh's
-# SIGNER_REPOS, SIGNER_ID_RE and COSIGN_VERSION, which install-chart-verify.bats holds
-# these copies to (the core runs without install.sh in tracebloc's WSL distro).
-TB_COSIGN_VERSION="v2.4.1"
-TB_CHART_SIGNER_REPOS='client|client-dev'
-TB_CHART_SIGNER_RE="^https://github\.com/tracebloc/(${TB_CHART_SIGNER_REPOS})/\.github/workflows/release-helm-chart\.yaml@refs/tags/v.*"
-TB_CHART_SIGNER_ISSUER='https://token.actions.githubusercontent.com'
-# Where cosign's `initialize` fetches Sigstore's trust root from (its default TUF mirror).
-TB_SIGSTORE_TUF_HOST="tuf-repo-cdn.sigstore.dev"
-TRACEBLOC_COSIGN_MIN_BYTES="${TRACEBLOC_COSIGN_MIN_BYTES:-1048576}"   # a real cosign build is far larger
-TB_CHART_VERIFIED=""   # the checked chart file, which _resolve_chart_ref installs
-_TB_CHART_HTTP=""
-_TB_COSIGN=""
-
-# _tb_chart_get URL DEST -- fetch URL to DEST, up to three tries 5 s then 10 s apart
-# while the answer is one a wait can cure (none, 408, 429, a 5xx). The last HTTP status
-# is left in _TB_CHART_HTTP (000: no answer); 0 only for a 200 whose body curl delivered
-# whole. Any curl failure (a cut transfer, a redirect loop) is no answer, wait-curable.
-_tb_chart_get() {
-  local try rc
-  for try in 1 2 3; do
-    rc=0
-    _TB_CHART_HTTP="$(curl_secure -sSL --speed-limit 1024 --speed-time 60 -o "$2" -w '%{http_code}' "$1" 2>>"${LOG_FILE:-/dev/null}")" || rc=$?
-    [[ "$_TB_CHART_HTTP" != 200 || "$rc" != 0 ]] || return 0
-    [[ "$rc" == 0 ]] || _TB_CHART_HTTP=000
-    log "Chart check: $1 answered ${_TB_CHART_HTTP:-000} (try $try of 3)"
-    case "$_TB_CHART_HTTP" in ""|000|408|429|5[0-9][0-9]) ;; *) return 1 ;; esac
-    [[ "$try" == 3 ]] || sleep $(( try * 5 ))
-  done
-  return 1
-}
-
-# _tb_chart_unreachable URL STATUS -- stop: the check could not download from URL's host,
-# said in step 1's words for a host it cannot reach (preflight's _pf_connectivity).
-_tb_chart_unreachable() {
-  local host="${1#*://}"
-  host="${host%%/*}"
-  case "${2:-000}" in
-    ""|000|408|429|5[0-9][0-9])
-      tb_fail_next "Check this machine's connection and proxy, then run the installer again:"
-      error_said "No answer from · ${host}" "The chart check could not download $1 (last status ${2:-000})." ;;
-    *)
-      tb_fail_next "Allow HTTPS to those addresses, then run the installer again:"
-      error_said "Blocked on this network · ${host}" "The chart check could not download $1 (status $2)." ;;
-  esac
-}
-
-# _tb_chart_unsigned WHY -- stop: the chart is not one tracebloc's release signed. Only
-# step a's check (verify_client_chart --before-deps, which sets _tb_chart_step_a) runs
-# before anything changes, so only it says so; the install-time check runs after steps b-d.
-_tb_chart_unsigned() {
-  if [[ "${_tb_chart_step_a:-}" == 1 ]]; then
-    tb_fail_head "This release isn't signed by tracebloc, so nothing was changed"
-  else
-    tb_fail_head "This release isn't signed by tracebloc, so it wasn't installed"
-  fi
-  error_said "" "The client chart was not installed: $1"
-}
-
-# _tb_chart_cosign DIR -- the pinned cosign build in _TB_COSIGN: the one install.sh hands
-# down (TRACEBLOC_COSIGN), or the one on PATH, when it is that build by its published
-# checksum, else that build downloaded into DIR and held to it. Only that build: after its
-# `initialize` it verifies with no network, so a failure is the signature's, not Sigstore's.
-_tb_chart_cosign() {
-  local dir="$1" os arch base want c
-  case "$OS" in Linux) os=linux ;; Darwin) os=darwin ;; *) error_said "" "No cosign build for $OS to check the chart with." ;; esac
-  case "$ARCH" in x86_64|amd64) arch=amd64 ;; arm64|aarch64) arch=arm64 ;; *) error_said "" "No cosign build for $ARCH to check the chart with." ;; esac
-  base="https://github.com/sigstore/cosign/releases/download/${TB_COSIGN_VERSION}"
-  _tb_chart_get "$base/cosign_checksums.txt" "$dir/cosign_checksums.txt" \
-    || _tb_chart_unreachable "$base/cosign_checksums.txt" "$_TB_CHART_HTTP"
-  want="$(awk -v a="cosign-${os}-${arch}" '$2 == a { print $1; exit }' "$dir/cosign_checksums.txt")"
-  [[ -n "$want" ]] || error_said "" "cosign ${TB_COSIGN_VERSION} publishes no checksum for cosign-${os}-${arch}."
-  for c in "${TRACEBLOC_COSIGN:-}" "$(command -v cosign 2>/dev/null || true)"; do
-    [[ -n "$c" && -f "$c" && -x "$c" ]] || continue
-    if _verify_sha256 "$want" "$c"; then _TB_COSIGN="$c"; return 0; fi
-    log "Chart check: $c is not cosign ${TB_COSIGN_VERSION} for ${os}/${arch}."
-  done
-  _tb_chart_get "$base/cosign-${os}-${arch}" "$dir/cosign" \
-    || _tb_chart_unreachable "$base/cosign-${os}-${arch}" "$_TB_CHART_HTTP"
-  # A real cosign build is tens of MB: a smaller 200 is a proxy's error page, not tampering.
-  if [[ "$(wc -c <"$dir/cosign" | tr -d ' ')" -lt "$TRACEBLOC_COSIGN_MIN_BYTES" ]]; then
-    log "Chart check: $base/cosign-${os}-${arch} answered 200 with a body under ${TRACEBLOC_COSIGN_MIN_BYTES} bytes."
-    tb_fail_next "Check this machine's connection and proxy, then run the installer again:"
-    error_said "No answer from · github.com" "The chart check downloaded $base/cosign-${os}-${arch} but got a short reply, not the cosign build."
-  fi
-  _verify_sha256 "$want" "$dir/cosign" || error "System tool checksum verification failed"
-  chmod +x "$dir/cosign"
-  _TB_COSIGN="$dir/cosign"
-}
-
-# _tb_chart_newest INDEX CHART -- "VERSION URL" of CHART's newest stable release in the
-# Helm repository index INDEX, the one helm takes with no --version: the highest X.Y.Z
-# (build metadata ignored, pre-releases left out) and its first URL. Nothing for none.
-_tb_chart_newest() {
-  awk -v chart="$2" '
-    function keep(   core, v) {
-      core = ver; sub(/\+.*/, "", core)
-      if (name == chart && url != "" && core ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) {
-        split(core, v, ".")
-        if (best == "" || v[1] + 0 > b1 || (v[1] + 0 == b1 && (v[2] + 0 > b2 || (v[2] + 0 == b2 && v[3] + 0 > b3)))) {
-          best = ver; bu = url; b1 = v[1] + 0; b2 = v[2] + 0; b3 = v[3] + 0
-        }
-      }
-      ver = ""; url = ""; key = ""
-    }
-    /^entries:/ { inent = 1; next }
-    inent && /^[^ ]/ { keep(); inent = 0 }
-    !inent { next }
-    /^  [^ -][^:]*:/ { keep(); name = $1; sub(/:$/, "", name); next }
-    /^  - / { keep(); sub(/^  - /, "    ") }
-    /^    [A-Za-z]+:/ {
-      key = $1; sub(/:$/, "", key)
-      if (key == "version") { ver = $2; gsub(/[\042\047]/, "", ver) }
-      next
-    }
-    /^    - / && key == "urls" && url == "" { url = $2; gsub(/[\042\047]/, "", url) }
-    END { keep(); if (best != "") print best, bu }
-  ' "$1"
-}
-
-# verify_client_chart [--before-deps] -- the chart this run installs, checked before
-# anything changes: the newest stable client chart in the Helm repository, against the
-# Sigstore bundle its release attaches beside it (<chart url>.bundle), signed as
-# TB_CHART_SIGNER_RE. Leaves the checked file in TB_CHART_VERIFIED. A local chart
-# (TRACEBLOC_CHART_PATH) is not checked; TRACEBLOC_ALLOW_UNVERIFIED=1 skips it and says
-# so. Anything else stops the run. --before-deps (main()'s step a) leaves a host with no
-# curl yet, which step b installs, to _resolve_chart_ref's call, which never skips; and
-# only it lets a refusal say nothing was changed (_tb_chart_unsigned).
-verify_client_chart() {
-  [[ -z "$TB_CHART_VERIFIED" ]] || return 0
-  if [[ -n "${TRACEBLOC_CHART_PATH:-}" ]]; then
-    log "Chart check: the local chart ${TRACEBLOC_CHART_PATH} is installed as it is (TRACEBLOC_CHART_PATH)."
-    return 0
-  fi
-  if [[ "${TRACEBLOC_ALLOW_UNVERIFIED:-0}" == 1 ]]; then
-    warn "The chart's signature isn't checked (TRACEBLOC_ALLOW_UNVERIFIED=1, for development only)"
-    return 0
-  fi
-  if [[ "${1:-}" == --before-deps ]] && ! has curl; then
-    log "Chart check: nothing to fetch with before step b; the chart is checked before it is installed."
-    return 0
-  fi
-  local dir pick ver url tgz try _tb_chart_step_a=""
-  [[ "${1:-}" != --before-deps ]] || _tb_chart_step_a=1
-  tb_scratch_dir dir tracebloc-chart || error_said "" "No private folder for the chart check could be made."
-  tb_live_quiet "Checking the release..."
-  _tb_chart_get "${TRACEBLOC_HELM_REPO_URL%/}/index.yaml" "$dir/index.yaml" \
-    || _tb_chart_unreachable "${TRACEBLOC_HELM_REPO_URL%/}/index.yaml" "$_TB_CHART_HTTP"
-  grep -q '^entries:' "$dir/index.yaml" \
-    || _tb_chart_unreachable "${TRACEBLOC_HELM_REPO_URL%/}/index.yaml" 200
-  pick="$(_tb_chart_newest "$dir/index.yaml" "$TRACEBLOC_CHART_NAME")"
-  [[ -n "$pick" ]] || _tb_chart_unsigned "${TRACEBLOC_HELM_REPO_URL} lists no stable ${TRACEBLOC_CHART_NAME} chart."
-  ver="${pick%% *}"; url="${pick#* }"
-  [[ "$url" == *://* ]] || url="${TRACEBLOC_HELM_REPO_URL%/}/${url#/}"
-  [[ "$url" == https://* ]] || _tb_chart_unsigned "the ${TRACEBLOC_CHART_NAME} chart ${ver} is listed at ${url}, not an https URL."
-  tgz="$dir/${TRACEBLOC_CHART_NAME}-${ver}.tgz"
-  _tb_chart_get "$url" "$tgz" || _tb_chart_unreachable "$url" "$_TB_CHART_HTTP"
-  if ! _tb_chart_get "${url}.bundle" "${tgz}.bundle"; then
-    [[ "$_TB_CHART_HTTP" != 404 ]] || _tb_chart_unsigned "its release attaches no ${url##*/}.bundle (404)."
-    _tb_chart_unreachable "${url}.bundle" "$_TB_CHART_HTTP"
-  fi
-  _tb_chart_cosign "$dir"
-  # TUF_ROOT inside the scratch folder, as install.sh's _cosign keeps it: nothing of the
-  # user's ~/.sigstore is read or written, and it goes when the run ends.
-  local init_rc
-  for try in 1 2 3; do
-    init_rc=0
-    _bounded 60 env TUF_ROOT="$dir/sigstore-root" "$_TB_COSIGN" initialize >"$dir/initialize.out" 2>&1 || init_rc=$?
-    cat "$dir/initialize.out" >>"${LOG_FILE:-/dev/null}" 2>/dev/null || true
-    [[ "$init_rc" != 0 ]] || break
-    # 125-127: the shell or timeout(1) could not run cosign at all, so retrying and blaming Sigstore's host is wrong.
-    case "$init_rc" in 125|126|127)
-      error_said "Couldn't run the signature check (cosign exit ${init_rc})" "The chart check could not run cosign ${TB_COSIGN_VERSION} (exit ${init_rc})." ;; esac
-    [[ "$try" != 3 ]] || _tb_chart_unreachable "https://${TB_SIGSTORE_TUF_HOST}/" 000
-    sleep $(( try * 5 ))
-  done
-  TUF_ROOT="$dir/sigstore-root" "$_TB_COSIGN" verify-blob \
-      --bundle "${tgz}.bundle" \
-      --certificate-identity-regexp "$TB_CHART_SIGNER_RE" \
-      --certificate-oidc-issuer "$TB_CHART_SIGNER_ISSUER" \
-      --offline \
-      "$tgz" >>"${LOG_FILE:-/dev/null}" 2>&1 \
-    || _tb_chart_unsigned "${url##*/} does not verify against ${url##*/}.bundle as ${TB_CHART_SIGNER_RE}."
-  tb_live_done
-  log "Chart check: ${url##*/} is signed by tracebloc's release workflow; installing that file."
-  TB_CHART_VERIFIED="$tgz"
-}
-
-# _resolve_chart_ref — resolve the chart reference (local dev path, the chart
-# verify_client_chart checked, or under TRACEBLOC_ALLOW_UNVERIFIED=1 the remote repo)
-# and set `chart_ref` in the caller's scope (bash dynamic scope). Extracted so a
-# fresh install and an adopt reconcile resolve it identically. Logging is a side
-# effect only — never command-substitute this (that would capture the log lines).
-_resolve_chart_ref() {
-  if [[ -n "${TRACEBLOC_CHART_PATH:-}" ]]; then
-    [[ -d "$TRACEBLOC_CHART_PATH" ]] || error "TRACEBLOC_CHART_PATH not found: $TRACEBLOC_CHART_PATH"
-    chart_ref="$TRACEBLOC_CHART_PATH"
-    info "Dev mode: using local chart at $chart_ref"
-    log "Using local chart: $chart_ref"
-    return 0
-  fi
-  # main() checks the chart in step a; a caller that did not, or a host that had no curl
-  # then, gets the same check here, with nothing skipped.
-  verify_client_chart
-  if [[ -n "$TB_CHART_VERIFIED" ]]; then
-    chart_ref="$TB_CHART_VERIFIED"
-    log "Using the checked chart: $chart_ref"
-  else
-    # Capture-then-match: `helm repo list | grep -q` lets grep
-    # close the pipe on its first hit, helm takes SIGPIPE and pipefail makes it
-    # 141 — which the `if !` reads as "repo absent" and re-runs `helm repo add`
-    # on the next line. That line is unguarded, and `helm repo add` fails when
-    # the name already exists with a different URL, so the misbranch escalates
-    # into an aborted install under `set -e`.
-    local _helm_repos
-    _helm_repos="$(helm repo list 2>/dev/null || true)"
-    if ! grep -q "^${TRACEBLOC_HELM_REPO_NAME}[[:space:]]" <<<"$_helm_repos"; then
-      log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
-      helm repo add "$TRACEBLOC_HELM_REPO_NAME" "$TRACEBLOC_HELM_REPO_URL" >> "${LOG_FILE:-/dev/null}" 2>&1
-    fi
-    log "Updating Helm repos..."
-    helm repo update >> "${LOG_FILE:-/dev/null}" 2>&1
-    chart_ref="$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME"
-  fi
-}
-
-# _last_deployed_helm_revision — the highest revision whose status is `deployed`
-# in a `helm history -o json` body ($1), or nothing when there is none
-# jq-free, the same parse as the auto-upgrade cronjob's
-# last_deployed_revision: split the body on each record's leading
-# `{"revision":`, so a description (helm escapes its quotes) cannot forge one.
-_last_deployed_helm_revision() {
-  printf '%s' "$1" | tr -d '\n' | awk '{
-    n = split($0, recs, /\{[ ]*"revision":[ ]*/)
-    best = ""
-    for (i = 2; i <= n; i++) {
-      r = recs[i]
-      if (match(r, /^[0-9][0-9]*/) == 0) continue
-      rev = substr(r, 1, RLENGTH) + 0
-      if (r ~ /"status":[ ]*"deployed"/ && (best == "" || rev > best)) best = rev
-    }
-    if (best != "") print best
-  }'
-}
-
-# ── The host's helm lock ─────────────────────────────────
-# On the macOS node the Apple-GPU runner's idle restart stops the node and holds
-# ~/.tracebloc/helm.lock until it is Ready again, and the tracebloc CLI's helm commands
-# take the same lock (cli-dev internal/helmlock). So each helm call here that changes the
-# release takes it too, around that call alone: a restart then waits for one helm call,
-# never for the rest of the installer, and never stops the node under one. The recovery
-# of an interrupted release holds it across the read it decides on and its act
-# (_tb_recover_locked), since the wait for the lock can change what that read says.
-#   - It is flock(2), exclusive. macOS's /usr/bin/lockf (FreeBSD's) takes the same lock;
-#     cli-dev's TestTheInstallersLockfIsTheSameLock holds that.
-#   - -k keeps the file. Without it lockf unlinks the file on exit, and a process that
-#     opened the old file could lock it while another locks a new one: both would hold it.
-#   - The kernel drops the lock when its holder exits, so a holder that died leaves it free.
-#   - Exit 75 (EX_TEMPFAIL) is lockf's: the wait ran out and helm never ran.
-#   - spin's deadline (_tb_helm_deadline_s) is helm's budget plus the lock's wait, so the
-#     wait never takes helm's time and lockf's 75 comes first. At it spin TERMs and KILLs
-#     the whole tree (_tb_spin_reap), so a timed-out call leaves no helm without the lock.
-# Elsewhere (Linux, WSL) no runner restarts a node, and the prefix is empty.
-_TB_HELM_LOCK=()
-_TB_HELM_LOCKF=/usr/bin/lockf
-
-# _tb_helm_lock -- set _TB_HELM_LOCK to the prefix the next release-changing helm call runs
-# under: `lockf -k -t WAIT LOCK` on the macOS node (native k3s on a Mac, as
-# _mac_node_profile_set_args reads it), empty anywhere else. WAIT is
-# TRACEBLOC_HELM_LOCK_WAIT_S whole seconds, 300 by default. LOCK sits beside the install
-# record's user copy, as cli-dev's helmlock.Path does. A lock this run cannot take (no
-# home, no folder, no lockf) stops the run: helm never runs without it on the Mac.
-_tb_helm_lock() {
-  local _rec _w
-  _TB_HELM_LOCK=()
-  [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" == "Darwin" ]] || return 0
-  [[ -n "${TRACEBLOC_RECORD_HOME:-${HOME:-}}" ]] \
-    || error "HOME is not set, so this run cannot tell where the helm lock (~/.tracebloc/helm.lock) is. Re-run the installer from your own login."
-  _rec="$(tb_record_path)"
-  mkdir -p "${_rec%/*}" \
-    || error "Couldn't create ${_rec%/*}, which holds the helm lock the tracebloc runner shares with this installer. Check that you own it, then re-run."
-  [[ -x "$_TB_HELM_LOCKF" ]] \
-    || error "${_TB_HELM_LOCKF} is missing, so this installer cannot take the helm lock the tracebloc runner shares with it. It ships with macOS; check this Mac's system files, then re-run."
-  case "${TRACEBLOC_HELM_LOCK_WAIT_S:-}" in
-    ''|*[!0-9]*) _w=300 ;;
-    *) _w=$(( 10#$TRACEBLOC_HELM_LOCK_WAIT_S )) ;;
-  esac
-  _TB_HELM_LOCK=("$_TB_HELM_LOCKF" -k -t "$_w" "${_rec%/*}/helm.lock")
-}
-
-# _tb_helm_lock_timed_out RC -- stop the run by name when RC is lockf's "the wait ran out"
-# (75) under a lock prefix: something else held the lock, and helm did not run. Any other
-# RC returns, for the caller's own helm failure.
-_tb_helm_lock_timed_out() {
-  [[ "$1" -eq 75 && "${#_TB_HELM_LOCK[@]}" -eq 5 ]] || return 0
-  error "A tracebloc node restart or helm command on this Mac held ${_TB_HELM_LOCK[4]} for ${_TB_HELM_LOCK[3]} s, so this installer did not change the secure environment. Re-run the installer once it has ended."
-}
-
-# _tb_wait_auto_upgrade_job NS -- wait for the chart's own auto-upgrade Job in NS to end.
-# Its `helm upgrade` holds the release in pending-upgrade while it runs, and the host's
-# helm lock cannot see an in-cluster Job, so acting on the release then races a live
-# upgrade. The wait is bounded by the Job's activeDeadlineSeconds, past which Kubernetes
-# kills it and what it leaves is a real wedge. The first list is tried three times, a slow
-# API being the likely reason it fails. Jobs are told apart by their pod template's
-# component label, since the CronJob sets no labels on the Jobs themselves. Returns 1 when
-# the Jobs could not be listed, first or on the wait's last poll (nothing is known about an
-# upgrade), else 0.
-_tb_wait_auto_upgrade_job() {
-  local _ns="$1" _out _name="" _dl="" _deadline _poll="${TRACEBLOC_AUTO_UPGRADE_POLL_S:-10}" _said="" _try _listed="" _unread=""
-  local _tmpl='{{range $j := .items}}{{if $j.status.active}}{{with $j.spec.template.metadata.labels}}{{with index . "app.kubernetes.io/component"}}{{if eq . "auto-upgrade"}}{{$j.metadata.name}}{{"\t"}}{{$j.spec.activeDeadlineSeconds}}{{"\n"}}{{end}}{{end}}{{end}}{{end}}{{end}}'
-  for _try in 1 2 3; do
-    if _out="$(_bounded 20 kubectl get jobs -n "$_ns" \
-      --request-timeout=15s -o "go-template=$_tmpl" 2>>"${LOG_FILE:-/dev/null}")"; then _listed=1; break; fi
-    (( _try < 3 )) && sleep "$_poll"
-  done
-  [[ -n "$_listed" ]] || { log "auto-upgrade Jobs in '$_ns' could not be listed."; return 1; }
-  read -r _name _dl <<<"$_out" || true
-  [[ -n "$_name" ]] || return 0
-  [[ "$_dl" =~ ^[0-9]+$ ]] || _dl=1500   # the chart's floor at the default upgrade timeout
-  _deadline=$(( SECONDS + _dl ))
-  while [[ -n "$_name" ]] && (( SECONDS < _deadline )); do
-    if [[ -z "$_said" ]]; then
-      info "The hourly auto-upgrade ($_name) is updating your secure environment now; waiting for it to finish (at most ${_dl}s)…"
-      log "auto-upgrade Job $_name active in '$_ns'; waiting up to ${_dl}s before touching the release."
-      _said=1
-    fi
-    sleep "$_poll"
-    _out="$(_bounded 20 kubectl get jobs -n "$_ns" \
-      --request-timeout=15s -o "go-template=$_tmpl" 2>>"${LOG_FILE:-/dev/null}")" || { _unread=1; continue; }
-    _unread=""; _name=""; read -r _name _dl <<<"$_out" || true
-  done
-  if [[ -n "$_unread" ]]; then
-    log "auto-upgrade Jobs in '$_ns' could not be listed again while $_name was active."
-    return 1
-  elif [[ -n "$_name" ]]; then
-    log "auto-upgrade Job $_name in '$_ns' still active after its deadline; going on."
-  elif [[ -n "$_said" ]]; then
-    info "The auto-upgrade finished."
-  fi
-  return 0
-}
-
-# _tb_helm_deadline_s MINUTES -- print spin's deadline, in seconds, for a helm call run
-# under _TB_HELM_LOCK: helm's MINUTES plus the lock's wait, or MINUTES alone with no lock.
-_tb_helm_deadline_s() {
-  local _w=0
-  [[ "${#_TB_HELM_LOCK[@]}" -eq 5 ]] && _w="${_TB_HELM_LOCK[3]}"
-  printf '%s' "$(( $1 * 60 + _w ))"
-}
-
-# _recover_pending_helm_release — auto-clear a wedged pending-* release before a
-# helm upgrade/install. A helm process killed mid-operation (Ctrl-C, OOM,
-# host reboot, laptop sleep) leaves the release stuck in a transient state; every
-# subsequent `helm upgrade --install` then fails with "another operation is in
-# progress" — exit 1, NOT 124 — a permanent wedge that no re-run can clear on its
-# own. Detect that state and clear it so the caller's helm op can proceed.
-#
-#   $1 = release name   $2 = namespace
-#   $3 = mode: "full" (default) or "no-destroy" (see below)
-#
-# Reads the STATUS: line of `helm status` once any active auto-upgrade Job has ended
-# (_tb_wait_auto_upgrade_job) — jq-free on purpose, parsed the same way the
-# auto-upgrade cronjob does, whose alpine/helm image ships without jq — and
-# again under the host's helm lock, where what to do is decided (_tb_recover_locked):
-#   deployed / failed / superseded / uninstalled / not found → healthy or absent; no-op
-#   no status (a timeout, an API error) → no-op, except under the host's helm lock,
-#     where its holder may be what the read timed out on: there it is read again
-#   pending-upgrade / pending-rollback → roll back to the last deployed revision,
-#                                        named from `helm history`;
-#                                        none in the history → refuse (return 1);
-#                                        auto-upgrade Jobs that could not be listed
-#                                        → no rollback, said on screen; left to the
-#                                        bounded upgrade (return 0)
-#   pending-install                    → revision 1 never deployed; there is no
-#                                        good revision to roll back to, so remove
-#                                        the half-installed release (matches the
-#                                        first-install manual remedy we already
-#                                        print). Safe for data: the chart renders
-#                                        helm.sh/resource-policy: keep on every
-#                                        PVC/namespace, and helm reads that from
-#                                        the STORED rev-1 manifest, so uninstall
-#                                        leaves the PVCs in place (docs/MIGRATIONS).
-#   uninstalling                       → a killed `helm uninstall`; finish it.
-#
-# mode="no-destroy" (the adopt/reconcile path): rollback is still
-# performed (non-destructive — it restores a deployed revision, so the reconcile's
-# --reuse-values stays valid), but the destructive uninstall branch is REFUSED
-# (returns 1). Adopt reuses the release's STORED credential (the account password
-# is write-only on the backend and lives only in that release); uninstalling a
-# pending-install there would silently drop it. Better to fail closed with a
-# manual remedy than to auto-destroy the sole copy of the credential.
-#
-# Returns 0 when the release is clear (or was already), non-zero when recovery was
-# attempted and FAILED, or was refused under no-destroy — the caller must fail
-# closed rather than march into the same wedge.
-_recover_pending_helm_release() {
-  local _rel="$1" _ns="$2" _mode="${3:-full}" _status _rc _verdict _script _unread="" _jobs_unread=""
-  # A pending-upgrade the chart's auto-upgrade Job is applying is in flight, not
-  # wedged; and a release it is about to upgrade rejects the caller's helm op.
-  _tb_wait_auto_upgrade_job "$_ns" || _jobs_unread=1
-  # Bound the status READ: every helm/kubectl probe in this installer
-  # must be bounded so a wedged/unreachable API can't hang a headless run — and
-  # this read gates everything below, so bounding it bounds the recovery. A
-  # timeout (or any error) yields an empty status → no-op → we hand off to the
-  # bounded upgrade, which surfaces the API failure with its own deadline — unless
-  # the host's helm lock is in force, whose holder (the runner's node restart) can
-  # be what the read timed out on: then it is read again under the lock. The
-  # mutating ops (_tb_recover_locked) are NOT wrapped in a kill-based bound on
-  # purpose: SIGKILLing a helm rollback/uninstall midway would recreate the very
-  # pending-* wedge we are clearing. They are bounded gracefully by helm's own
-  # --wait --timeout (and only run once this read has proven the API responsive).
-  # Capture the whole `helm status`, then parse it from a here-string — NEVER
-  # through an early-exit awk pipeline. Under `set -o pipefail` awk's `exit`
-  # SIGPIPEs helm (rc 141) as it writes the rest of the status body, and the
-  # `|| _status=""` guard would then WIPE a perfectly good parse, silently
-  # skipping recovery (same SIGPIPE-under-pipefail lesson as
-  # _extract_yaml_value). Here-string parsing can't signal anything.
-  local _status_out
-  _status_out="$(_bounded 30 helm status "$_rel" -n "$_ns" 2>&1)" || :
-  _status="$(awk '/^STATUS:/ {print $2; exit}' <<<"$_status_out")"
-  if [[ -z "$_status" && "$_status_out" != *"not found"* ]]; then
-    _tb_helm_lock
-    [[ "${#_TB_HELM_LOCK[@]}" -gt 0 ]] || return 0
-    _unread=1
-  fi
-  case "$_status" in
-    pending-upgrade|pending-rollback|pending-install|uninstalling) ;;
-    '') [[ -n "$_unread" ]] || return 0 ;;  # absent, or unread off the lock
-    deployed|failed|superseded|uninstalled)
-      return 0 ;;  # healthy — nothing to recover
-    *)
-      log "helm status of '$_rel' is '$_status'; no pending-state recovery needed."
-      return 0 ;;
-  esac
-  if [[ -n "$_unread" ]]; then
-    log "helm status of '$_rel' gave no status outside the helm lock; reading it again under the lock."
-  else
-    tb_machine_lines warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."
-    info "Clearing an update that was interrupted..."
-  fi
-  # The read above only says whether to recover. What to do is decided under the
-  # host's helm lock, by a read made there: the lock can wait up to
-  # 300 s for the runner's node restart or the CLI's helm command, which can finish
-  # this very release meanwhile, and a rollback or uninstall decided before that wait
-  # would undo a release that is healthy again. lockf runs a program, never a shell
-  # function, so on the macOS node the locked section is a bash of its own, handed
-  # _tb_recover_locked and what it calls; elsewhere there is no lock, and it runs here.
-  _tb_helm_lock
-  local _sec=("$_rel" "$_ns" "$_mode" "${LOG_FILE:-/dev/null}" "$_jobs_unread")
-  _rc=0
-  if [[ "${#_TB_HELM_LOCK[@]}" -gt 0 ]]; then
-    _script="$(declare -f has _bounded _tb_bounded_bg _tb_bounded_wait _last_deployed_helm_revision _tb_recover_locked)" \
-      || error "The installer is missing a function its helm lock's recovery runs. Re-download the installer, then re-run."
-    _verdict="$(${_TB_HELM_LOCK[@]+"${_TB_HELM_LOCK[@]}"} "$BASH" -c "${_script}"$'\n''_tb_recover_locked "$@"' tb-helm-recover "${_sec[@]}" 2>>"${LOG_FILE:-/dev/null}")" || _rc=$?  # set-u-safe: _sec holds the five words assigned above
-  else
-    _verdict="$(_tb_recover_locked "${_sec[@]}")" || _rc=$?  # set-u-safe: _sec holds the five words assigned above
-  fi
-  if [[ "$_rc" -ne 0 ]]; then
-    _tb_helm_lock_timed_out "$_rc"
-    warn "The recovery of '$_rel' ended with exit $_rc before it said what it did."
-    return 1
-  fi
-  local _v="" _vs="" _vt=""
-  read -r _v _vs _vt <<<"$_verdict" || true
-  case "$_v" in
-    clear)
-      if [[ -n "$_unread" ]]; then
-        log "No recovery of '$_rel': it was $_vs when read again under the helm lock."
-        return 0
-      fi
-      info "'$_rel' is no longer interrupted (status: $_vs): it finished before this installer acted, so it is left as it is."
-      log "No recovery of '$_rel': it was $_status, and $_vs when read again under the helm lock."
-      ;;
-    unreadable)
-      if [[ -n "$_unread" ]]; then
-        log "helm status of '$_rel' gave no status under the helm lock either; leaving it to the bounded upgrade."
-        return 0
-      fi
-      warn "This installer could not read '$_rel' again under the helm lock, so it cannot tell whether it is still interrupted, and left it as it is."
-      hint "Check it, then re-run:  $(tb_helm_shown) -n $_ns status $_rel"
-      return 1
-      ;;
-    jobs-unread)
-      tb_machine_lines warn "This installer could not check whether the hourly auto-upgrade is running in '$_ns', so it did not roll '$_rel' back and left it as it is."
-      info "The hourly auto-upgrade may still be running, so it is left as it is."
-      log "No rollback of '$_rel' ($_vs): the auto-upgrade Jobs in '$_ns' could not be listed; leaving it to the bounded upgrade."
-      return 0
-      ;;
-    rolled-back)
-      info "Rolled '$_rel' back to its last deployed revision ($_vt)."
-      log "Recovered '$_rel' from $_vs via helm rollback to revision $_vt."
-      ;;
-    uninstalled)
-      info "Cleared the half-finished release '$_rel'."
-      log "Recovered '$_rel' from $_vs via helm uninstall."
-      ;;
-    no-target)
-      warn "The history of '$_rel' names no deployed revision to roll back to — refusing an automatic rollback."
-      hint "Inspect it and roll back by hand to a revision you trust:"
-      hint "  $(tb_helm_shown) -n $_ns history $_rel"
-      hint "  $(tb_helm_shown) -n $_ns rollback $_rel <revision> --wait"
-      return 1
-      ;;
-    refused)
-      # Clearing pending-install/uninstalling can only be done by uninstalling
-      # (a never-deployed revision can't be rolled back), which would drop this
-      # client's stored credential — refuse on the reconcile path.
-      # rollback is NOT a remedy for these states, so print the credential-safe
-      # manual path instead.
-      warn "Clearing '$_rel' (status: $_vs) needs an uninstall, which would drop this secure environment's write-only stored credential — refusing to auto-recover it here."
-      hint "Recover by hand without losing the credential:"
-      hint "  $(tb_helm_shown) -n $_ns get values $_rel   # save clientPassword first — it can't be re-fetched"
-      hint "  $(tb_helm_shown) -n $_ns uninstall $_rel    # then re-run the installer"
-      return 1
-      ;;
-    rollback-failed)
-      warn "Automatic rollback of '$_rel' to revision $_vt failed."
-      return 1
-      ;;
-    uninstall-failed)
-      warn "Automatic cleanup of '$_rel' failed."
-      return 1
-      ;;
-    *)
-      warn "The recovery of '$_rel' gave no answer this installer reads ('${_verdict}'), so it cannot tell whether the release changed."
-      return 1
-      ;;
-  esac
-  return 0
-}
-
-# _tb_recover_locked REL NS MODE LOG JOBS -- _recover_pending_helm_release's decision and its
-# act, as one piece that runs under the host's helm lock. It reads REL's status again
-# and acts on that read alone; helm's output goes to LOG. Prints one verdict line,
-# which the caller turns into messages:
-#   clear STATUS              not interrupted (any more), or absent (helm: not found):
-#                             nothing done
-#   unreadable                helm status gave no status and did not say not found
-#                             (a timeout, an API error): nothing done
-#   jobs-unread STATUS        pending-upgrade/-rollback, but JOBS is set: the auto-upgrade
-#                             Jobs could not be listed, so a live upgrade may hold it:
-#                             nothing done
-#   rolled-back STATUS REV    pending-upgrade/-rollback, rolled back to the last
-#                             deployed revision REV, named from `helm history`
-#   no-target STATUS          ... but the history names no deployed revision: refused
-#   rollback-failed STATUS REV
-#   uninstalled STATUS        pending-install (revision 1 never deployed: there is no
-#                             good revision, so the half-install goes; the chart's
-#                             resource-policy: keep leaves the PVCs, docs/MIGRATIONS)
-#                             or uninstalling (a killed `helm uninstall`, finished)
-#   refused STATUS            ... but MODE is no-destroy
-#   uninstall-failed STATUS
-# On the macOS node it runs in the bash lockf starts, so it uses only what
-# _recover_pending_helm_release hands that bash: no messages, no other globals.
-_tb_recover_locked() {
-  local out s hist target
-  # helm's own words are kept: a release helm cannot find is absent, but a read that
-  # timed out or met an API error says nothing about it, and a release the caller
-  # saw interrupted must not pass for finished on that.
-  out="$(_bounded 30 helm status "$1" -n "$2" 2>&1)" || :
-  s="$(awk '/^STATUS:/ {print $2; exit}' <<<"$out")"
-  if [ -z "$s" ]; then
-    case "$out" in
-      *"not found"*) echo "clear absent" ;;
-      *) echo "unreadable" ;;
-    esac
-    return 0
-  fi
-  case "$s" in
-    pending-upgrade|pending-rollback)
-      if [ -n "${5:-}" ]; then echo "jobs-unread $s"; return 0; fi
-      hist="$(_bounded 30 helm history "$1" -n "$2" -o json 2>/dev/null)" || hist=""
-      target="$(_last_deployed_helm_revision "$hist")"
-      if [ -z "$target" ]; then echo "no-target $s"
-      elif helm rollback "$1" "$target" -n "$2" --wait --timeout 5m >>"$4" 2>&1; then echo "rolled-back $s $target"
-      else echo "rollback-failed $s $target"; fi
-      ;;
-    pending-install|uninstalling)
-      if [ "$3" = no-destroy ]; then echo "refused $s"
-      elif helm uninstall "$1" -n "$2" --wait --timeout 5m >>"$4" 2>&1; then echo "uninstalled $s"
-      else echo "uninstall-failed $s"; fi
-      ;;
-    *) echo "clear $s" ;;
-  esac
-  return 0
-}
-
 # _helm_set_string_escape VALUE -- VALUE as one `helm --set-string key=VALUE` value:
 # helm splits --set on an unescaped comma and reads a backslash as an escape, so both
 # are escaped: a backslash becomes two, then a comma becomes backslash-comma.
@@ -2689,7 +64,7 @@ _gpu_unsupported_set_args() {
 }
 
 # _host_os_set_args -- the host's OS for the dashboard, as one
-# --set-string pair: env.TRACEBLOC_HOST_OS from _host_os_label (common.sh). The
+# --set-string pair: env.TRACEBLOC_HOST_OS from _host_os_label (host.sh). The
 # canonical name only: the variable is new, so it has no legacy spelling.
 # ALWAYS passed, empty when the host cannot be read, so a reconciled release never
 # keeps another machine's answer. Into _TB_HOST_OS_ARGS (an array, bash-3.2 safe).
@@ -2781,7 +156,7 @@ _mac_node_profile_set_args() {
 #     chart skips, so jobs-manager omits the key;
 #   the unsupported reason (_gpu_unsupported_set_args), empty clears it;
 #   the device-plugin block: nvidia only when wired (it needs the NVIDIA RuntimeClass:
-#     on native k3s the one k3s creates for the runtime step c's gate found; common.sh
+#     on native k3s the one k3s creates for the runtime step c's gate found; kube.sh's
 #     _gpu_runtime_class), amd on detection, else disabled.
 # --set and --set-string outrank --values in helm whatever their order, so this run's
 # decision wins over a values file's own GPU keys, an explicit "" included. Into
@@ -3407,192 +782,6 @@ _machine_facts_set_args() {
   )
 }
 
-# _reconcile_adopted_client — adopt path. provision_client (Step 3)
-# sets TRACEBLOC_CLIENT_ADOPTED=1 when `tracebloc client create` matched this cluster
-# to an EXISTING client on the account (get-or-create keyed on the cluster). Adopt
-# issues no new password — the existing one stands (write-only on the backend) — so
-# there is nothing to prompt for or verify. Reconcile the live release in place,
-# reusing its stored credential, and heal the stored clientId to the adopted UUID:
-# installs from an older installer stored the numeric dashboard id, which can't
-# authenticate. Returns 0 on a successful reconcile; non-zero (caller falls back to
-# the normal connect flow) when no live tracebloc release is found to reconcile.
-_reconcile_adopted_client() {
-  # provision_client (Step 3) hands over the adopted client id (UUID) + the marker on
-  # adopt (no password — the existing credential stands). Find the live client release
-  # and reconcile it in place. Enumerate it the same jq-free way the one-per-machine
-  # guard does — the full deployed/failed/pending-*/uninstalling set, so a
-  # release wedged by a killed helm op is discovered instead of adopt falling through
-  # to a password prompt it can't satisfy. One client per machine, so take the first.
-  local _rel="" _ns="" _r _n
-  while read -r _r _n; do
-    [[ -n "$_r" ]] && { _rel="$_r"; _ns="$_n"; break; }
-  done < <(helm list -A --deployed --failed --pending --uninstalling 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
-  if [[ -z "$_rel" ]]; then
-    warn "This secure environment is already registered, but no live tracebloc release was found here to reconcile — continuing with a normal connect."
-    return 1
-  fi
-
-  TB_NAMESPACE="$_ns"
-  info "This machine already runs a secure environment — reconciling '${_rel}' (namespace '${_ns}') in place."
-
-  _ensure_helm_runnable
-
-  # the arch gate belongs on the adopt path too, BEFORE the engine is
-  # deployed. Reconcile keeps the release's engine — read THAT (never a fresh
-  # resolution, which could pick 8.4 for a release whose data is 5.7) and ask the
-  # same question the normal install path asks. Without it, an arm64 host with no
-  # amd64 emulation adopting a 5.7 release reported success and then CrashLooped:
-  # preflight had classified the machine as fresh-8.4, so its early gate waved it
-  # through. existing-release is the accurate reason (a live Helm release, not host
-  # files — see _assert_engine_runs_on_this_arch).
-  #
-  # What the release RUNS (_release_mysql_engine); when that cannot be read, an
-  # 8.x-format host datadir (_host_mysql_datadir_format) or its stored values'
-  # explicit 8.4 opt-in (_release_pins_mysql_84); else 5.7, the data-safety
-  # default. A release running an image that names
-  # neither engine (a custom pin) keeps its own values: no 5.7 pin below, and 5.7
-  # for the arch gate, which cannot prove it runs natively.
-  local _live _fmt _pin57=0
-  _live="$(_release_mysql_engine "$_ns")"
-  _fmt="$(_host_mysql_datadir_format)"
-  if [[ "$_live" == "8.4" ]] \
-     || { [[ -z "$_live" ]] && { [[ "$_fmt" == "8.x" ]] || _release_pins_mysql_84 "$_rel" "$_ns"; }; }; then
-    TB_MYSQL_ENGINE_RESOLVED="8.4"
-  else
-    TB_MYSQL_ENGINE_RESOLVED="5.7"
-    [[ "$_live" == "unknown" ]] || _pin57=1
-  fi
-  TB_MYSQL_ENGINE_REASON="existing-release"
-  _assert_engine_runs_on_this_arch
-
-  local chart_ref=""
-  _resolve_chart_ref
-
-  # Reconcile in place, reusing the release's stored values (clientPassword +
-  # install-time config). Prefer --reset-then-reuse-values (Helm >= 3.14: reset to
-  # chart defaults, then re-apply the stored user values, picking up new chart
-  # defaults); fall back to --reuse-values on older Helm.
-  local _reuse="--reuse-values" _upgrade_help
-  # Capture-then-match: `helm upgrade --help | grep -q` lets grep
-  # close the pipe on its first hit, helm takes SIGPIPE and pipefail makes the
-  # pipeline 141 — the `&&` then reads that as "flag unsupported" and the
-  # reconcile silently keeps --reuse-values, so new chart defaults are never
-  # picked up. helm's help is several KB written in chunks, and the flag sorts
-  # early in the list, so this is the losing shape. `case` also drops the
-  # `A && B` set -e subtlety this line used to carry.
-  _upgrade_help="$(helm upgrade --help 2>/dev/null || true)"
-  case "$_upgrade_help" in
-    *'--reset-then-reuse-values'*) _reuse="--reset-then-reuse-values" ;;
-  esac
-
-  # Heal the stored clientId to the adopted UUID when provision_client handed one
-  # over (export TRACEBLOC_CLIENT_ID on the adopt path): an older install stored
-  # the numeric dashboard id, which can't authenticate, and --reuse-values alone
-  # would preserve it (the reused password is still correct). With no id (rebuilt
-  # host / R7 orphan) reconcile WITHOUT a heal rather than bail — the existing
-  # credential stands. Built as an array so the optional --set is bash-3.2 safe.
-  local _args=(upgrade "$_rel" "$chart_ref" --namespace "$_ns" "$_reuse" --cleanup-on-fail)
-  local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
-  [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
-
-  # GPU keys are NOT --reuse-values-safe: --reuse-values
-  # carries forward a prior release's GPU keys and device-plugin block, so FORCE them to
-  # THIS run's decision, the one dev mode applies too (_gpu_decision_set_args).
-  _gpu_decision_set_args
-  _args+=("${_TB_GPU_DECISION_ARGS[@]}")  # set-u-safe: _gpu_decision_set_args always assigns
-  # The host's OS rides the reconcile too: --reuse-values
-  # would keep whatever an earlier run, or no run, wrote.
-  _host_os_set_args
-  _args+=("${_TB_HOST_OS_ARGS[@]}")  # set-u-safe: _host_os_set_args always assigns two words
-  # A release that runs 5.7 keeps 5.7: the chart
-  # now defaults to 8.4, and --reuse-values / --reset-then-reuse-values keep only
-  # what the release STORED, which for a 5.7 release is usually no image key at
-  # all. Without this pin the reconcile would render 8.4 over its 5.7 datadir,
-  # mysql-format-guard would refuse, and --atomic would roll the reconcile back.
-  # A custom pin (_live unknown) is left to its own stored values.
-  if [[ "$_pin57" == 1 ]]; then
-    _args+=(--set "images.mysqlClient.tag=${TB_MYSQL_57_PIN_TAG}"
-            --set "images.mysqlClient.digest=${TB_MYSQL_57_PIN_DIGEST}")
-  fi
-  # The machine facts ride it too, for the same reason.
-  _machine_facts_set_args
-  _args+=("${_TB_MACHINE_FACTS_ARGS[@]}")  # set-u-safe: _machine_facts_set_args always assigns six words
-  # And whether k3s runs the pods confined: the chart's level must follow config.yaml.
-  _selinux_set_args
-  _args+=(${_TB_SELINUX_ARGS[@]+"${_TB_SELINUX_ARGS[@]}"})
-  # The log Collector: the stored choice stands, else an opt-out of usage events.
-  _collector_set_args reuse "$_rel" "$_ns"
-  _args+=(${_TB_COLLECTOR_ARGS[@]+"${_TB_COLLECTOR_ARGS[@]}"})
-  # The local API rides the same reconcile, for the same reason:
-  # a release from before localApi existed reuses the chart default, off, while
-  # the macOS node's publish (_mac_ct_ensure_node) has just mapped
-  # 127.0.0.1 to its NodePort. Force THIS run's decision, the one
-  # _local_api_values_block writes on a fresh install: on with the two ports the
-  # node mapped, else off, so a mapping that is gone (opted out, port busy) can't
-  # leave a stale "on".
-  if [[ "${TB_LOCAL_API_MAPPED:-0}" == "1" ]]; then
-    # singleMachine: this run just mapped the port on this machine, and
-    # a release from the window when node-local was opt-in stores neither
-    # singleNode nor hostPath.enabled=true, so without it the chart's guard would
-    # refuse the upgrade.
-    _args+=(--set "localApi.enabled=true"
-            --set "localApi.nodePort=$TRACEBLOC_LOCAL_API_NODE_PORT"
-            --set "localApi.hostPort=$TRACEBLOC_LOCAL_API_HOST_PORT"
-            --set "localApi.singleMachine=true")
-  else
-    _args+=(--set "localApi.enabled=false")
-  fi
-  # The macOS node's values profile, last, so its words are the last
-  # --set of each key: the release's stored values may predate it.
-  _mac_node_profile_set_args
-  _args+=(${_TB_MAC_PROFILE_ARGS[@]+"${_TB_MAC_PROFILE_ARGS[@]}"})
-  _mac_runner_set_args
-  _args+=(${_TB_MAC_RUNNER_ARGS[@]+"${_TB_MAC_RUNNER_ARGS[@]}"})
-
-  # node-local (node-local storage) has no hostPath dirs to pre-create.
-  [[ "${TB_STORAGE_MODE:-node-local}" != "node-local" ]] && _ensure_release_dirs "$_ns"
-
-  # clear any pending-* wedge left by a previously killed helm op before we
-  # upgrade — otherwise this reconcile just fails with "another operation is in
-  # progress". no-destroy: reconcile REUSES the release's stored credential (the
-  # account password is write-only on the backend and lives only here), so only a
-  # non-destructive rollback is allowed; a pending-install/uninstalling wedge is
-  # refused rather than auto-uninstalled, which would drop that sole copy (the
-  # sole copy). Fail closed with a manual remedy if recovery couldn't clear it.
-  if ! _recover_pending_helm_release "$_rel" "$_ns" no-destroy; then
-    # For a refused pending-install/uninstalling wedge the helper already printed
-    # the credential-safe manual path; add a generic pointer for the other cases.
-    hint "Confirm the release state, then re-run:  $(tb_helm_shown) -n $_ns status $_rel"
-    error "Reconcile blocked by an interrupted previous helm operation. Check the log for details: ${LOG_FILE:-}"
-  fi
-
-  # Reconcile blocks too — same spinner treatment (progress on every wait), bounded so a
-  # wedged kube-apiserver can't hang it forever.
-  local _helm_timeout_min
-  _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
-  local _helm_rc=0
-  _tb_helm_lock
-  spin_cmd_bounded "$(_tb_helm_deadline_s "$_helm_timeout_min")" "Reconciling the existing secure environment…" \
-    ${_TB_HELM_LOCK[@]+"${_TB_HELM_LOCK[@]}"} helm "${_args[@]}" || _helm_rc=$?  # set-u-safe: assigned the upgrade verb at its declaration
-  if [[ "$_helm_rc" -ne 0 ]]; then
-    _tb_helm_lock_timed_out "$_helm_rc"
-    # A helm op killed partway (timeout=124, or an in-progress wedge=exit 1) can
-    # leave the release pending-*. The next run auto-recovers
-    # (_recover_pending_helm_release), but name the manual unwedge too — on exit
-    # 1, not only the 124 timeout.
-    hint "If a re-run reports 'another operation is in progress', unwedge the release first:"
-    hint "  $(tb_helm_shown) -n $_ns rollback $_rel    (returns to the previous, working release)"
-    error "Reconcile of the existing secure environment failed. Check the log for details: ${LOG_FILE:-}"
-  fi
-  # The release offboarding removes, by its own name: an adopted
-  # release need not be named after its namespace. The record's namespace is
-  # TB_NAMESPACE, set to this release's above.
-  tb_record_write helm-release "$_rel" ""
-
-  tb_kube_set_namespace "$_ns"
-  return 0
-}
-
 # TRACEBLOC_TTY is where interactive credential prompts READ from. Under `curl … | bash`
 # stdin is the piped script, not the terminal, so an unredirected `read` hits EOF
 # and (under set -e) aborts the installer with an opaque failure — read the
@@ -3776,7 +965,7 @@ _download_services_progress() {
 # never opens a datadir with the wrong engine.
 #   TB_MYSQL_ENGINE=auto|5.7|8.4    explicit value always wins (default auto)
 # Reads (bash dynamic scope, set by install_client_helm before the call):
-# values_file, existing_id, HOST_DATA_DIR, TB_NAMESPACE. Not ARCH: the arch
+# values_file, existing_id, host_data_dir, namespace. Not ARCH: the arch
 # decides whether a 5.7 verdict can RUN here (_assert_engine_runs_on_this_arch),
 # never which engine a fresh host gets.
 # Sets: TB_MYSQL_ENGINE_RESOLVED.
@@ -3874,14 +1063,14 @@ _mysql_datadir_format() {
 }
 
 # The format of this install's host datadirs, both layouts (legacy
-# HOST_DATA_DIR/mysql and per-release HOST_DATA_DIR/<namespace>/mysql) in one
+# host_data_dir/mysql and per-release host_data_dir/<namespace>/mysql) in one
 # word, the most conservative first: unknown, then 5.7, then 8.x; nothing when
 # neither holds data. 5.7 beats 8.x because any 5.7 data here may be what the
 # release mounts, and only 5.7 opens it.
 _host_mysql_datadir_format() {
   local legacy perrel
-  legacy="$(_mysql_datadir_format "${HOST_DATA_DIR:-/nonexistent}/mysql")"
-  perrel="$(_mysql_datadir_format "${HOST_DATA_DIR:-/nonexistent}/${TB_NAMESPACE:-}/mysql")"
+  legacy="$(_mysql_datadir_format "${host_data_dir:-/nonexistent}/mysql")"
+  perrel="$(_mysql_datadir_format "${host_data_dir:-/nonexistent}/${namespace:-}/mysql")"
   case " $legacy $perrel " in
     *" unknown "*) echo unknown ;;
     *" 5.7 "*)     echo 5.7 ;;
@@ -3894,13 +1083,13 @@ _host_mysql_datadir_format() {
 # a caller running BEFORE install_client_helm — preflight's arch gate — resolves
 # the same file instead of restating the path. A restated path would silently
 # stop seeing an existing 8.4 opt-in the day this one moves.
-_client_values_file() { echo "${TRACEBLOC_VALUES_FILE:-${HOST_DATA_DIR}/values.yaml}"; }
+_client_values_file() { echo "${TRACEBLOC_VALUES_FILE:-${host_data_dir}/values.yaml}"; }
 
 # The namespace this install will use when nothing else has determined one yet
 # (an existing release can override it later — see install_client_helm). Same
 # reason as above: preflight needs the per-release datadir path, which is
-# HOST_DATA_DIR/<namespace>/mysql.
-_client_default_namespace() { _sanitize_workspace_name "${TB_NAMESPACE:-tracebloc}"; }
+# host_data_dir/<namespace>/mysql.
+_client_default_namespace() { _sanitize_workspace_name "${namespace:-tracebloc}"; }
 
 # Whether the values on STDIN pin the MySQL 8.4 engine — i.e. the engine that will
 # ACTUALLY run is 8.4. Reads STDIN so a caller streams a file (`< values.yaml`)
@@ -4100,7 +1289,7 @@ _values_hostpath_storage() {
 _native_k3s_release_storage() {
   [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]] || return 0
   [[ "${TB_RELEASE_STORAGE_READ:-}" != 1 ]] || return 0
-  local early="" ns="${TB_NAMESPACE:-}" out rc=0 line enabled="" root="" ds="" jd="" want="${TB_STORAGE_MODE:-node-local}" kc ctx rec
+  local early="" ns="${namespace:-}" out rc=0 line enabled="" root="" ds="" jd="" want="${TB_STORAGE_MODE:-node-local}" kc ctx rec
   if [[ "${1:-}" == early ]]; then early=1; ns="$(_client_default_namespace)"; fi
   [[ -n "$ns" ]] || return 0
   kc="$(_native_k3s_kubeconfig_target)"; ctx="$(_native_k3s_context)"
@@ -4165,8 +1354,8 @@ _native_k3s_release_storage() {
   TB_HOSTPATH_KEPT=1
   TB_HOSTPATH_ROOT="$root"
   TB_HOSTPATH_DATASET="$ds"
-  if [[ "$root" != "${HOST_DATA_DIR:-}" || "${ds:-$root}" != "${HOST_DATASET_DIR:-${HOST_DATA_DIR:-}}" ]]; then
-    warn "This machine's tracebloc release keeps its data in ${root}${ds:+ (datasets in ${ds})}; this run asked for ${HOST_DATA_DIR:-}${HOST_DATASET_DIR:+ (datasets in ${HOST_DATASET_DIR})}, which is not used."
+  if [[ "$root" != "${host_data_dir:-}" || "${ds:-$root}" != "${HOST_DATASET_DIR:-${host_data_dir:-}}" ]]; then
+    warn "This machine's tracebloc release keeps its data in ${root}${ds:+ (datasets in ${ds})}; this run asked for ${host_data_dir:-}${HOST_DATASET_DIR:+ (datasets in ${HOST_DATASET_DIR})}, which is not used."
     hint "hostPath volumes can't move: to use the new directory, remove tracebloc from this machine, then install again with it."
   fi
   return 0
@@ -4174,7 +1363,7 @@ _native_k3s_release_storage() {
 
 # _hostpath_paths_block -- the hostPath keys after `enabled: true` in the values file.
 # The node is the host, so the PVs name the host's own directories:
-# root is HOST_DATA_DIR, datasetPath HOST_DATASET_DIR when one is set (unset, the
+# root is host_data_dir, datasetPath HOST_DATASET_DIR when one is set (unset, the
 # chart follows root). An installed release keeps the two it was made with
 # (_native_k3s_release_storage).
 # Single-quoted (_yaml_sq_escape): a data dir is a path the operator chose.
@@ -4243,7 +1432,7 @@ _mysql_engine_decision() {
   local fmt live=""
   fmt="$(_host_mysql_datadir_format)"
   if [[ -n "${existing_id:-}" ]]; then
-    live="$(_release_mysql_engine "${existing_ns:-${TB_NAMESPACE:-}}")"
+    live="$(_release_mysql_engine "${existing_ns:-${namespace:-}}")"
   fi
   if [[ "$live" == "8.4" ]]; then
     echo "8.4 existing-release"; return 0
@@ -4529,8 +1718,8 @@ _adopt_orphaned_gpu_device_plugin() {
        app.kubernetes.io/managed-by=Helm --overwrite --request-timeout=10s \
        >> "${LOG_FILE:-/dev/null}" 2>&1 \
      && kubectl annotate daemonset "$ds" -n "$ns" \
-       "meta.helm.sh/release-name=${TB_NAMESPACE}" \
-       "meta.helm.sh/release-namespace=${TB_NAMESPACE}" \
+       "meta.helm.sh/release-name=${namespace}" \
+       "meta.helm.sh/release-namespace=${namespace}" \
        --overwrite --request-timeout=10s \
        >> "${LOG_FILE:-/dev/null}" 2>&1; then
     return 0
@@ -4563,58 +1752,38 @@ _local_api_values_block() {
   printf 'localApi:\n  enabled: true\n  nodePort: %s\n  hostPort: %s\n  singleMachine: true\n' "$TRACEBLOC_LOCAL_API_NODE_PORT" "$TRACEBLOC_LOCAL_API_HOST_PORT"
 }
 
-install_client_helm() {
-  # Step e (Install tracebloc) — main() prints the "e) Installing tracebloc"
-  # header. The credential + namespace were provisioned in step d
-  # (provision_client) or supplied via dual-mode (TRACEBLOC_CLIENT_ID/PASSWORD or
-  # TRACEBLOC_VALUES_FILE). This step renders the values, runs Helm, and shows the
-  # services download; the final connect + summary is step f.
-  # node-local (node-local storage): data lives inside the node, so skip the
-  # world-writable ~/.tracebloc/{data,logs,mysql} dirs; just ensure the base dir
-  # exists for values.yaml + the install log.
-  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
-    mkdir -p "$HOST_DATA_DIR"
-  else
-    _ensure_tracebloc_dirs
-  fi
-  local values_file; values_file="$(_client_values_file)"
+# install_client_helm's stages, in the order it runs them. Each runs inside it and
+# reads and sets its locals (values_file, chart_ref, ...) through bash dynamic scope.
 
-  # ── Dev-mode override: caller-supplied values file ───────────────────────
-  # When TRACEBLOC_VALUES_FILE is set, skip prompts and values.yaml generation
-  # and use the provided file as-is, except that the helm call below sets this
-  # run's GPU decision over it (_gpu_decision_set_args). Used for
-  # local testing against an unreleased chart (pair with TRACEBLOC_CHART_PATH).
-  if [[ -n "${TRACEBLOC_VALUES_FILE:-}" ]]; then
-    [[ -f "$TRACEBLOC_VALUES_FILE" ]] || error "TRACEBLOC_VALUES_FILE not found: $TRACEBLOC_VALUES_FILE"
-    values_file="$TRACEBLOC_VALUES_FILE"
-    TB_NAMESPACE="${TB_NAMESPACE:-tracebloc}"
-    info "Dev mode: using caller-provided values file"
-    log "Using values file: $values_file (namespace: $TB_NAMESPACE)"
-    # gate the arch on the dev-mode path too, BEFORE helm deploys.
-    # We install the caller's file as-is, so the engine that will run is whatever
-    # the file declares — read THAT (do NOT re-resolve: a fresh resolution could
-    # pick 8.4 while the file pins the amd64-only 5.7 image) and ask
-    # the same question the normal path asks below. The SAME helper backs
-    # preflight's early arch gate, so the two can't drift and refuse at different
-    # steps.
-    local _dm_decision; _dm_decision="$(_devmode_engine_decision)"
-    TB_MYSQL_ENGINE_RESOLVED="${_dm_decision%% *}"
-    TB_MYSQL_ENGINE_REASON="${_dm_decision#* }"
-    _assert_engine_runs_on_this_arch
-    # The macOS node's storage steps, as the normal path takes them below: dev mode
-    # installs the job-data folder too (_mac_node_profile_set_args), so it records it
-    _mac_node_storage_steps
-  else
+# ── Dev-mode override: caller-supplied values file ───────────────────────
+# When TRACEBLOC_VALUES_FILE is set, skip prompts and values.yaml generation
+# and use the provided file as-is, except that the helm call below sets this
+# run's GPU decision over it (_gpu_decision_set_args). Used for
+# local testing against an unreleased chart (pair with TRACEBLOC_CHART_PATH).
+_client_helm_dev_mode() {
+  [[ -f "$TRACEBLOC_VALUES_FILE" ]] || error "TRACEBLOC_VALUES_FILE not found: $TRACEBLOC_VALUES_FILE"
+  values_file="$TRACEBLOC_VALUES_FILE"
+  namespace="${namespace:-tracebloc}"
+  info "Dev mode: using caller-provided values file"
+  log "Using values file: $values_file (namespace: $namespace)"
+  # Gate the arch here too, before helm deploys: read the engine the caller's file
+  # declares (never re-resolve: that could pick 8.4 where the file pins the
+  # amd64-only 5.7 image). Preflight's early arch gate uses the same helper.
+  local _dm_decision; _dm_decision="$(_devmode_engine_decision)"
+  TB_MYSQL_ENGINE_RESOLVED="${_dm_decision%% *}"
+  TB_MYSQL_ENGINE_REASON="${_dm_decision#* }"
+  _assert_engine_runs_on_this_arch
+  # The macOS node's storage steps, as the normal path takes them below: dev mode
+  # installs the job-data folder too (_mac_node_profile_set_args), so it records it
+  _mac_node_storage_steps
+}
 
-  local use_existing=""
-  local default_client_id=""
-  local default_client_password=""
-
+# Env or prompted credentials, and the previous values file's defaults for the prompt.
+_client_helm_previous_config() {
   # Non-interactive credentials (non-interactive): set TRACEBLOC_CLIENT_ID +
   # TRACEBLOC_CLIENT_PASSWORD to provision without typing the secret inline
   # (CI / automation / golden images). Verified the same way as the prompt.
-  local _noninteractive_creds=0
-  { _tb_trace_off; } 2>/dev/null   # the password stays out of bash -x's trace (common.sh)
+  { _tb_trace_off; } 2>/dev/null   # the password stays out of bash -x's trace (output.sh)
   if [[ -n "${TRACEBLOC_CLIENT_ID:-}" && -n "${TRACEBLOC_CLIENT_PASSWORD:-}" ]]; then
     _noninteractive_creds=1
   fi
@@ -4631,7 +1800,7 @@ install_client_helm() {
     done
     if [[ "$use_existing" == "y" || "$use_existing" == "yes" || -z "$use_existing" ]]; then
       default_client_id=$(_extract_yaml_value "$values_file" "clientId")
-      # The password stays out of bash -x's trace (_tb_trace_off, common.sh).
+      # The password stays out of bash -x's trace (_tb_trace_off, output.sh).
       { _tb_trace_off; } 2>/dev/null
       default_client_password=$(_extract_yaml_value "$values_file" "clientPassword")
       [[ -z "$default_client_password" ]] || log "Using existing clientPassword as default."
@@ -4639,35 +1808,13 @@ install_client_helm() {
       [[ -n "$default_client_id" ]] && log "Using existing clientId as default."
     fi
   fi
+  return 0
+}
 
-  # ── Namespace (fixed; not prompted) ──────────────────────────────────────
-  # The on-prem client is one-per-machine and is identified to the backend by
-  # its credentials (clientId), not by this name — so we don't ask the user to
-  # invent one. It's just the local k8s namespace / Helm release name.
-  # Advanced / GitOps setups can override with TB_NAMESPACE=<name>.
-  TB_NAMESPACE=$(_client_default_namespace)
-
-  # Native k3s: an installed release keeps the storage it was made with, before the
-  # reconcile and the values below read TB_STORAGE_MODE.
-  _native_k3s_release_storage
-  _mac_node_storage_steps
-
-  # A re-run on an already-connected client must reconcile in place,
-  # not re-provision. Step 3 marks that case with TRACEBLOC_CLIENT_ADOPTED=1 (+ the
-  # UUID, no password). Honor it: reconcile the live release silently — no credential
-  # prompt, no verify, no duplicate. Only if there's no live release to reconcile do
-  # we fall through to the normal connect flow below.
-  if [[ "${TRACEBLOC_CLIENT_ADOPTED:-}" == 1 ]] && _reconcile_adopted_client; then
-    # What helm did, as the fresh path says it below; no "installed" claim here,
-    # whether the install succeeded is step f's.
-    tb_live "Installing services..."
-    _installed_services_line "$TB_NAMESPACE"
-    log "Reconciled adopted client in namespace '$TB_NAMESPACE'"
-    return 0
-  fi
-
+# The credentials: from TRACEBLOC_CLIENT_ID/PASSWORD, or the prompt; verified.
+_client_helm_credentials() {
   # Every line from here to the end of the credential prompt holds the password,
-  # so it runs with bash -x held off (_tb_trace_off, common.sh).
+  # so it runs with bash -x held off (_tb_trace_off, output.sh).
   { _tb_trace_off; } 2>/dev/null
   if [[ "$_noninteractive_creds" == 1 ]]; then
     # Credentials supplied via env — verify once, no prompt, no re-prompt.
@@ -4755,18 +1902,14 @@ install_client_helm() {
   done
   fi
   _tb_trace_on
+}
 
-  # ── One-client-per-machine guard ─────────────────────────────────────────
-  # A machine runs exactly one tracebloc client: it shares this cluster and the
-  # host's CPU/RAM/GPU, and the platform counts each client as separate
-  # capacity. If a DIFFERENT client is already installed here, a re-install
-  # would silently re-point the machine — so we stop and let the operator
-  # decide. The same clientId is a normal re-run/upgrade and passes through.
-  # Check ANY namespace: a fresh install lands in `tracebloc`, but an install
-  # from an older installer version may be in a different namespace. The jq-free
-  # enumeration lives in detect_installed_client (shared with the pre-provision
-  # pre-flight so the two can't disagree on what's installed here).
-  local existing_id="" existing_ns=""
+# ── One-client-per-machine guard ─────────────────────────────────────────
+# A machine runs exactly one tracebloc client, so a DIFFERENT client installed in
+# ANY namespace stops the install for the operator to decide; the same clientId is
+# a re-run and passes. detect_installed_client, shared with the pre-flight, finds it.
+# Then both credentials are escaped for the values file.
+_client_helm_one_client_guard() {
   detect_installed_client
   existing_id="$INSTALLED_CLIENT_ID"; existing_ns="$INSTALLED_CLIENT_NS"
   # Fail CLOSED when we couldn't enumerate what's here (API/helm failure): refuse
@@ -4786,44 +1929,32 @@ install_client_helm() {
     _refuse_other_client_id "$existing_id" "$existing_ns"
   fi
 
-  # Same client, but already installed under a DIFFERENT namespace — e.g. a release
-  # from an older installer that used the fixed `tracebloc` namespace, before the
-  # installer began deriving the namespace from the minted client slug. Upgrade THAT release
-  # in place rather than installing a second one under the new namespace: the
-  # platform counts each release as separate capacity, so a fork would silently
-  # double-book this host (and orphan the original). Reuse the existing namespace;
-  # an intentional namespace move is a delete-then-reinstall, not a silent fork.
-  if [[ -n "$existing_id" && "$existing_id" == "$TB_CLIENT_ID" && -n "$existing_ns" && "$existing_ns" != "$TB_NAMESPACE" ]]; then
-    log "Client '${existing_id}' already installed in namespace '${existing_ns}'; upgrading it in place instead of creating '${TB_NAMESPACE}'."
+  # Same client under a DIFFERENT namespace (an older installer's fixed `tracebloc`):
+  # upgrade THAT release in place. A second release would double-book this host's
+  # capacity and orphan the first; moving namespaces is a delete-then-reinstall.
+  if [[ -n "$existing_id" && "$existing_id" == "$TB_CLIENT_ID" && -n "$existing_ns" && "$existing_ns" != "$namespace" ]]; then
+    log "Client '${existing_id}' already installed in namespace '${existing_ns}'; upgrading it in place instead of creating '${namespace}'."
     info "Updating the existing secure environment (namespace '${existing_ns}')."
-    TB_NAMESPACE="$existing_ns"
+    namespace="$existing_ns"
   fi
 
-  # Both credentials go into SINGLE-quoted YAML scalars through the shared
-  # escaper. clientId used to be interpolated raw into a DOUBLE-quoted scalar
-  # (clientId: "$TB_CLIENT_ID"), where a `"` or `\` in the value would corrupt the
-  # generated values file — the same bug class as the password, and unguarded:
-  # _sanitize_credential only strips paste/non-printable characters. In practice
-  # verify_credentials gates it to UUIDs, so this is hardening rather than a live
-  # break, but the interpolation itself is now safe.
+  # Both credentials go into SINGLE-quoted YAML scalars through the shared escaper,
+  # so no character in them can corrupt the values file (_sanitize_credential
+  # strips only paste/non-printable characters).
   TB_CLIENT_ID_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_ID")"
   { _tb_trace_off; } 2>/dev/null
   TB_CLIENT_PASSWORD_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_PASSWORD")"
   _tb_trace_on
+}
 
-  # ── GPU request + runtime class ───────────────
-  # Request a GPU for training jobs, keyed to the vendor's scheduler resource
-  # (_gpu_request_value → nvidia.com/gpu / amd.com/gpu; empty = CPU). For NVIDIA
-  # that value is gated on the GPU being WIRED into the cluster (inside
-  # _gpu_request_value): requesting nvidia.com/gpu on a node that advertises 0
-  # strands every job Pending (the old Linux bug), so gate on what PROVISIONS
-  # the GPU, not bare detection. NVIDIA training pods also run under the NVIDIA
-  # RuntimeClass (_gpu_runtime_class: on native k3s created by k3s itself) so the
-  # node's containerd invokes the NVIDIA
-  # runtime; AMD needs no RuntimeClass. A request this fixed single-node
-  # cluster can't satisfy is safe: SINGLE_NODE below tells jobs-manager to downgrade
-  # a Pending GPU pod to CPU rather than strand it.
-  local gpu_val runtime_class="" device_type=""
+# ── GPU request + runtime class ───────────────
+# Training jobs request the vendor's GPU (_gpu_request_value: nvidia.com/gpu /
+# amd.com/gpu, empty = CPU); NVIDIA's only once the GPU is WIRED into the cluster,
+# as a node advertising 0 strands every job Pending. NVIDIA pods also run under the
+# NVIDIA RuntimeClass (_gpu_runtime_class). SINGLE_NODE below has jobs-manager
+# downgrade a GPU pod this single node can't satisfy to CPU.
+# Then the device plugin, the engine, and (once the values write is logged) proxy and mirror.
+_client_helm_runtime_values() {
   gpu_val="$(_gpu_request_value)"
   if _gpu_wired; then runtime_class="$(_gpu_runtime_class)"; fi
   device_type="$(_detect_device_type "$gpu_val")"
@@ -4837,21 +1968,13 @@ install_client_helm() {
   fi
 
   # ── GPU device plugin ────────────────────────────────────────
-  # Enable the Helm-managed device-plugin DaemonSet whenever a GPU vendor is
-  # detected — the same condition under which deploy_gpu_device_plugin used to
-  # apply the upstream manifest imperatively (bash: gpu-plugins.sh). The chart
-  # now owns it, so it's reconciled on upgrade and removed on `helm uninstall`
-  # instead of lingering. CPU-only installs emit nothing → the chart default
-  # (disabled) stands. The matching GPU *request* (gpu_val) is wired per-vendor
-  # above — nvidia.com/gpu or amd.com/gpu.
-  #
-  # NVIDIA: the plugin must run under the NVIDIA RuntimeClass so it
-  # can init NVML on native Linux — the plugin pod otherwise runs under the default
-  # runtime, sees no GPU, and registers 0. So it is enabled only when the GPU is
-  # actually wired (a stock CPU node has no `nvidia` RuntimeClass, which would leave
-  # the pod unschedulable). AMD is unchanged: its plugin needs no RuntimeClass, so
-  # it stays gated on bare detection.
-  local gpu_block="" rtc
+  # The chart's device-plugin DaemonSet, enabled when a GPU vendor is detected, so
+  # it's reconciled on upgrade and removed on `helm uninstall`; CPU-only installs
+  # keep the chart default (disabled). NVIDIA's runs under the NVIDIA RuntimeClass
+  # (without it NVML sees no GPU and it registers 0), so it's enabled only when the
+  # GPU is wired: a stock CPU node has no `nvidia` RuntimeClass. AMD's needs none
+  # and stays gated on bare detection.
+  local rtc
   if _gpu_wired; then
     rtc="$(_gpu_runtime_class)"
     gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: nvidia\n    nvidia:\n      runtimeClassName: %s\n' "$rtc")"
@@ -4875,8 +1998,7 @@ install_client_helm() {
   # Translate a corporate proxy on the host into the chart's split proxy keys so
   # every egress-needing workload inherits it (see _chart_proxy_env_yaml). Empty
   # when the host has no proxy — the env: block is then unchanged.
-  # The proxy's password and the mirror's are held with bash -x off (common.sh).
-  local proxy_env_yaml
+  # The proxy's password and the mirror's are held with bash -x off (output.sh).
   { _tb_trace_off; } 2>/dev/null
   proxy_env_yaml="$(_chart_proxy_env_yaml)"
   [[ -z "$proxy_env_yaml" ]] || log "Corporate proxy detected on host — propagating to client workloads via chart values."
@@ -4884,7 +2006,6 @@ install_client_helm() {
 
   # Private registry mirror: re-home every image onto TRACEBLOC_IMAGE_REGISTRY
   # for restricted-network / air-gapped installs. Empty when unset (values unchanged).
-  local image_mirror_yaml
   { _tb_trace_off; } 2>/dev/null
   image_mirror_yaml="$(_image_mirror_yaml)"
   _tb_trace_on
@@ -4892,11 +2013,13 @@ install_client_helm() {
     log "Image registry mirror configured — pulling all images from ${TRACEBLOC_IMAGE_REGISTRY}."
     [[ -n "${TRACEBLOC_REGISTRY_USERNAME:-}" ]] && log "Mirror credentials provided — minting an imagePullSecret for the mirror."
   fi
+  return 0
+}
 
-  # Option A: size the default training budget to this machine.
-  # One pass, both answers — the probes are bounded but not free,
-  # and calling the two wrappers separately would run them twice.
-  local training_size training_provenance
+# Option A: size the default training budget to this machine.
+# One pass, both answers — the probes are bounded but not free,
+# and calling the two wrappers separately would run them twice.
+_client_helm_training_fit() {
   _resolve_training_size
   # and only now, is what was chosen schedulable HERE -- beside the
   # chart's control plane and the system pods already on the node? Ours gets
@@ -4959,20 +2082,15 @@ install_client_helm() {
     warn "A data ingest started while a training is using this machine waits until the training ends."
     hint "  An ingest needs $(( _TB_ENVELOPE_INGESTION_MEM_BYTES / 1024 / 1024 )) MiB / ${_TB_ENVELOPE_INGESTION_CPU_MILLI} m free beside ${training_size}; ingest between trainings, or give this machine more CPU and memory."
   fi
+}
 
-  # CREATE IT EMPTY AND 0600 *BEFORE* THE CREDENTIAL GOES IN.
-  # The heredoc below creates the file at the PROCESS umask, and the chmod used to
-  # come after its EOF -- so under any umask but 077 the file existed
-  # world-readable for the duration of the write, with clientPassword already in
-  # it. Ordering was the whole defect: a mode fixed one line too late is not a mode.
-  #
+# Write generated values.yaml from what the stages above set.
+_client_helm_write_values() {
+  # CREATE IT EMPTY AND 0600 *BEFORE* THE CREDENTIAL GOES IN: the heredoc alone
+  # would create it at the process umask, readable while clientPassword goes in.
   # `>` on an EXISTING file truncates without touching its mode, so the heredoc
-  # then writes into a file that is already 0600. The window that remains is on an
-  # EMPTY file, which is what makes it harmless rather than merely shorter.
-  #
-  # It only ever touches the file the installer GENERATES: this whole branch is the
-  # `else` of the TRACEBLOC_VALUES_FILE dev-mode override, so a caller's own values
-  # file is never chmodded underneath them.
+  # writes into a file already 0600. Only the GENERATED file: dev mode
+  # (TRACEBLOC_VALUES_FILE) never runs this stage.
   : > "$values_file" || error "Could not create $values_file"
   chmod 600 "$values_file" 2>/dev/null || true
   # The stage, read from the shell's TRACEBLOC_ENV as tb_client_env reads it,
@@ -5095,43 +2213,43 @@ clientId: '$TB_CLIENT_ID_ESCAPED'
 clientPassword: '$TB_CLIENT_PASSWORD_ESCAPED'
 
 EOF
+}
 
-  # DEFENCE IN DEPTH, AND THEN A CHECK -- not a silent best-effort. This line used
-  # to be the only protection and it could not fail: a chmod that did not apply
-  # left a live clientPassword world-readable and said nothing, and no test
-  # asserted the mode. The telemetry spool has exactly such a test
-  # (telemetry.bats, "the spool is 0600 under the umask the installer can actually
-  # be holding"); this file, which holds a credential, had none.
+# values.yaml's mode, checked after the write.
+_client_helm_check_values_mode() {
+  # DEFENCE IN DEPTH, AND THEN A CHECK -- not a silent best-effort: a chmod that
+  # did not apply would leave clientPassword world-readable and say nothing.
   #
   # POSIX `ls -ldn`, NEVER GNU-only `stat -c` -- BSD rejects `-c` silently.
   # install-client-helm.bats' "the values.yaml mode is read with POSIX ls -ldn,
   # never GNU-only stat -c" holds this block to it.
   #
   # WARN RATHER THAN error, deliberately. chmod genuinely cannot apply on a
-  # HOST_DATA_DIR living on a filesystem without POSIX modes (exFAT, some
+  # host_data_dir living on a filesystem without POSIX modes (exFAT, some
   # Windows/WSL mounts), and refusing to install there would trade a readable file
   # for no tracebloc at all. So it names the mode it actually found and continues:
-  # an operator can act on "-rw-r--r--", they cannot act on silence.
+  # an operator can act on "-rw-r--r--", not on silence; a failing ls must reach "" under pipefail.
   chmod 600 "$values_file" 2>/dev/null || true
-  local _vf_mode; _vf_mode="$(ls -ldn "$values_file" 2>/dev/null | awk 'NR==1{print $1}')"
+  local _vf_mode; _vf_mode="$(ls -ldn "$values_file" 2>/dev/null | awk 'NR==1{print $1}')" || _vf_mode=""
   case "$_vf_mode" in
     -rw-------*) : ;;
     "")          warn "Could not read the mode of $values_file -- it holds a live credential; check that other users cannot read it." ;;
     *)           warn "$values_file is $_vf_mode, not -rw------- . It holds your clientPassword in cleartext; restrict it with: chmod 600 $values_file" ;;
   esac
   log "Values file written to $values_file"
-  fi
+}
 
+# Before the helm apply: helm, the chart, the metrics API, a pending release, the --set-string words.
+_client_helm_prepare_apply() {
   _ensure_helm_runnable
 
   # ── Resolve chart reference: local path (dev) or remote repo (default) ──
-  local chart_ref=""
   _resolve_chart_ref
 
   # Said before the download line starts; rides _gpu_args below.
-  _collector_set_args fresh "$TB_NAMESPACE" "$TB_NAMESPACE"
+  _collector_set_args fresh "$namespace" "$namespace"
 
-  log "Installing $TB_NAMESPACE from $chart_ref in namespace '$TB_NAMESPACE'..."
+  log "Installing $namespace from $chart_ref in namespace '$namespace'..."
   # One line from here to the images on the node: the metrics wait, the chart and the
   # pulls (_download_services_progress ends it).
   tb_live "Downloading tracebloc services..."
@@ -5139,7 +2257,7 @@ EOF
   # Pre-create per-release hostPath dirs so they're owned by the host user, not
   # root:root from kubelet's DirectoryOrCreate. See _ensure_release_dirs.
   # node-local (node-local storage) has no hostPath dirs to pre-create.
-  [[ "${TB_STORAGE_MODE:-node-local}" != "node-local" ]] && _ensure_release_dirs "$TB_NAMESPACE"
+  [[ "${TB_STORAGE_MODE:-node-local}" != "node-local" ]] && _ensure_release_dirs "$namespace"
 
   # wait out the metrics-server APIService registration race before helm
   # renders the resource-monitor DaemonSet (whose template hard-fails if the
@@ -5157,7 +2275,6 @@ EOF
   # helm output to $LOG_FILE and, on failure, tails the log to stderr. Gives
   # progress on every wait; the deadline stops a wedged
   # kube-apiserver from hanging the install forever.
-  local _helm_timeout_min
   _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
 
   # clear any pending-* wedge left by a previously killed helm op (Ctrl-C,
@@ -5165,10 +2282,10 @@ EOF
   # operation is in progress" (exit 1) and the machine stays wedged across every
   # re-run. The release name equals the namespace on the normal install path.
   # Fail closed if recovery itself couldn't clear it.
-  if ! _recover_pending_helm_release "$TB_NAMESPACE" "$TB_NAMESPACE"; then
+  if ! _recover_pending_helm_release "$namespace" "$namespace"; then
     hint "Couldn't automatically clear the interrupted release. Recover it by hand, then re-run:"
-    hint "  first install:  $(tb_helm_shown) -n $TB_NAMESPACE uninstall $TB_NAMESPACE    (removes only the half-installed release)"
-    hint "  upgrade:        $(tb_helm_shown) -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
+    hint "  first install:  $(tb_helm_shown) -n $namespace uninstall $namespace    (removes only the half-installed release)"
+    hint "  upgrade:        $(tb_helm_shown) -n $namespace rollback $namespace     (returns to the previous release)"
     error "Client installation blocked by an interrupted previous helm operation. Check the log for details: ${LOG_FILE:-}"
   fi
 
@@ -5182,7 +2299,6 @@ EOF
   # optional). Only runs on the GPU path; a no-op everywhere else.
   _adopt_orphaned_gpu_device_plugin
 
-  local _helm_rc=0 _gpu_args
   # the unsupported-GPU reason and card ride --set-string, not the
   # values heredoc: the sentence is free text (apostrophes, commas), and
   # _helm_set_string_escape is the one quoting rule both install paths share.
@@ -5214,14 +2330,19 @@ EOF
   _mac_runner_set_args
   _gpu_args+=(${_TB_MAC_RUNNER_ARGS[@]+"${_TB_MAC_RUNNER_ARGS[@]}"})
   _gpu_args+=(${_TB_COLLECTOR_ARGS[@]+"${_TB_COLLECTOR_ARGS[@]}"})
+}
+
+# The helm apply, its record, and a restart of pods a changed credential left on the old one.
+_client_helm_upgrade() {
+  local _helm_rc=0
   # The password the running pods started on, read before helm overwrites it, so
   # the restart below can see a credential that changed under them.
   # A read that CANNOT TELL (rc 2) is not a first install: when the Secret holds a
   # password after helm, the pods may have started on a different one, so that
   # restarts below.
   local _prev_password _prev_unreadable=0
-  { _tb_trace_off; } 2>/dev/null   # the password stays out of bash -x's trace (common.sh)
-  _prev_password="$(_client_password_from_secret "$TB_NAMESPACE" "$TB_NAMESPACE")" \
+  { _tb_trace_off; } 2>/dev/null   # the password stays out of bash -x's trace (output.sh)
+  _prev_password="$(_client_password_from_secret "$namespace" "$namespace")" \
     || _prev_unreadable=1
   _tb_trace_on
   # The lock's prefix has a line of its own, so the call still starts its line, where
@@ -5229,8 +2350,8 @@ EOF
   _tb_helm_lock
   spin_cmd_bounded "$(_tb_helm_deadline_s "$_helm_timeout_min")" "Installing your secure environment…" \
     ${_TB_HELM_LOCK[@]+"${_TB_HELM_LOCK[@]}"} \
-    helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
-    --namespace "$TB_NAMESPACE" \
+    helm upgrade --install "$namespace" "$chart_ref" \
+    --namespace "$namespace" \
     --create-namespace \
     --cleanup-on-fail \
     --values "$values_file" \
@@ -5242,16 +2363,16 @@ EOF
     # (_recover_pending_helm_release), but name the manual unwedge too — on exit
     # 1, not only the 124 timeout.
     hint "If a re-run reports 'another operation is in progress', unwedge the release first:"
-    hint "  first install:  $(tb_helm_shown) -n $TB_NAMESPACE uninstall $TB_NAMESPACE    (removes only the half-installed release)"
-    hint "  upgrade:        $(tb_helm_shown) -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
+    hint "  first install:  $(tb_helm_shown) -n $namespace uninstall $namespace    (removes only the half-installed release)"
+    hint "  upgrade:        $(tb_helm_shown) -n $namespace rollback $namespace     (returns to the previous release)"
     error "Client installation failed. Check the log for details: ${LOG_FILE:-}"
   fi
   # The release offboarding removes: named after its namespace on
   # this path, which is the record's namespace field.
-  tb_record_write helm-release "$TB_NAMESPACE" ""
+  tb_record_write helm-release "$namespace" ""
 
   # kubectl and the tracebloc CLI default to the client namespace, with no -n flag.
-  tb_kube_set_namespace "$TB_NAMESPACE"
+  tb_kube_set_namespace "$namespace"
 
   # A credential issued to a client that is already running here (the
   # credential-rejected repair), or any other new password written
@@ -5261,8 +2382,8 @@ EOF
   # An unreadable read before helm with one that reads after it is "cannot tell",
   # and restarts; unreadable on both sides is a cluster nothing here can roll.
   local _now_password _changed=0
-  { _tb_trace_off; } 2>/dev/null   # the password stays out of bash -x's trace (common.sh)
-  _now_password="$(_client_password_from_secret "$TB_NAMESPACE" "$TB_NAMESPACE")" || _now_password=""
+  { _tb_trace_off; } 2>/dev/null   # the password stays out of bash -x's trace (output.sh)
+  _now_password="$(_client_password_from_secret "$namespace" "$namespace")" || _now_password=""
   if [[ "${TRACEBLOC_CREDENTIAL_REISSUED:-0}" == 1 ]] \
      || [[ "$_prev_unreadable" == 1 && -n "$_now_password" ]] \
      || _credential_changed_under_pods "$_prev_password" "$_now_password"; then
@@ -5271,17 +2392,81 @@ EOF
   _prev_password=""; _now_password=""
   _tb_trace_on
   if [[ "$_changed" == 1 ]]; then
-    _restart_credential_consumers "$TB_NAMESPACE" \
+    _restart_credential_consumers "$namespace" \
       || error "This machine's new credential is in place, but its services are still on the old one."
   fi
+}
+
+install_client_helm() {
+  # Step e (Install tracebloc) — main() prints the "e) Installing tracebloc"
+  # header. The credential + namespace were provisioned in step d
+  # (provision_client) or supplied via dual-mode (TRACEBLOC_CLIENT_ID/PASSWORD or
+  # TRACEBLOC_VALUES_FILE). This step renders the values, runs Helm, and shows the
+  # services download; the final connect + summary is step f.
+  # node-local (node-local storage): data lives inside the node, so skip the
+  # world-writable ~/.tracebloc/{data,logs,mysql} dirs; just ensure the base dir
+  # exists for values.yaml + the install log.
+  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
+    mkdir -p "$host_data_dir"
+  else
+    _ensure_tracebloc_dirs
+  fi
+  local values_file; values_file="$(_client_values_file)"
+
+  if [[ -n "${TRACEBLOC_VALUES_FILE:-}" ]]; then
+    _client_helm_dev_mode
+  else
+  local use_existing="" default_client_id="" default_client_password="" _noninteractive_creds=0
+  _client_helm_previous_config
+
+  # ── Namespace (fixed; not prompted) ──────────────────────────────────────
+  # The on-prem client is one-per-machine and is identified to the backend by
+  # its credentials (clientId), not by this name — so we don't ask the user to
+  # invent one. It's just the local k8s namespace / Helm release name.
+  # Advanced / GitOps setups can override with namespace=<name>.
+  namespace=$(_client_default_namespace)
+
+  # Native k3s: an installed release keeps the storage it was made with, before the
+  # reconcile and the values below read TB_STORAGE_MODE.
+  _native_k3s_release_storage
+  _mac_node_storage_steps
+
+  # A re-run on an already-connected client must reconcile in place,
+  # not re-provision. Step 3 marks that case with TRACEBLOC_CLIENT_ADOPTED=1 (+ the
+  # UUID, no password). Honor it: reconcile the live release silently — no credential
+  # prompt, no verify, no duplicate. Only if there's no live release to reconcile do
+  # we fall through to the normal connect flow below.
+  if [[ "${TRACEBLOC_CLIENT_ADOPTED:-}" == 1 ]] && _reconcile_adopted_client; then
+    # What helm did, as the fresh path says it below; no "installed" claim here,
+    # whether the install succeeded is step f's.
+    tb_live "Installing services..."
+    _installed_services_line "$namespace"
+    log "Reconciled adopted client in namespace '$namespace'"
+    return 0
+  fi
+
+  _client_helm_credentials
+  local existing_id="" existing_ns=""
+  _client_helm_one_client_guard
+  local gpu_val runtime_class="" device_type="" gpu_block="" proxy_env_yaml image_mirror_yaml
+  _client_helm_runtime_values
+  local training_size training_provenance
+  _client_helm_training_fit
+  _client_helm_write_values
+  _client_helm_check_values_mode
+  fi
+
+  local chart_ref="" _helm_timeout_min _gpu_args
+  _client_helm_prepare_apply
+  _client_helm_upgrade
 
   # Honest N-of-M count as the service images pull onto the node. Best-effort +
   # bounded + non-fatal — the real readiness gate is step f (wait_for_client_ready).
-  _download_services_progress "$TB_NAMESPACE"
+  _download_services_progress "$namespace"
   tb_live_done
 
   tb_live "Installing services..."
-  _installed_services_line "$TB_NAMESPACE"
+  _installed_services_line "$namespace"
   log "Values file: $values_file"
 }
 

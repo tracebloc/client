@@ -44,15 +44,18 @@
 # a tag's bytes can't be moved. Un-stamped, the fail-closed guard below refuses.
 $DefaultRef = "__TRACEBLOC_RELEASE_REF__"
 
-# The sub-script(s) the Windows bootstrap fetches. This list is the integrity
-# surface — every entry MUST have a digest in manifest.sha256. gen-manifest.sh
-# hashes exactly this set (its WINDOWS_FILES array) and its --check mode fails CI
-# if this array and that one drift. Keep them in lockstep.
+# The sub-scripts the Windows bootstrap fetches: the integrity surface, each MUST have a digest in manifest.sha256.
+# gen-manifest.sh hashes exactly this set (WINDOWS_FILES); its --check fails CI if the two drift. Keep them in lockstep.
 $Files = @(
-  # The distro path, the one Windows install path since the PowerShell core
-  # was retired. Its other input is the
-  # bash core, whose scripts the signed manifest lists (Get-CoreScriptKeys).
+  # install-wsl.ps1, the one Windows install path (its bash core: Get-CoreScriptKeys), then what it
+  # dot-sources from beside itself: the helpers shared with this file (pasted in by the release), its sections.
   "scripts/install-wsl.ps1"
+  "scripts/install-base.ps1"
+  "scripts/install-wsl-distro.ps1"
+  "scripts/install-wsl-gpu.ps1"
+  "scripts/install-wsl-record.ps1"
+  "scripts/install-wsl-ready.ps1"
+  "scripts/install-wsl-account.ps1"
 )
 
 # The one runtime Windows sets up: k3s in the tracebloc WSL distro. An unset
@@ -95,98 +98,28 @@ $CheckNetworkNext = "Check this machine's connection and proxy, then run the ins
 # =============================================================================
 #  Logging helpers — match install-wsl.ps1 / install.sh UX.
 # =============================================================================
-# ── The output helpers: the same lines in install.ps1 and install-wsl.ps1 (a Pester
-#    test holds the two copies to each other). Glyphs are [char] codes: Windows
-#    PowerShell 5.1 reads a file without a byte-order mark as Latin-1. ──
-$Dot = [string][char]0x00B7
-$InstallCommand = 'irm https://tracebloc.io/i.ps1 | iex'
-# The run's log, which install.ps1 creates (New-HostLog) and its child inherits.
-$script:LOG_FILE = $env:TRACEBLOC_HOST_LOG
-$script:LiveLine = ''
-# A person's console, not a pipe or a file; and one that animates, with colour on.
-function Test-HostTerminal { try { return (-not [Console]::IsOutputRedirected) } catch { return $false } }
-function Test-HostAnimate { return ((Test-HostTerminal) -and -not $env:NO_COLOR -and $env:TERM -ne 'dumb') }
-# Show-Live MSG: "· MSG" while a wait runs, on a console that animates; the next line
-# printed takes its place. Elsewhere nothing, as the outcome's own line says it, unless
-# -Keep: a wait long enough to look frozen prints its line once.
-function Show-Live {
-  param([string]$m, [switch]$Keep)
-  Close-Live
-  if (-not (Test-HostAnimate)) { if ($Keep) { Info $m }; return }
-  $script:LiveLine = "  $Dot $m"
-  Write-Host $script:LiveLine -ForegroundColor DarkGray -NoNewline
+# Outside the markers, so the signed file resets them too: irm | iex keeps $script: per session.
+$script:CommonUrl = ''; $script:CommonStop = ''
+# >>> install-base.ps1 >>>
+# The helpers shared with install-wsl.ps1 are in scripts/install-base.ps1. The release
+# pastes it here in place of these lines before it signs this one (release-helm-chart.yaml,
+# the stamp step): the signed installer carries them whole and fetches nothing first.
+# Unstamped: from beside itself (a checkout), else the main block fetches it from
+# Invoke-BootstrapMain's raw tree (ALLOW_UNVERIFIED only, same shapes) or stops (exit 1).
+$commonPs1 = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'install-base.ps1' } else { '' }
+if ($commonPs1 -and (Test-Path -LiteralPath $commonPs1 -PathType Leaf)) {
+  . $commonPs1
+} elseif ($env:TRACEBLOC_ALLOW_UNVERIFIED -eq '1') {
+  $commonRepo = if ($env:TRACEBLOC_SOURCE_REPO) { $env:TRACEBLOC_SOURCE_REPO } else { 'tracebloc/client' }
+  $commonRef = if ($env:TRACEBLOC_REF) { $env:TRACEBLOC_REF } elseif ($env:TRACEBLOC_BRANCH) { $env:TRACEBLOC_BRANCH } else { 'main' }
+  $commonBad = @(@($commonRepo.Split('/')) + @($commonRef.Split('/')) | Where-Object { $_ -notmatch '^[A-Za-z0-9._-]+$' -or $_ -eq '.' }).Count
+  if ($commonBad -or $commonRepo -notmatch '^[^/]+/[^/]+$' -or "$commonRepo/$commonRef" -match '\.\.' -or ($env:TRACEBLOC_REF -and $commonRef -match '/')) {
+    $script:CommonStop = "TRACEBLOC_SOURCE_REPO='$commonRepo' or the ref '$commonRef' is not valid, so nothing was changed."
+  } else { $script:CommonUrl = "https://raw.githubusercontent.com/$commonRepo/$commonRef/scripts/install-base.ps1" }
+} else {
+  $script:CommonStop = "This installer wasn't stamped with a pinned release tag, so it can't verify what it fetches. Install from a release URL (irm https://github.com/tracebloc/client/releases/latest/download/install.ps1 | iex), or for local development only set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
 }
-function Close-Live {
-  if (-not $script:LiveLine) { return }
-  Write-Host ("`r" + (' ' * $script:LiveLine.Length) + "`r") -NoNewline
-  $script:LiveLine = ''
-}
-function Info($m) { Close-Live; Write-Host "  " -NoNewline; Write-Host ([char]0x00B7) -ForegroundColor DarkGray -NoNewline; Write-Host " $m" -ForegroundColor DarkGray }
-function Ok($m)   { Close-Live; Write-Host "  " -NoNewline; Write-Host ([char]0x2714) -ForegroundColor Green    -NoNewline; Write-Host " $m" }
-function Warn($m) { Close-Live; Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow   -NoNewline; Write-Host "  $m" -ForegroundColor Yellow }
-function Err($m)  { Close-Live; Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red      -NoNewline; Write-Host " $m" -ForegroundColor Red }
-function Log($m)  { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -Encoding UTF8 -ErrorAction SilentlyContinue } }
-# A line only a machine reads: to the log, and to a console that is not a person's.
-function Write-MachineLine($m) { Log $m; if (-not (Test-HostTerminal)) { Write-Host "  $m" } }
-function Write-Rule { Write-Host ('  ' + ([string][char]0x2500) * 45) -ForegroundColor DarkGray }
-# A section: its heading and the blank line under it, and the two blank lines it ends with.
-function Write-Section($t) { Close-Live; Write-Host "  $t"; Write-Host "" }
-function Write-SectionEnd { Close-Live; Write-Host ""; Write-Host "" }
-function Get-HostLogDir { return (Join-Path $env:USERPROFILE '.tracebloc') }
-function Format-HostLogPath {
-  $leaf = Split-Path -Leaf $script:LOG_FILE
-  if ($script:LOG_FILE -ceq (Join-Path (Get-HostLogDir) $leaf)) { return "~\.tracebloc\$leaf" }
-  return $script:LOG_FILE
-}
-
-# Stop-Setup: ends the run with what a person reads. -What is the ✖ line, -Next what to
-# do, -Command the command under it (the install command unless given; none when '').
-# The message, -Reason, is the whole of it, which the log and a machine read.
-function Stop-Setup {
-  param([Parameter(Mandatory)][string]$Reason, [string]$What, [string]$Next, [AllowEmptyString()][string]$Command)
-  $e = New-Object System.Management.Automation.RuntimeException $Reason
-  if ($What) { $e.Data['TbWhat'] = $What }
-  if ($Next) { $e.Data['TbNext'] = $Next }
-  if ($PSBoundParameters.ContainsKey('Command')) { $e.Data['TbCommand'] = $Command }
-  throw $e
-}
-
-# Write-SetupEnd: the block a run that stops ends with, between two rules: the head,
-# what to do with its command under it, and where the log is.
-function Write-SetupEnd {
-  param([string]$Head = "Setup didn't finish", [string]$Next = "It's safe to run the installer again:",
-        [AllowEmptyString()][string]$Command = $InstallCommand, [char]$Glyph = [char]0x2716,
-        [ConsoleColor]$Color = 'Red', [switch]$NoLog)
-  Write-SectionEnd
-  Write-Rule
-  Write-Host ""
-  Write-Host "  " -NoNewline; Write-Host $Glyph -ForegroundColor $Color -NoNewline; Write-Host " $Head"
-  Write-Host ""
-  foreach ($l in ($Next -split "`n")) { Write-Host "  $l" }
-  if ($Command) { Write-Host "    $Command" -ForegroundColor Cyan }
-  if (-not $NoLog -and $script:LOG_FILE -and (Test-Path -LiteralPath $script:LOG_FILE)) {
-    Write-Host ""
-    Write-Host "  Log: $(Format-HostLogPath)"
-  }
-  Write-Host ""
-  Write-Rule
-}
-
-# Write-SetupStopped ERROR: the end of a run a throw stopped: the reason to the log,
-# the ✖ line, then the block. A throw that is no Stop-Setup has its reason as the line.
-function Write-SetupStopped {
-  param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
-  $reason = "$ErrorRecord"
-  $data = $ErrorRecord.Exception.Data
-  Write-MachineLine "Installation stopped: $reason"
-  $what = if ($data.Contains('TbWhat')) { [string]$data['TbWhat'] } else { $reason }
-  $end = @{}
-  if ($data.Contains('TbNext')) { $end.Next = [string]$data['TbNext'] }
-  if ($data.Contains('TbCommand')) { $end.Command = [string]$data['TbCommand'] }
-  Err $what
-  Write-SetupEnd @end
-}
-# ── End of the output helpers. ──
+# <<< install-base.ps1 <<<
 
 # The banner install.sh draws: "tracebloc · <version>" (a vX.Y.Z tag only), then
 # "Setting up tracebloc on your machine" and a rule.
@@ -386,7 +319,8 @@ function Invoke-DownloadOnSchedule {
       if (-not (Test-DownloadRetriable -Code $code)) { return $false }
       if ($script:FetchTries -ge $max) { return $false }
       $delay = $script:DlDelays[$script:FetchTries - 1]
-      Warn "Download failed (attempt $($script:FetchTries)/$max, status $($script:FetchStatus)). Retrying in ${delay}s..."
+      $note = "Download failed (attempt $($script:FetchTries)/$max, status $($script:FetchStatus)). Retrying in ${delay}s..."
+      if ($script:CommonUrl -and -not (Get-Command Warn -ErrorAction Ignore)) { Write-Host "  $note" -ForegroundColor Yellow } else { Warn $note }
       Start-Sleep -Seconds $delay
       $script:FetchWaited += $delay
     }
@@ -524,42 +458,6 @@ function Get-OptionalWithTicks {
     Log "Download of $Url failed: $($script:FetchError)"
   }
   return $ok
-}
-
-function Get-Sha256 {
-  param([string]$Path)
-  return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLower()
-}
-
-# Pull the expected digest for a repo-relative key out of a manifest.sha256 whose
-# lines are "<sha256>␠␠scripts/<path>". Matches the line whose LAST whitespace
-# field equals the key (independent of how many spaces separate the columns),
-# mirroring install.sh's `awk '$NF == p'`. Returns $null if absent.
-function Find-ManifestDigest {
-  param([string]$ManifestPath, [string]$Key)
-  foreach ($line in Get-Content -LiteralPath $ManifestPath) {
-    $parts = @($line -split '\s+' | Where-Object { $_ -ne '' })
-    if ($parts.Count -ge 2 -and $parts[-1] -eq $Key) {
-      return $parts[0].ToLower()
-    }
-  }
-  return $null
-}
-
-# The bash core's scripts in a manifest: every scripts/*.sh key, in the manifest's
-# order. The bootstrap fetches and checks exactly these for the distro path, so
-# the signed manifest is their list and nothing restates it. Byte-
-# identical in install-wsl.ps1, which checks the same set in the tree it is given.
-function Get-CoreScriptKeys {
-  param([string]$ManifestPath)
-  $keys = @()
-  foreach ($line in Get-Content -LiteralPath $ManifestPath) {
-    $parts = @($line -split '\s+' | Where-Object { $_ -ne '' })
-    if ($parts.Count -ge 2 -and $parts[-1] -cmatch '^scripts/[A-Za-z0-9._/-]+\.sh$' -and $parts[-1] -notmatch '\.\.') {
-      $keys += $parts[-1]
-    }
-  }
-  return $keys
 }
 
 # Resolve a usable cosign into a path. Prefer one already on PATH; else fetch the
@@ -1099,10 +997,7 @@ function Remove-InstallerTemp {
 # satisfies both conjuncts, so the e2e journey may well take the HOLD path. That
 # is safe because the hold is bounded (60s/run) and the exit code is unchanged --
 # the correctness of this function must not, and does not, rest on the predicate.
-function Test-BootstrapCanPrompt {
-  try { return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) }
-  catch { return $false }
-}
+# Test-BootstrapCanPrompt, the predicate, is in install-base.ps1.
 
 # BOUNDED, because an unbounded hold is the bug we spent this whole ticket
 # removing. 60s is long enough to read a summary or an error and short enough
@@ -1111,7 +1006,9 @@ function Test-BootstrapCanPrompt {
 # "nothing is waiting to be read".
 function Complete-Bootstrap {
   param([int]$Code, [int]$HoldSec = 60)
-  if (Test-BootstrapCanPrompt) {
+  # On the $CommonStop path its helper never loaded: the same question, asked inline.
+  try { $canPrompt = if ($script:CommonStop) { [Environment]::UserInteractive -and -not [Console]::IsInputRedirected } else { Test-BootstrapCanPrompt } } catch { $canPrompt = $false }
+  if ($canPrompt) {
     try {
       Write-Host ""
       Write-Host "  This window closes when you press a key (or in ${HoldSec}s)." -ForegroundColor DarkGray
@@ -1167,6 +1064,14 @@ if (-not $env:TRACEBLOC_PESTER) {
   }
   # TLS 1.2 floor — Windows PowerShell 5.1 otherwise negotiates down to TLS 1.0.
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
+  # Unstamped, nothing beside it: fetch the helpers into script scope, or stop (exit 1).
+  if ($script:CommonUrl) {
+    $commonTmp = Join-Path ([IO.Path]::GetTempPath()) "tracebloc-install-base-$PID.ps1"
+    if (Invoke-DownloadOnSchedule -Url $script:CommonUrl -Dest $commonTmp) { . $commonTmp } else {
+      $script:CommonStop = "Couldn't download $($script:CommonUrl) (last status: $($script:FetchStatus)) after $($script:FetchTries) attempt(s) over $($script:FetchWaited)s, so nothing was changed: $($script:FetchError)"
+    }
+    Remove-Item -LiteralPath $commonTmp -Force -ErrorAction SilentlyContinue
+  }
+  if ($script:CommonStop) { Write-Host "  $($script:CommonStop)" -ForegroundColor Red; Complete-Bootstrap -Code 1 }
   Invoke-BootstrapMain -BootstrapArgs $args
 }

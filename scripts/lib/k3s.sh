@@ -4,12 +4,12 @@
 #
 #  LINUX ONLY. install-k8s.sh sources this file and both bootstraps fetch it;
 #  install_linux and create_cluster route here when TRACEBLOC_SUBSTRATE_RESOLVED=k3s.
-#  common.sh's tb_substrate_resolve resolves k3s on Linux outside WSL by default,
+#  substrate.sh's tb_substrate_resolve resolves k3s on Linux outside WSL by default,
 #  because k3d is retired there (slim client 4.1).
 #
 #  What is here:
 #    - the pins: the release tag DERIVED from K8S_VERSION, and the three digests
-#      common.sh stamps from facts.env (TB_K3S_BIN_SHA256_* / TB_K3S_INSTALL_SH_SHA256);
+#      settings.sh stamps from facts.env (TB_K3S_BIN_SHA256_* / TB_K3S_INSTALL_SH_SHA256);
 #    - the verified download of the binary, the verified copy of upstream's
 #      install.sh at the tag that ships with the installer (scripts/vendor/), and the
 #      scrubbed run of that script (INSTALL_K3S_SKIP_DOWNLOAD=binary);
@@ -21,9 +21,12 @@
 #    - the install path (1.1e): step b's sudo-once tool install, and step c's
 #      refusals, firewall, configuration, binary, kubeconfig and re-run, each artefact
 #      recorded the moment it exists;
-#    - the unprivileged probe re-run resolution reads (1.1f);
-#    - the NVIDIA GPU (1.1i): the host toolkit and a CDI spec in step b, and the gate
-#      on k3s's own registered runtime in step c.
+#    - the unprivileged probe re-run resolution reads (1.1f).
+#
+#  Their own modules, sourced right after this one and k3s-firewall.sh:
+#  k3s-apparmor.sh (the runc profile and the rival
+#  guard), k3s-gpu.sh (the NVIDIA GPU, 1.1i, natively and in tracebloc's WSL
+#  distro) and k3s-prepared.sh (the prepared host).
 #
 #  Every function carries the `_native_k3s_` prefix (decided 2026-10-01), so a grep
 #  for native k3s code finds every name here and nothing else.
@@ -32,11 +35,11 @@
 #  file in k3s.bats. No `${x,,}`, no `declare -A`, no `mapfile`.
 #
 #  Sourcing it has no side effects: constants and functions only, and nothing at
-#  the top level calls common.sh. check-facts.sh sources it alone, to derive the
+#  the top level calls the core modules. check-facts.sh sources it alone, to derive the
 #  release tag and the asset URLs the same way the installer does.
 # =============================================================================
 
-# The xtrace hold (common.sh). A no-op with a common.sh from before it, so a mixed
+# The xtrace hold (output.sh). A no-op with an output.sh from before it, so a mixed
 # set of libs runs, unheld, rather than stopping on a missing command.
 declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
 declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
@@ -136,7 +139,7 @@ _native_k3s_storage_override() {
 }
 
 # _native_k3s_storage_frozen -- true when a config.yaml already froze the storage
-# path, so this run's HOST_DATA_DIR cannot move the volumes. Same reads, same
+# path, so this run's host_data_dir cannot move the volumes. Same reads, same
 # "cannot tell" as _native_k3s_storage_override: 1 when none exists, 2 when root
 # cannot answer. A caller that has read the storage path has already handled both.
 _native_k3s_storage_frozen() {
@@ -152,14 +155,14 @@ _native_k3s_storage_frozen() {
 }
 
 # _native_k3s_storage_choice -- this run's choice: the operator's data dir when they
-# chose one, else nothing (k3s's default). "Chose one" is HOST_DATA_DIR naming a
+# chose one, else nothing (k3s's default). "Chose one" is host_data_dir naming a
 # directory other than the default. A parent process that exported the default (an
 # upgrade) is not a choice, so the volumes never move into the home directory because
 # the default was passed along. Both sides are compared with their parents resolved
-# physically, as validate_config resolves HOST_DATA_DIR, so a symlinked $HOME is not a
+# physically, as validate_config resolves host_data_dir, so a symlinked $HOME is not a
 # choice either.
 _native_k3s_storage_choice() {
-  local dir="${HOST_DATA_DIR:-}" def="${TB_HOST_DATA_DIR_DEFAULT:-}"
+  local dir="${host_data_dir:-}" def="${TB_HOST_DATA_DIR_DEFAULT:-}"
   [[ -n "$dir" ]] || return 0
   [[ -n "$def" && "$(_native_k3s_resolved_dir "$dir")" == "$(_native_k3s_resolved_dir "$def")" ]] && return 0
   printf '%s' "$dir"
@@ -194,7 +197,7 @@ _native_k3s_storage_drift_warn() {
 }
 
 # _native_k3s_resolved_dir PATH -- PATH with its parent resolved physically (`cd -P`),
-# the form validate_config leaves HOST_DATA_DIR in. PATH itself may not exist yet; an
+# the form validate_config leaves host_data_dir in. PATH itself may not exist yet; an
 # unresolvable parent leaves PATH as given.
 _native_k3s_resolved_dir() {
   local p="$1" parent
@@ -229,12 +232,12 @@ _native_k3s_image_ref() {
 }
 
 # _native_k3s_check_version -- refuse, by name, a K8S_VERSION that is not the pin.
-# Native k3s cannot honour a K8S_VERSION override (common.sh), because the
-# binary is checked against a digest and common.sh stamps digests for the pinned
+# Native k3s cannot honour a K8S_VERSION override (settings.sh), because the
+# binary is checked against a digest and settings.sh stamps digests for the pinned
 # version only.
 _native_k3s_check_version() {
   [[ -n "${TB_K3S_PIN_K8S_VERSION:-}" ]] \
-    || error "native k3s: no pinned k3s version is stamped in common.sh (TB_K3S_PIN_K8S_VERSION) -- run scripts/check-facts.sh --write."
+    || error "native k3s: no pinned k3s version is stamped in settings.sh (TB_K3S_PIN_K8S_VERSION) -- run scripts/check-facts.sh --write."
   [[ "${K8S_VERSION:-}" == "$TB_K3S_PIN_K8S_VERSION" ]] && return 0
   error "K8S_VERSION=${K8S_VERSION:-<empty>} cannot be installed as native k3s: this installer pins the k3s binary by digest, and the only version it has a digest for is ${TB_K3S_PIN_K8S_VERSION}. Unset K8S_VERSION to install ${TB_K3S_PIN_K8S_VERSION}."
 }
@@ -299,7 +302,7 @@ _native_k3s_fetch_binary() {
   local arch="$1" dest="$2" asset want url tmpdir
   asset="$(_native_k3s_binary_asset "$arch")" || error "native k3s: cannot install k3s on architecture '${arch}' (amd64 or arm64)."
   want="$(_native_k3s_binary_sha256 "$arch")"
-  [[ -n "$want" ]] || error "native k3s: no pinned digest for the ${arch} k3s binary is stamped in common.sh -- run scripts/check-facts.sh --write."
+  [[ -n "$want" ]] || error "native k3s: no pinned digest for the ${arch} k3s binary is stamped in settings.sh -- run scripts/check-facts.sh --write."
   url="$(_native_k3s_release_url "$asset")" || error "native k3s: cannot derive the k3s release from K8S_VERSION=${K8S_VERSION:-<empty>}."
   tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3s-bin-XXXXXX")" || error "native k3s: could not create a temporary directory for the k3s download."
   # --print downloads nothing: it lists the install, which the run makes only after
@@ -342,7 +345,7 @@ _native_k3s_vendored_install_script() {
 # script: it rewrites k3s.service.env, native k3s's proxy home.
 _native_k3s_stage_install_script() {
   local dest="$1" want="${TB_K3S_INSTALL_SH_SHA256:-}" src
-  [[ -n "$want" ]] || error "native k3s: no pinned digest for k3s's install.sh is stamped in common.sh -- run scripts/check-facts.sh --write."
+  [[ -n "$want" ]] || error "native k3s: no pinned digest for k3s's install.sh is stamped in settings.sh -- run scripts/check-facts.sh --write."
   # --print copies nothing; the run verifies the script before running it.
   if tb_root_planning; then return 0; fi
   src="$(_native_k3s_vendored_install_script)" && [[ -r "$src" ]] \
@@ -368,7 +371,7 @@ _native_k3s_stage_install_script() {
 #     installs the k3s-selinux policy from rpm.rancher.io.
 #   - HOME=/root: the script runs as root, and nothing it writes may land, root-owned,
 #     in the daily user's home.
-# _native_k3s_run_install_script runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _native_k3s_run_install_script runs with bash -x held off, the secret it holds out of the trace (output.sh);
 # _tb_untraced__native_k3s_run_install_script below is the function itself.
 _native_k3s_run_install_script() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__native_k3s_run_install_script "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
 _tb_untraced__native_k3s_run_install_script() {
@@ -503,7 +506,7 @@ _native_k3s_render_config() {
 
 # _native_k3s_install_file MODE DEST BODY [GROUP] -- write BODY (plus a newline) to
 # DEST as root, mode MODE (and group GROUP when given), never through the umask: the core runs under `umask 077`
-# (common.sh), which a `sudo tee` inherits, so a file written without a mode comes out
+# (settings.sh), which a `sudo tee` inherits, so a file written without a mode comes out
 # 0600 and a directory 0700. A DEST whose content already equals BODY is left alone;
 # a DEST it does write is appended to TB_K3S_FILES_CHANGED, which tells a re-run
 # whether k3s has to restart to read it.
@@ -652,7 +655,7 @@ TB_K3S_REINSTALL='run "tracebloc delete" (it removes k3s and its data), then ins
 # Under --print the reads run as this user, who can see the file but not read it, and
 # cannot see k3s's data: a file that is there is kept (the run writes nothing), and
 # otherwise the writes are listed, the same ones a carried token makes.
-# _native_k3s_pin_token runs with bash -x held off, the secret it holds out of the trace (common.sh);
+# _native_k3s_pin_token runs with bash -x held off, the secret it holds out of the trace (output.sh);
 # _tb_untraced__native_k3s_pin_token below is the function itself.
 _native_k3s_pin_token() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__native_k3s_pin_token "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
 _tb_untraced__native_k3s_pin_token() {
@@ -1146,315 +1149,6 @@ _native_k3s_selinux_deferred() {
   ! _native_k3s_selinux_confined
 }
 
-# ── AppArmor: k3s's bundled runc ──────────────────────────────────────────────
-#
-# k3s runs its own runc (${TB_K3S_DATA_PATH}/data/<hash>/bin/runc), which no distro
-# AppArmor profile names, so it runs as plain `unconfined`. Where the kernel sets
-# apparmor_restrict_unprivileged_unconfined=1 (Ubuntu 26.04's default), runc's
-# change_onexec into containerd's profile is then converted to a STACK, every
-# container is labelled `cri-containerd.apparmor.d//&unconfined`, and containerd's
-# profile, which only lets a process signal its own label, denies every in-container
-# signal: mysqld --initialize waits for ever on its own SIGTERM. A profile NAMED runc
-# covering k3s's path gives runc a name, so the switch is a plain one again. The name
-# is fixed: containerd's profile takes signals only from unconfined, runc, crun and
-# itself, so under any other name runc can no longer stop a container.
-#
-# The distro's /etc/apparmor.d/runc defines the same profile name for its own paths.
-# Ours attaches to those paths and k3s's, unconfined like the distro's, with the
-# distro's local/runc include. It lives OUT of /etc/apparmor.d, so it never races
-# the distro's at boot and no package owns or rewrites it. The k3s unit's drop-in
-# re-loads it before every k3s start, and apt's hook after every package run (an
-# apparmor update re-loads the distro's runc over it). A `dpkg -i` outside apt or a
-# `systemctl reload apparmor` still puts the distro's back until k3s next starts.
-#
-# The record lists the profile alone (apparmor-runc, a path every tracebloc delete
-# accepts); the drop-in and the hook sit at fixed paths its removal also takes, as
-# the schema's file kind says.
-
-# The profile file, the drop-in that re-loads it, apt's hook (written only where apt
-# is), and the distro's profile it stands beside.
-TB_K3S_APPARMOR_RUNC_PATH="/etc/tracebloc/apparmor-k3s-runc"
-TB_K3S_APPARMOR_DROPIN_PATH="/etc/systemd/system/k3s.service.d/tracebloc-apparmor-runc.conf"
-TB_K3S_APPARMOR_APT_HOOK_PATH="/etc/apt/apt.conf.d/99tracebloc-apparmor-runc"
-TB_K3S_APPARMOR_DISTRO_RUNC_PATH="/etc/apparmor.d/runc"
-# Where AppArmor's own profiles live: one there that attaches to k3s's runc under
-# another name wins over ours by the longer match (_native_k3s_apparmor_rival).
-TB_K3S_APPARMOR_D="/etc/apparmor.d"
-# The profiles the kernel holds, one `name (mode)` per line (root reads it).
-TB_K3S_APPARMOR_PROFILES="/sys/kernel/security/apparmor/profiles"
-# The kernel's two answers. TEST SEAMS: TRACEBLOC_K3S_APPARMOR_ENABLED_FILE and
-# TRACEBLOC_K3S_APPARMOR_RESTRICT_FILE replace them (read only, never run).
-TB_K3S_APPARMOR_ENABLED_FILE="/sys/module/apparmor/parameters/enabled"
-TB_K3S_APPARMOR_RESTRICT_FILE="/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined"
-# Where apparmor_parser may live. Assigned here, never read from the environment:
-# the path is baked into hooks root runs.
-_tb_k3s_aa_parsers="/usr/sbin/apparmor_parser /sbin/apparmor_parser"
-_tb_k3s_aa_parser_owner=0
-
-# _native_k3s_apparmor_runc_due -- true only when AppArmor is enabled (the module says
-# Y) AND the kernel converts an unconfined change_onexec to a stack (the sysctl says
-# 1). Anything else, an absent or unreadable file included, leaves the host alone:
-# no other kernel stacks runc's switch, so no other host needs the profile.
-_native_k3s_apparmor_runc_due() {
-  local en rs
-  en="$(cat "${TRACEBLOC_K3S_APPARMOR_ENABLED_FILE:-$TB_K3S_APPARMOR_ENABLED_FILE}" 2>/dev/null)" || return 1
-  [[ "$en" == Y ]] || return 1
-  rs="$(cat "${TRACEBLOC_K3S_APPARMOR_RESTRICT_FILE:-$TB_K3S_APPARMOR_RESTRICT_FILE}" 2>/dev/null)" || return 1
-  [[ "$rs" == 1 ]]
-}
-
-# _native_k3s_apparmor_parser -- the absolute path of apparmor_parser, or 1 when none.
-# Only root's own: a parser another user owns or may write is never run as root.
-_native_k3s_apparmor_parser() {
-  local p
-  for p in $_tb_k3s_aa_parsers; do
-    [[ -x "$p" ]] || continue
-    if [[ -n "$(find "$p" -maxdepth 0 -user "$_tb_k3s_aa_parser_owner" ! -perm -0020 ! -perm -0002 2>/dev/null)" ]]; then
-      printf '%s' "$p"; return 0
-    fi
-  done
-  return 1
-}
-
-# _native_k3s_apparmor_rival -- the profiles that could attach to k3s's runc under a
-# name other than runc: they win by the longer match, and runc under them can no
-# longer stop a container. Only attachments are read (`profile NAME PATH` or a bare
-# `PATH`, its `{` on the line or the next), with the file's own @{VAR} definitions
-# expanded and the AppArmor glob matched against k3s's runc path. One line each:
-# sure<TAB>file<TAB>name when the kernel holds it and its literal prefix is at least
-# as long as ours on that path (it wins), else unsure<TAB>file<TAB>name; a variable
-# the file does not define, a file awk cannot read, and a loaded profile with runc in
-# its name that no file here defines are unsure too. 1 when none.
-_native_k3s_apparmor_rival() {
-  local f out="" loaded name k rc res ours
-  local cands=()
-  ours="${TB_K3S_DATA_PATH}/data/"
-  for f in "${TB_K3S_DATA_PATH}"/data/*/bin/runc; do [[ -e "$f" ]] && cands+=("$f"); done
-  [[ ${#cands[@]} -gt 0 ]] || cands=("${TB_K3S_DATA_PATH}/data/0123456789abcdef/bin/runc")
-  loaded="$(tb_root cat "$TB_K3S_APPARMOR_PROFILES" 2>/dev/null)" || loaded=""
-  loaded="$(printf '%s\n' "$loaded" | sed 's/ ([a-z]*)$//')"
-  for f in "$TB_K3S_APPARMOR_D"/*; do
-    [[ -f "$f" ]] || continue
-    rc=0
-    # The loaded list goes in through the environment: awk -v refuses a newline (BSD awk).
-    # set-u-safe: cands always holds at least the fallback path
-    res="$(tb_aa_loaded="$loaded" LC_ALL=C awk -v file="$f" -v cands="${cands[*]}" -v ours="${#ours}" '
-      BEGIN { loaded = ENVIRON["tb_aa_loaded"] }
-      function g2re(g,   i, j, c, o, d, n) {
-        o = "^"; d = 0; n = length(g)
-        for (i = 1; i <= n; i++) {
-          c = substr(g, i, 1)
-          if (c == "*") { if (substr(g, i + 1, 1) == "*") { o = o ".*"; i++ } else o = o "[^/]*" }
-          else if (c == "?") o = o "[^/]"
-          else if (c == "{") { o = o "("; d++ }
-          else if (c == "}" && d > 0) { o = o ")"; d-- }
-          else if (c == "," && d > 0) o = o "|"
-          else if (c == "[") { j = index(substr(g, i), "]"); if (j > 0) { o = o substr(g, i, j); i += j - 1 } else o = o "\\[" }
-          else if (index(".+()|^$\\", c) > 0) o = o "\\" c
-          else o = o c
-        }
-        return o "$"
-      }
-      # The literal prefix: everything before the first glob character.
-      function litlen(g,   i, c) {
-        for (i = 1; i <= length(g); i++) { c = substr(g, i, 1); if (index("*?[{", c) > 0) return i - 1 }
-        return length(g)
-      }
-      # The alternatives of a {a,b} glob, one per line; AppArmor matches each alone.
-      function expand(g,   i, c, d, ob, cb, parts, np, k, out, piece, st) {
-        ob = index(g, "{"); if (ob == 0) return g "\n"
-        d = 0
-        for (i = ob; i <= length(g); i++) {
-          c = substr(g, i, 1)
-          if (c == "{") d++
-          else if (c == "}") { d--; if (d == 0) { cb = i; break } }
-        }
-        if (!cb) return g "\n"
-        np = 0; d = 0; st = ob + 1
-        for (i = ob + 1; i <= cb; i++) {
-          c = substr(g, i, 1)
-          if (c == "{") d++
-          else if (c == "}" && d > 0) d--
-          else if ((c == "," && d == 0) || i == cb) { parts[++np] = substr(g, st, i - st); st = i + 1 }
-        }
-        out = ""
-        for (k = 1; k <= np; k++) out = out expand(substr(g, 1, ob - 1) parts[k] substr(g, cb + 1))
-        return out
-      }
-      function consider(h,   name, at, rest, q, k, vn, nc, cs, hit, alts, na, a, best, l, undef) {
-        sub(/[ \t]+flags[ \t]*=[ \t]*\([^)]*\)$/, "", h)
-        if (h ~ /^profile[ \t]/) {
-          sub(/^profile[ \t]+/, "", h)
-          if (h ~ /^"/) { name = substr(h, 2); q = index(name, "\""); rest = substr(name, q + 1); name = substr(name, 1, q - 1) }
-          else { name = h; sub(/[ \t].*/, "", name); rest = substr(h, length(name) + 1) }
-          sub(/^[ \t]+/, "", rest); at = rest
-          if (at == "" && name ~ /^\//) at = name
-        } else if (h ~ /^("?\/|@\{)/) { name = h; at = h }
-        else return
-        gsub(/"/, "", at); gsub(/"/, "", name)
-        if (at == "" || name == "runc") return
-        # A variable this file does not define (most come from tunables/global, such as
-        # @{multiarch}) stands for any string: ** matches whatever it could expand to, so a
-        # path that cannot match even then is no rival, and one that can stays unsure.
-        undef = 0
-        for (k = 0; k < 8 && match(at, /@\{[A-Za-z0-9_]+\}/); k++) {
-          vn = substr(at, RSTART + 2, RLENGTH - 3)
-          if (!(vn in vars)) { at = substr(at, 1, RSTART - 1) "**" substr(at, RSTART + RLENGTH); undef = 1; continue }
-          at = substr(at, 1, RSTART - 1) "{" vars[vn] "}" substr(at, RSTART + RLENGTH)
-        }
-        if (at ~ /@\{/) { print "unsure\t" file "\t" name; return }
-        nc = split(cands, cs, " "); na = split(expand(at), alts, "\n"); hit = 0; best = -1
-        for (a = 1; a <= na; a++) {
-          if (alts[a] == "") continue
-          for (k = 1; k <= nc; k++) if (cs[k] != "" && cs[k] ~ g2re(alts[a])) { hit = 1; l = litlen(alts[a]); if (l > best) best = l }
-        }
-        if (!hit) return
-        if (undef) { print "unsure\t" file "\t" name; return }
-        if (index("\n" loaded "\n", "\n" name "\n") > 0 && best >= ours + 0) print "sure\t" file "\t" name
-        else print "unsure\t" file "\t" name
-      }
-      { sub(/#.*/, ""); line = $0 }
-      line ~ /^[ \t]*@\{[A-Za-z0-9_]+\}[ \t]*\+?=/ {
-        v = line; sub(/^[ \t]*@\{/, "", v); nm = v; sub(/\}.*/, "", nm); sub(/^[^=]*=[ \t]*/, "", v)
-        gsub(/[ \t]+$/, "", v); gsub(/[ \t]+/, ",", v); gsub(/"/, "", v)
-        if (nm in vars) vars[nm] = vars[nm] "," v; else vars[nm] = v
-        pend = ""; next
-      }
-      line ~ /^[ \t]*\{[ \t]*$/ { if (pend != "") consider(pend); pend = ""; next }
-      line ~ /\{[ \t]*$/ {
-        h = line; sub(/\{[ \t]*$/, "", h); sub(/^[ \t]+/, "", h); sub(/[ \t]+$/, "", h)
-        consider(h); pend = ""; next
-      }
-      line ~ /^[ \t]*(profile[ \t]|"?\/|@\{)/ && line !~ /,[ \t]*$/ {
-        pend = line; sub(/^[ \t]+/, "", pend); sub(/[ \t]+$/, "", pend); next
-      }
-      line !~ /^[ \t]*$/ { pend = "" }
-    ' "$f" 2>/dev/null)" || rc=$?
-    if (( rc != 0 )); then
-      out+="unsure"$'\t'"${f}"$'\t'"(this run could not read its profiles)"$'\n'
-    else
-      out+="${res}"$'\n'
-    fi
-  done
-  while IFS= read -r name; do
-    [[ "$name" == *runc* && "$name" != runc && "$name" != *//* ]] || continue
-    k="profile[[:space:]]+\"?${name}\"?[[:space:]]"
-    grep -qE "$k" "$TB_K3S_APPARMOR_D"/* 2>/dev/null && continue
-    out+="unsure"$'\t'"(loaded, no file in ${TB_K3S_APPARMOR_D})"$'\t'"${name}"$'\n'
-  done <<<"$loaded"
-  out="$(printf '%s' "$out" | sed '/^$/d')"
-  [[ -n "$out" ]] || return 1
-  printf '%s\n' "$out"
-}
-
-# _native_k3s_apparmor_runc_render -- the profile: Ubuntu's own runc profile with
-# k3s's runc added to its attachment, in AppArmor 4.0's syntax (24.04's parser).
-_native_k3s_apparmor_runc_render() {
-  printf '%s\n' \
-    "# Written by the tracebloc installer (scripts/lib/k3s.sh); tracebloc delete removes it." \
-    "# Ubuntu's runc profile (${TB_K3S_APPARMOR_DISTRO_RUNC_PATH}), extended to k3s's bundled runc." \
-    "abi <abi/4.0>," \
-    "include <tunables/global>" \
-    "" \
-    "profile runc /{usr/bin,usr/sbin,${TB_K3S_DATA_PATH#/}/data/*/bin}/runc flags=(unconfined) {" \
-    "  userns," \
-    "" \
-    "  # Site-specific additions and overrides. See local/README for details." \
-    "  include if exists <local/runc>" \
-    "}"
-}
-
-# _native_k3s_apparmor_dropin_render PARSER -- k3s's systemd drop-in: re-load the
-# profile before every k3s start. A failed load is logged and k3s starts anyway.
-_native_k3s_apparmor_dropin_render() {
-  printf '%s\n' \
-    "# Written by the tracebloc installer (scripts/lib/k3s.sh); tracebloc delete removes it." \
-    "# Re-loads the AppArmor profile for k3s's runc before k3s starts." \
-    "[Unit]" \
-    "After=apparmor.service" \
-    "" \
-    "[Service]" \
-    "ExecStartPre=-${1} -r ${TB_K3S_APPARMOR_RUNC_PATH}"
-}
-
-# _native_k3s_apparmor_apt_hook_render PARSER -- apt's DPkg::Post-Invoke hook: re-load the
-# profile once dpkg is done. Silent and exit 0 when the profile or the parser is gone.
-_native_k3s_apparmor_apt_hook_render() {
-  printf '%s\n' \
-    "// Written by the tracebloc installer (scripts/lib/k3s.sh); tracebloc delete removes it." \
-    "// Re-loads the AppArmor profile for k3s's runc: an apparmor package update re-loads the distro's runc profile over it." \
-    "DPkg::Post-Invoke { \"if [ -r ${TB_K3S_APPARMOR_RUNC_PATH} ] && [ -x ${1} ]; then ${1} -r ${TB_K3S_APPARMOR_RUNC_PATH} || true; fi\"; };"
-}
-
-# _native_k3s_apparmor_stacked -- how many processes carry the stacked label, read as
-# root from /proc (TB_K3S_APPARMOR_PROC, a test seam); 0 when none or unreadable.
-TB_K3S_APPARMOR_PROC="/proc"
-_native_k3s_apparmor_stacked() {
-  local n
-  # shellcheck disable=SC2016  # $1 is the inner sh's, on purpose
-  n="$(tb_root sh -c 'cat "$1"/[0-9]*/attr/current 2>/dev/null | grep -c "//&unconfined"' sh "$TB_K3S_APPARMOR_PROC" 2>/dev/null)" || n=0
-  [[ "$n" =~ ^[0-9]+$ ]] || n=0
-  printf '%s' "$n"
-}
-
-# _native_k3s_apparmor_runc -- step c's AppArmor step, before k3s starts: on a host
-# _native_k3s_apparmor_runc_due names, refuse a rival profile by name, write the
-# profile, the drop-in and (where apt is) apt's hook, record the profile, and load it.
-# None of the three restarts k3s: the load is direct, and a restart would not restart
-# a pod. Processes still stacked from before this run are named, with the remedy.
-# Any other host: nothing.
-_native_k3s_apparmor_runc() {
-  local parser rivals sure unsure before stacked
-  _native_k3s_apparmor_runc_due || return 0
-  parser="$(_native_k3s_apparmor_parser)" \
-    || error "This machine's AppArmor converts k3s's container start to a stacked profile, which stops every container from signalling itself (MySQL's first start then hangs), and no root-owned apparmor_parser, which loads the profile that prevents it, is installed. Install it ('sudo apt-get install apparmor'), then re-run the installer."
-  if rivals="$(_native_k3s_apparmor_rival)"; then
-    sure="$(printf '%s\n' "$rivals" | awk -F '\t' -v q="'" '$1 == "sure" { printf "profile %s%s%s in %s; ", q, $3, q, $2 }')"
-    unsure="$(printf '%s\n' "$rivals" | awk -F '\t' -v q="'" '$1 == "unsure" { printf "profile %s%s%s in %s; ", q, $3, q, $2 }')"
-    [[ -z "$unsure" ]] || warn "AppArmor: ${unsure} may attach to k3s's runc under a name other than runc, and this run cannot tell whether it wins over runc (a variable it can't expand, a profile the kernel doesn't hold or with a shorter literal prefix, or one loaded with no file here). If it does, runc can't stop k3s's containers; check its attachment."
-    [[ -z "$sure" ]] || error "AppArmor: ${sure} attaches to k3s's runc (${TB_K3S_DATA_PATH}/data/<hash>/bin/runc) under a name other than runc, so it would win over the runc profile this installer loads, and runc could not stop k3s's containers. Check with whoever manages that profile whether it should cover k3s's runc; once it no longer does (or is named runc), re-run the installer."
-  fi
-  before="$TB_K3S_FILES_CHANGED"
-  # The drop-in directory is made 0755 (systemd's own convention), never re-moded when it exists.
-  { tb_root mkdir -p "${TB_K3S_APPARMOR_RUNC_PATH%/*}" \
-      && { tb_root test -d "${TB_K3S_APPARMOR_DROPIN_PATH%/*}" || tb_root install -d -m 0755 "${TB_K3S_APPARMOR_DROPIN_PATH%/*}"; }; } \
-    || error "native k3s: couldn't create ${TB_K3S_APPARMOR_RUNC_PATH%/*} or ${TB_K3S_APPARMOR_DROPIN_PATH%/*}. Check that sudo can write there, then re-run."
-  _native_k3s_install_file 0644 "$TB_K3S_APPARMOR_RUNC_PATH" "$(_native_k3s_apparmor_runc_render)" \
-    || error "native k3s: couldn't write ${TB_K3S_APPARMOR_RUNC_PATH}. Check that sudo can write there, then re-run."
-  tb_record_write file apparmor-runc "$TB_K3S_APPARMOR_RUNC_PATH"
-  TB_K3S_FILES_CHANGED=""
-  _native_k3s_install_file 0644 "$TB_K3S_APPARMOR_DROPIN_PATH" "$(_native_k3s_apparmor_dropin_render "$parser")" \
-    || error "native k3s: couldn't write ${TB_K3S_APPARMOR_DROPIN_PATH}. Check that sudo can write there, then re-run."
-  # systemd reads a new or changed drop-in only after a daemon-reload.
-  if [[ -n "$TB_K3S_FILES_CHANGED" ]]; then
-    tb_root systemctl daemon-reload >>"${LOG_FILE:-/dev/null}" 2>&1 \
-      || log "native k3s: 'systemctl daemon-reload' failed after writing ${TB_K3S_APPARMOR_DROPIN_PATH}; k3s's install script reloads systemd next."
-  fi
-  if tb_root test -d "${TB_K3S_APPARMOR_APT_HOOK_PATH%/*}"; then
-    _native_k3s_install_file 0644 "$TB_K3S_APPARMOR_APT_HOOK_PATH" "$(_native_k3s_apparmor_apt_hook_render "$parser")" \
-      || error "native k3s: couldn't write ${TB_K3S_APPARMOR_APT_HOOK_PATH}. Check that sudo can write there, then re-run."
-  fi
-  TB_K3S_FILES_CHANGED="$before"
-  tb_root "$parser" -r "$TB_K3S_APPARMOR_RUNC_PATH" >>"${LOG_FILE:-/dev/null}" 2>&1 \
-    || error "native k3s: '${parser} -r ${TB_K3S_APPARMOR_RUNC_PATH}' failed, so k3s's containers could not signal themselves on this machine. 'sudo ${parser} -r ${TB_K3S_APPARMOR_RUNC_PATH}' says why; it's safe to re-run this installer."
-  log "native k3s: AppArmor profile 'runc' loaded for k3s's runc (${TB_K3S_APPARMOR_RUNC_PATH}; re-loaded by ${TB_K3S_APPARMOR_DROPIN_PATH} and, where apt is, ${TB_K3S_APPARMOR_APT_HOOK_PATH})."
-  stacked="$(_native_k3s_apparmor_stacked)"
-  if (( stacked > 0 )); then
-    warn "${stacked} process(es) in k3s's containers started before this run and still carry the stacked AppArmor label, so they cannot signal themselves (a database's first start hangs). Their pods keep it until they restart; restarting k3s does not restart them."
-    local ns="${TB_NAMESPACE:-}"
-    # On a re-run sign-in has not named it yet; the install record has, from the run before.
-    if [[ -z "$ns" ]]; then
-      ns="$(_tb_record_prior namespace "$(cat "$(tb_record_path)" 2>/dev/null)")"
-      ns="${ns#\"}"; ns="${ns%\"}"; [[ "$ns" != null ]] || ns=""
-    fi
-    if [[ -n "$ns" ]]; then
-      hint "The count is machine-wide. Restart the pods: 'sudo k3s kubectl delete pod --all -n ${ns}' and 'sudo k3s kubectl delete pod --all -n kube-system', or reboot this machine."
-    else
-      hint "The count is machine-wide. Restart the pods: 'sudo k3s kubectl get pods -A' names their namespaces; 'sudo k3s kubectl delete pod --all -n <each one>', or reboot this machine."
-    fi
-  fi
-}
-
 # ── kubeconfig and the API ────────────────────────────────────────────────────
 
 # _native_k3s_rename_kubeconfig CONTEXT -- stdin k3s.yaml, stdout the same with its
@@ -1502,10 +1196,10 @@ _native_k3s_wsl_server_localhost() {
 }
 
 # _native_k3s_context -- the kubeconfig context native k3s is merged as:
-# k3s-<CLUSTER_NAME> (decided 2026-10-01). The cluster
+# k3s-<cluster_name> (decided 2026-10-01). The cluster
 # and the user entries carry the same name. One definition, read by the merge, the
 # record and the API wait.
-_native_k3s_context() { printf 'k3s-%s' "${CLUSTER_NAME}"; }
+_native_k3s_context() { printf 'k3s-%s' "${cluster_name}"; }
 
 # _native_k3s_kubeconfig_target -- the kubeconfig the merge writes: the first entry
 # of KUBECONFIG, else ~/.kube/config. The run's context pin
@@ -1653,7 +1347,7 @@ _native_k3s_merge_kubeconfig() {
   _native_k3s_pin_context "$ctx" \
     || error "native k3s: couldn't write the temporary file that names the ${ctx} context for the rest of this run. It's safe to re-run this installer."
   log "kubeconfig updated: added the ${ctx} context to ${target}; its current context is still '${before}'."
-  # shellcheck disable=SC2034  # consumed cross-file by common.sh (tb_record_write's kube_context)
+  # shellcheck disable=SC2034  # consumed cross-file by record.sh (tb_record_write's kube_context)
   TRACEBLOC_KUBE_CONTEXT="$ctx"
 }
 
@@ -1788,7 +1482,7 @@ _native_k3s_files_here() {
 }
 
 # _native_k3s_live_probe -- whether a tracebloc native k3s is set up on this
-# machine, read with no privileges, for common.sh's tb_substrate_resolve. The
+# machine, read with no privileges, for substrate.sh's tb_substrate_resolve. The
 # marker in config.yaml is out of reach (root's, 0600), so it reads what any user
 # can: tracebloc's kubelet drop-in (0644; on the host only the native path writes
 # it, so a k3s without it is not tracebloc's), k3s's uninstall script, and
@@ -1810,419 +1504,6 @@ _native_k3s_live_probe() {
     1) return 1 ;;
     *) return 2 ;;
   esac
-}
-
-# ── The NVIDIA GPU (1.1i) ─────────────────────────────────────────────────────
-#
-# On native k3s: the host's nvidia-container-toolkit, k3s's own `nvidia`
-# runtime and RuntimeClass, and the chart's device plugin under that class. No
-# k3s-cuda image, no --gpus, no Docker.
-#   step b  dispatch_gpu_setup (setup-linux.sh) installs the driver, then
-#           _native_k3s_gpu_prepare: the toolkit package and a CDI spec, before k3s
-#           first starts, so k3s finds the runtime at its first start;
-#   step c  _native_k3s_gpu_wire, after the node is Ready: TRACEBLOC_GPU_WIRED=1 only when
-#           k3s's own containerd has registered the runtime;
-#   step e  _native_k3s_gpu_verify (through verify_gpu), after Helm: "wired" only
-#           when the node advertises at least one nvidia.com/gpu.
-#
-# Built to the driver-floor fallback, then measured by spike S-G (0.18)
-# on 2026-10-01: a g4dn.12xlarge (4x T4, sm_75) at k3s v1.36.3
-# with toolkit 1.20.1 and drivers 580, 570, 550 and 535. Each value below says
-# whether S-G measured it; one still marked "floor, not measured" is a vendor-cited
-# minimum nothing has tested. The driver floor itself is facts.env's
-# NVIDIA_DRIVER_FLOOR_LINUX (0.11), which warns here.
-
-# The runtime k3s's containerd must register for the GPU to count as wired, and the
-# RuntimeClass the device plugin and the training jobs run under (common.sh
-# _gpu_runtime_class): k3s creates a RuntimeClass of the same name for it.
-# k3s registers its NVIDIA runtimes when it finds the toolkit's binaries on its PATH
-# at start, and pods ask for one with `runtimeClassName: nvidia` (docs.k3s.io/advanced,
-# "NVIDIA Container Runtime Support"). MEASURED (S-G): toolkit 1.20.1 ships only
-# `nvidia-container-runtime`, so k3s registers `nvidia` and no `nvidia-cdi` or
-# `nvidia-experimental` handler, although it creates `nvidia` and `nvidia-experimental`
-# RuntimeClasses; under `nvidia` the toolkit's default `mode = "auto"` runs as jit-CDI
-# ("Auto-detected mode as 'jit-cdi'"), and GEMM, cuDNN, AMP, a 4-GPU NCCL all-reduce
-# and one training per GPU family passed. The CDI path needs no `nvidia-cdi` class: a
-# RuntimeClass of that name is refused ("no runtime for "nvidia-cdi" is configured").
-TB_K3S_GPU_RUNTIME="nvidia"
-# The CDI spec this installer writes when the host has none: where k3s's containerd
-# and the toolkit read specs. MEASURED (S-G): with toolkit 1.20.1 it is never written,
-# because the toolkit's own spec (below) is there first; it is the path for a toolkit
-# that writes none.
-TB_K3S_GPU_CDI_PATH="/etc/cdi/nvidia.yaml"
-# Where the toolkit's own nvidia-cdi-refresh unit writes its spec, from toolkit 1.18.0
-# on, at install, on a driver change and at boot (NVIDIA Container Toolkit docs,
-# "Support for Container Device Interface"). A spec there is the toolkit's: it is
-# used as it is and never recorded. MEASURED (S-G): toolkit 1.20.1 wrote
-# /var/run/cdi/nvidia.yaml during its own package install, before step b looked, and
-# rewrote it after each driver change.
-TB_K3S_GPU_CDI_RUN_DIR="/var/run/cdi"
-# The oldest NVIDIA Container Toolkit the native path is built for: 1.18.0, the first
-# whose runtime uses a just-in-time CDI spec by default instead of `legacy` mode, and
-# that writes its own spec (NVIDIA Container Toolkit v1.18.0 release notes). That is
-# the path D8 names and S-G tests. FLOOR, NOT MEASURED: S-G ran 1.20.1, which the
-# installer's repository served; nothing has measured an older toolkit on k3s.
-# Below it the run WARNS and goes on, like the driver floor (W17): step c's gate
-# still decides. (`nvidia-ctk cdi generate` itself exists from 1.12.0.)
-TB_K3S_GPU_TOOLKIT_FLOOR="1.18.0"
-
-# The wired-pass marker: the GPU stack signature (gpu-nvidia.sh _gpu_stack_signature)
-# of the last run whose gate passed; a re-run whose signature equals it restarts nothing.
-# Root's in both modes and recorded as a `file`, a kind delete removes only under /etc
-# (the schema's x-tracebloc-artefact-paths); k3s's own uninstall removes it too.
-TB_K3S_GPU_MARKER_PATH="${TB_K3S_ETC_DIR}/tracebloc-gpu-wired"
-
-# _native_k3s_gpu_legacy_rm -- the marker's legacy path goes, if it is there: hosts an
-# older installer wired keep it unrecorded, so delete never removes it. Prepared mode:
-# beside the named user's root copy, root's. Own mode: in the data dir, this user's.
-_native_k3s_gpu_legacy_rm() {
-  if [[ "${TB_K3S_PREPARED:-}" == 1 && -n "${TB_RECORD_FOR_USER:-}" ]]; then
-    local root; root="$(_tb_record_root_path "$TB_RECORD_FOR_USER")"
-    tb_root rm -f "${root%/*}/.gpu-k3s-wired" 2>/dev/null || true
-    return 0
-  fi
-  local dir="${HOST_DATA_DIR:-${HOME:+${HOME}/.tracebloc}}"
-  [[ -z "$dir" ]] || rm -f "${dir}/.gpu-k3s-wired" 2>/dev/null || true
-}
-
-# _native_k3s_gpu_mark SIG -- a gate that passed: the marker holds SIG, and the record
-# lists it once. Best-effort: a marker root could not write is not recorded.
-_native_k3s_gpu_mark() {
-  _native_k3s_gpu_legacy_rm
-  { tb_root mkdir -p "${TB_K3S_GPU_MARKER_PATH%/*}" \
-      && printf '%s' "$1" | tb_root tee "$TB_K3S_GPU_MARKER_PATH" >/dev/null; } 2>/dev/null || return 0
-  tb_record_write file gpu-wired "$TB_K3S_GPU_MARKER_PATH"
-}
-
-# _native_k3s_gpu_unmark -- the marker goes, so the next run asks again, and its record
-# line with it; a marker root could not remove stays recorded.
-_native_k3s_gpu_unmark() {
-  _native_k3s_gpu_legacy_rm
-  tb_root rm -f "$TB_K3S_GPU_MARKER_PATH" 2>/dev/null || return 0
-  tb_record_drop file gpu-wired "$TB_K3S_GPU_MARKER_PATH"
-}
-
-# _native_k3s_gpu_cpu REASON [blind] -- CPU mode for this run, said ONCE: TRACEBLOC_GPU_WIRED
-# stays 0 and the wired-pass marker goes, so the next run asks again. The hint says how
-# to get the GPU: fix REASON and re-run. Native k3s needs no recreate.
-# `blind` marks a REASON that is k3s's container runtime itself saying it has no GPU
-# for a container (no NVIDIA runtime, no CDI spec, the runtime never registered), told
-# to the platform as runtime_cannot_see_gpu; a read that could not tell
-# passes no flag.
-_native_k3s_gpu_cpu() {
-  TRACEBLOC_GPU_WIRED=0
-  _native_k3s_gpu_unmark
-  if [[ "${2:-}" == blind ]] && declare -F _gpu_container_blind >/dev/null; then
-    _gpu_container_blind "k3s"
-  fi
-  [[ -z "${TB_K3S_GPU_WARNED:-}" ]] || return 0
-  TB_K3S_GPU_WARNED=1
-  if [[ "${TB_K3S_PREPARED:-}" == 1 ]]; then
-    warn "The NVIDIA GPU is not wired into k3s: ${1}. ${TB_RECORD_FOR_USER:-The named user}'s install will run in CPU mode."
-    hint "Fix that, then re-run prepare-host: it wires the GPU into the k3s already here, with no reinstall."
-    return 0
-  fi
-  warn "The NVIDIA GPU is not wired into k3s: ${1}. This machine will run in CPU mode."
-  hint "Fix that, then re-run the installer: it wires the GPU into the k3s already here, with no reinstall."
-}
-
-# _native_k3s_gpu_toolkit_floor -- warn, once, when the toolkit is older than
-# TB_K3S_GPU_TOOLKIT_FLOOR, or does not say its version. Never a refusal.
-_native_k3s_gpu_toolkit_floor() {
-  local out ver
-  out="$(_bounded "${TB_PROBE_TIMEOUT:-5}" nvidia-ctk --version 2>/dev/null)" || out=""
-  ver="$(printf '%s\n' "$out" | sed -n 's/^NVIDIA Container Toolkit CLI version \([0-9][0-9.]*\).*$/\1/p')"
-  ver="${ver%%$'\n'*}"
-  if [[ -z "$ver" ]]; then
-    warn "Couldn't read the NVIDIA Container Toolkit's version ('nvidia-ctk --version'); tracebloc is tested with ${TB_K3S_GPU_TOOLKIT_FLOOR} and later."
-  elif _version_lt "$ver" "$TB_K3S_GPU_TOOLKIT_FLOOR"; then
-    warn "NVIDIA Container Toolkit ${ver} is older than ${TB_K3S_GPU_TOOLKIT_FLOOR}, the version tracebloc is tested with — continuing; if GPU training fails on this machine, upgrade the toolkit."
-  fi
-}
-
-# _native_k3s_gpu_cdi_spec -- a CDI spec for the NVIDIA GPU, after the toolkit. One
-# the host already has (TB_K3S_GPU_CDI_PATH, or a nvidia*.yaml the toolkit wrote under
-# TB_K3S_GPU_CDI_RUN_DIR) is used as it is: it is not this run's, and it is not
-# recorded. Otherwise `nvidia-ctk cdi generate` writes TB_K3S_GPU_CDI_PATH, bounded by
-# TB_GPU_CDI_TIMEOUT, and the file is recorded the moment it exists, so delete
-# removes it. Presence is the authority, never the exit code: 0 when a non-empty
-# spec is in place, 1 (CPU mode, said
-# once) when there is none.
-_native_k3s_gpu_cdi_spec() {
-  local p
-  for p in "$TB_K3S_GPU_CDI_PATH" "$TB_K3S_GPU_CDI_RUN_DIR"/nvidia*.yaml; do
-    tb_root test -e "$p" || continue
-    if tb_root test -s "$p"; then
-      log "NVIDIA CDI spec already on this machine (${p}); using it as it is."
-      return 0
-    fi
-    # An empty spec is no spec: skip it, and regenerate below (over it, when it is
-    # the one at TB_K3S_GPU_CDI_PATH), rather than staying CPU on a file nothing fills.
-    log "NVIDIA CDI spec at ${p} is empty; generating one."
-  done
-  tb_root mkdir -p "$(dirname "$TB_K3S_GPU_CDI_PATH")" || true
-  _bounded_root "${TB_GPU_CDI_TIMEOUT:-60}" nvidia-ctk cdi generate --output="$TB_K3S_GPU_CDI_PATH" >>"${LOG_FILE:-/dev/null}" 2>&1 || true
-  # --print listed the generate and ran nothing, so there is no spec to read back.
-  if tb_root_planning; then return 0; fi
-  if tb_root test -e "$TB_K3S_GPU_CDI_PATH"; then
-    tb_record_write file cdi-spec "$TB_K3S_GPU_CDI_PATH"
-  fi
-  if tb_root test -s "$TB_K3S_GPU_CDI_PATH"; then
-    log "NVIDIA CDI spec written (${TB_K3S_GPU_CDI_PATH})."
-    return 0
-  fi
-  _native_k3s_gpu_cpu "'nvidia-ctk cdi generate' wrote no CDI spec to ${TB_K3S_GPU_CDI_PATH}; check that 'nvidia-smi' works" blind
-  return 1
-}
-
-# ── The GPU in tracebloc's WSL distro (S-W row 13) ──────────────
-# The device WSL gives a distro for the Windows host's GPUs (NVIDIA's CUDA on WSL guide).
-TB_WSL_DXG_PATH="/dev/dxg"
-# The unit the distro's image runs at each start, before k3s, to write the WSL spec at
-# TB_K3S_GPU_CDI_PATH: `nvidia-ctk cdi generate --mode=wsl`, then libdxcore into its
-# mounts (wsl-distro.sh, gpu_files).
-TB_K3S_GPU_WSL_CDI_UNIT="tracebloc-cdi.service"
-# The bound on restarting it, in seconds: above the unit's own TimeoutStartSec, so
-# systemd, not this bound, ends a start that hangs (wsl-distro.bats holds the two).
-TB_K3S_GPU_WSL_CDI_BOUND=150
-# What a whole WSL spec names: the GPU, /dev/dxg and libdxcore. The same three
-# tracebloc-cdi holds its own spec to before it keeps it (wsl-distro.bats reads them out
-# of wsl-distro.sh and holds this list to them). Without libdxcore, libcuda loads but
-# never reaches /dev/dxg, and CUDA blames the driver: the PowerShell core's live box
-# saw exactly that from a spec that existed.
-TB_K3S_GPU_WSL_SPEC_NEEDLES=(nvidia.com/gpu /dev/dxg libdxcore.so)
-
-# _native_k3s_gpu_wsl_spec_lacks -- what the spec at TB_K3S_GPU_CDI_PATH lacks of
-# TB_K3S_GPU_WSL_SPEC_NEEDLES, space-separated, or "a spec" when there is no non-empty
-# one. Empty output: it is whole.
-_native_k3s_gpu_wsl_spec_lacks() {
-  local n lacks=""
-  if ! tb_root test -s "$TB_K3S_GPU_CDI_PATH"; then printf 'a spec'; return 0; fi
-  for n in "${TB_K3S_GPU_WSL_SPEC_NEEDLES[@]}"; do  # set-u-safe: TB_K3S_GPU_WSL_SPEC_NEEDLES is a literal list
-    tb_root grep -qF -- "$n" "$TB_K3S_GPU_CDI_PATH" 2>/dev/null || lacks="${lacks:+${lacks} }${n}"
-  done
-  printf '%s' "$lacks"
-}
-
-# _native_k3s_gpu_wsl_prepare -- step b's NVIDIA half in tracebloc's WSL distro. The
-# distro's image carries what this run could not install there: NVIDIA's container
-# toolkit, pinned and set to CDI mode, and tracebloc-cdi (wsl-distro.sh). So nothing is
-# installed and nothing generated here (a plain `nvidia-ctk cdi generate` knows nothing
-# of WSL). It checks the outcome, and each miss is CPU mode, said by name:
-#   - TB_WSL_DXG_PATH, the device the GPU reaches the distro by;
-#   - an nvidia-ctk that answers, and its version floor (a warning, as on Linux);
-#   - a whole spec. One that is not is asked for again, once, by restarting
-#     TB_K3S_GPU_WSL_CDI_UNIT, then read again. It is the image's, never recorded.
-# Past it the path is Linux's: k3s registers the NVIDIA runtime from the toolkit (step
-# c's gate), and the chart's device plugin, under that runtime, finds WSL by /dev/dxg
-# and advertises one shared device, `all` (W26, measured on v0.20.1 by spike S-W).
-_native_k3s_gpu_wsl_prepare() {
-  local lacks state
-  if ! tb_root test -e "$TB_WSL_DXG_PATH"; then
-    _native_k3s_gpu_cpu "WSL gives the tracebloc WSL distro no GPU device (${TB_WSL_DXG_PATH} is not there), so no container here can use the GPU" blind
-    return 1
-  fi
-  if ! { has nvidia-ctk && _bounded "${TB_PROBE_TIMEOUT:-5}" nvidia-ctk --version >/dev/null 2>&1; }; then
-    _native_k3s_gpu_cpu "the tracebloc WSL distro has no NVIDIA Container Toolkit that answers ('nvidia-ctk --version'), and this installer installs none there: its image carries it" blind
-    return 1
-  fi
-  _native_k3s_gpu_toolkit_floor
-  lacks="$(_native_k3s_gpu_wsl_spec_lacks)"
-  if [[ -n "$lacks" ]]; then
-    log "WSL GPU spec ${TB_K3S_GPU_CDI_PATH} lacks: ${lacks}; restarting ${TB_K3S_GPU_WSL_CDI_UNIT} once."
-    _bounded_root "$TB_K3S_GPU_WSL_CDI_BOUND" systemctl restart "$TB_K3S_GPU_WSL_CDI_UNIT" >>"${LOG_FILE:-/dev/null}" 2>&1 || true
-    lacks="$(_native_k3s_gpu_wsl_spec_lacks)"
-  fi
-  if [[ -n "$lacks" ]]; then
-    state="$(_bounded_root "${TB_PROBE_TIMEOUT:-5}" systemctl is-active "$TB_K3S_GPU_WSL_CDI_UNIT" 2>/dev/null)" || true
-    state="${state%%$'\n'*}"
-    _native_k3s_gpu_cpu "the tracebloc WSL distro's GPU spec, ${TB_K3S_GPU_CDI_PATH}, lacks ${lacks}, and ${TB_K3S_GPU_WSL_CDI_UNIT}, which writes it, did not fix that (it is ${state:-in a state systemctl did not say}; 'systemctl status ${TB_K3S_GPU_WSL_CDI_UNIT%.service}' says why)" blind
-    return 1
-  fi
-  log "WSL GPU spec ${TB_K3S_GPU_CDI_PATH} names the GPU, /dev/dxg and libdxcore; using it as it is."
-  return 0
-}
-
-# _native_k3s_gpu_prepare -- step b's NVIDIA half on native k3s: the toolkit package
-# (gpu-nvidia.sh's package half), its version floor, and a CDI spec. It
-# touches no Docker and no host containerd, and leaves TRACEBLOC_GPU_WIRED at 0: step c's
-# gate sets it. TB_K3S_GPU_PREPARED=1 tells that gate the toolkit and a spec are here.
-# In tracebloc's WSL distro the image's toolkit and spec, checked
-# (_native_k3s_gpu_wsl_prepare).
-_native_k3s_gpu_prepare() {
-  TB_K3S_GPU_PREPARED=""
-  if declare -F tb_in_wsl_distro >/dev/null 2>&1 && tb_in_wsl_distro; then
-    _native_k3s_gpu_wsl_prepare || return 0
-    TB_K3S_GPU_PREPARED=1
-    return 0
-  fi
-  _nvidia_container_toolkit_package
-  _native_k3s_gpu_toolkit_floor
-  _native_k3s_gpu_cdi_spec || return 0
-  TB_K3S_GPU_PREPARED=1
-}
-
-# _native_k3s_cri_handlers -- the runtime handlers in `k3s crictl info`'s output on
-# stdin, one name per line: the `name` of each entry of the top-level
-# `runtimeHandlers` list, which is the CRI's own list of the handlers containerd
-# registered (containerd 2.x's Status). crictl prints it with two-space json.Indent
-# and sorted keys (cri-tools cmd/crictl/util.go, outputStatusData), so each entry's
-# keys sit six spaces in. jq-free, like the rest of the installer. MEASURED at the
-# pinned k3s (S-G): a GPU node printed that shape, with the default handler as an
-# entry with no `name`; k3s-gpu.bats holds this parser to that output
-# (crictl-info-measured-g4dn.12xlarge.json) and to the hand-built ones. 0 with the names
-# (none, for an empty list); 1 when the input carries no runtimeHandlers list
-# (cannot tell).
-_native_k3s_cri_handlers() {
-  awk '
-    /^  "runtimeHandlers": \[\],?$/ { seen = 1; next }
-    /^  "runtimeHandlers": \[$/     { seen = 1; inside = 1; next }
-    inside && /^  [^ ]/             { inside = 0; next }
-    inside && /^      "name": "[a-z0-9][-a-z0-9]*",?$/ {
-      v = $0; sub(/^      "name": "/, "", v); sub(/",?$/, "", v); print v
-    }
-    END { exit(seen ? 0 : 1) }'
-}
-
-# _native_k3s_gpu_handler -- has k3s's own containerd registered TB_K3S_GPU_RUNTIME?
-# The runtime's own answer, `k3s crictl info`, bounded by TB_K3S_CRI_TIMEOUT
-# (seconds, default 15). Never the RuntimeClass list: k3s creates the `nvidia` class
-# on a fresh node with no GPU and no toolkit, so a class is no
-# evidence. 0 = registered, 1 = not registered, 2 = cannot tell (the read failed or
-# timed out, or named no handler list), with the read in TB_K3S_GPU_READ.
-_native_k3s_gpu_handler() {
-  local out names rc=0
-  TB_K3S_GPU_READ=""
-  out="$(_bounded_root "${TB_K3S_CRI_TIMEOUT:-15}" "$TB_K3S_BIN_PATH" crictl info 2>/dev/null)" || rc=$?
-  if [[ "$rc" -ne 0 ]]; then
-    TB_K3S_GPU_READ="'k3s crictl info' did not answer (exit ${rc})"
-    return 2
-  fi
-  if ! names="$(_native_k3s_cri_handlers <<<"$out")"; then
-    TB_K3S_GPU_READ="'k3s crictl info' listed no runtime handlers"
-    return 2
-  fi
-  case $'\n'"$names"$'\n' in *$'\n'"${TB_K3S_GPU_RUNTIME}"$'\n'*) return 0 ;; esac
-  return 1
-}
-
-# _native_k3s_gpu_wire NAME -- step c's GPU gate on native k3s, after node NAME is
-# Ready. TRACEBLOC_GPU_WIRED becomes 1 here and nowhere else on k3s: only when step b put the
-# toolkit and a CDI spec in place (TB_K3S_GPU_PREPARED) and k3s's own containerd has
-# registered TB_K3S_GPU_RUNTIME. k3s registers it only when it finds the toolkit at
-# start (docs.k3s.io: "restart it if already installed"), so a k3s that started
-# without it -- a host installed CPU-only before this, or a toolkit installed after
-# k3s -- is restarted ONCE and asked again; no recreate. The node half of
-# D11: a re-run whose GPU stack signature equals the last wired pass's restarts
-# nothing, and a changed signature restarts once. Every other outcome is CPU mode,
-# with one warning that names why; it is never a guess at GPU. MEASURED (S-G): a fresh
-# install registered the handler at k3s's first start (step b put the toolkit in
-# first), a no-change re-run left k3s's start time alone, and each driver change
-# (580 -> 570 -> 550 -> 535) restarted k3s exactly once. And the restart is needed:
-# with the toolkit removed and k3s restarted, the CRI listed no nvidia handler; the
-# re-run reinstalled the toolkit, k3s still listed none until this gate's one restart,
-# and then it did.
-_native_k3s_gpu_wire() {
-  local name="$1" sig last="" rc=0 why=""
-  [[ "${GPU_VENDOR:-}" == "nvidia" && -n "${TB_K3S_GPU_PREPARED:-}" ]] || return 0
-  # --print (prepare-host): k3s never started, so there is no runtime to ask about.
-  if tb_root_planning; then return 0; fi
-  sig="$(_gpu_stack_signature)"
-  if tb_root test -f "$TB_K3S_GPU_MARKER_PATH" 2>/dev/null; then
-    last="$(tb_root cat "$TB_K3S_GPU_MARKER_PATH" 2>/dev/null)" || last=""
-  fi
-  _native_k3s_gpu_handler || rc=$?
-  case "$rc" in
-    0)
-      if [[ -n "$last" && -n "$sig" && "$last" != "$sig" ]]; then
-        why="the NVIDIA driver or toolkit changed since the last GPU run"
-      fi
-      ;;
-    1)
-      if ! has nvidia-container-runtime; then
-        _native_k3s_gpu_cpu "the NVIDIA container runtime (nvidia-container-runtime) is not on PATH, so k3s cannot register it" blind
-        return 0
-      fi
-      why="k3s has not registered its '${TB_K3S_GPU_RUNTIME}' runtime"
-      ;;
-    *)
-      _native_k3s_gpu_cpu "$TB_K3S_GPU_READ"
-      return 0
-      ;;
-  esac
-  if [[ -n "$why" ]]; then
-    log "native k3s: ${why}; restarting k3s once so it finds the NVIDIA runtime."
-    tb_root systemctl restart k3s || error "k3s did not restart to pick up the NVIDIA runtime. 'sudo journalctl -u k3s' says why; it's safe to re-run this installer."
-    # A second start of k3s, made on purpose: it gets the one wait budget again.
-    TB_K3S_WAITED_S=0; TB_K3S_WAIT_T0="$(date +%s)"
-    _native_k3s_wait_for_api
-    _native_k3s_wait_for_node_ready "$name"
-    rc=0
-    _native_k3s_gpu_handler || rc=$?
-    case "$rc" in
-      0) ;;
-      1) _native_k3s_gpu_cpu "k3s did not register its '${TB_K3S_GPU_RUNTIME}' runtime, even after a restart" blind; return 0 ;;
-      *) _native_k3s_gpu_cpu "$TB_K3S_GPU_READ"; return 0 ;;
-    esac
-  fi
-  # shellcheck disable=SC2034  # consumed cross-file by common.sh (_gpu_wired)
-  TRACEBLOC_GPU_WIRED=1
-  if [[ -n "$sig" ]]; then
-    _native_k3s_gpu_mark "$sig"
-  else
-    _native_k3s_gpu_unmark
-  fi
-  # Not "wired" yet: the runtime is registered, and the GPUs are counted after the
-  # install, once the device plugin runs (_native_k3s_gpu_verify).
-  success "k3s registered the NVIDIA runtime (${TB_K3S_GPU_RUNTIME}); the GPUs are counted after the install."
-}
-
-# _native_k3s_gpu_verify -- after Helm (install-k8s.sh step e, through verify_gpu):
-# the GPU is wired only when the node advertises at least one nvidia.com/gpu. Step
-# c's gate proves k3s runs the NVIDIA runtime, not that the GPUs are healthy.
-# MEASURED (S-G): driver 535 on T4s, handler registered, and 0 GPUs allocatable,
-# because the GPUs failed when the device plugin re-initialised them (Xid 140, then
-# "RmInitAdapter failed"); persistence mode from boot cured it, and 550 and newer
-# never needed it. So a count of 0 after the plugin's rollout and the poll is a
-# warning that names that remedy, and an unreadable count is a warning too: neither
-# is ever "wired". TB_K3S_GPU_UNCONFIRMED tells the summary.
-_native_k3s_gpu_verify() {
-  local tries=0 n="" rc=0 ns="${GPU_DEVICE_PLUGIN_NAMESPACE:-kube-system}"
-  log "Counting the GPUs the node advertises..."
-  # The plugin rolls out with the release, and `helm upgrade --install` does not
-  # wait: give it the same bounded chance verify_gpu does, then poll.
-  kubectl rollout status daemonset/nvidia-device-plugin-daemonset -n "$ns" --timeout=120s >/dev/null 2>&1 || true
-  while [[ "$tries" -lt 18 ]]; do
-    tries=$((tries + 1))
-    # The one count reader, shared with verify_gpu's own poll (gpu-plugins.sh
-    # _gpu_alloc_count): a node without the key counts 0, and a read
-    # that fails, lists no node or is not a number is "cannot tell", never a count.
-    rc=0; n="$(_gpu_alloc_count nvidia)" || rc=$?
-    if [[ "$rc" -eq 0 && "$n" -gt 0 ]]; then
-      TB_K3S_GPU_UNCONFIRMED=""
-      success "NVIDIA GPU wired into k3s: ${n} GPU(s) allocatable (runtime ${TB_K3S_GPU_RUNTIME})."
-      return 0
-    fi
-    sleep 5
-  done
-  # shellcheck disable=SC2034  # consumed cross-file by summary.sh (print_summary)
-  TB_K3S_GPU_UNCONFIRMED=1
-  if [[ "$rc" -ne 0 ]]; then
-    warn "Couldn't read how many GPUs the node advertises ('kubectl get nodes' did not answer), so the NVIDIA GPU is not confirmed."
-    hint "Check with: $(tb_kubectl_shown) get nodes -o jsonpath='{..allocatable.nvidia\\.com/gpu}'"
-    return 0
-  fi
-  warn "k3s runs the NVIDIA runtime, but the node advertises no GPU (allocatable nvidia.com/gpu = 0), so GPU trainings will wait."
-  # An adopted user has no sudo for dmesg or a reboot: the remedy is the administrator's.
-  if [[ "${TB_K3S_ADOPTED:-}" == 1 ]]; then
-    hint "Ask the administrator to check 'sudo dmesg | grep -iE \"xid|RmInitAdapter\"': on Xid 140 or 'RmInitAdapter failed', persistence mode from boot (nvidia-persistenced, or 'nvidia-smi -pm 1' before k3s starts), a reboot and a re-run of prepare-host bring the GPUs up. Drivers 550 and newer did not need it."
-    return 0
-  fi
-  if declare -F tb_in_wsl_distro >/dev/null 2>&1 && tb_in_wsl_distro; then
-    hint "In the tracebloc WSL distro the device plugin finds the GPU through ${TB_WSL_DXG_PATH}: '$(tb_kubectl_shown) -n ${ns} logs daemonset/nvidia-device-plugin-daemonset' says what it found. Then re-run the installer from Windows."
-    return 0
-  fi
-  hint "If 'sudo dmesg | grep -iE \"xid|RmInitAdapter\"' shows Xid 140 or 'RmInitAdapter failed', the GPUs failed when they re-initialised: turn persistence mode on from boot (nvidia-persistenced, or 'nvidia-smi -pm 1' before k3s starts), reboot, then re-run this installer. Drivers 550 and newer did not need it."
 }
 
 # ── The install path (1.1e) ───────────────────────────────────────────────────
@@ -2338,7 +1619,7 @@ _native_k3s_install_linux() {
       return 0
     fi
   fi
-  # shellcheck disable=SC2034  # consumed cross-file (common.sh's root copy, setup-linux.sh's tools target, diagnose.sh)
+  # shellcheck disable=SC2034  # consumed cross-file (record.sh's root copy, setup-linux.sh's tools target, diagnose.sh)
   INSTALL_TIER=2
   # shellcheck disable=SC2034  # consumed cross-file by diagnose.sh
   INSTALL_TIER_REASON="native-k3s"
@@ -2430,7 +1711,7 @@ _native_k3s_refuse_host() {
     _native_k3s_refuse_windows_drive
   fi
   # hostpath and HOST_DATASET_DIR are served: the node is the host,
-  # so the chart's hostPath PVs name HOST_DATA_DIR and the dataset dir themselves
+  # so the chart's hostPath PVs name host_data_dir and the dataset dir themselves
   # (install-client-helm.sh, _hostpath_paths_block). validate_config still refuses a
   # dataset dir under node-local, on both substrates.
   _native_k3s_check_version
@@ -2460,7 +1741,7 @@ _native_k3s_wsl_which() {
 }
 
 # _native_k3s_wsl_way_out -- that refusal's way out: install.ps1 on WSL's kernel. On
-# another, only WSL's names make this shell look like WSL (refuse_wsl_run, common.sh,
+# another, only WSL's names make this shell look like WSL (refuse_wsl_run, host.sh,
 # takes it for Linux), and unsetting them is a way out where install.ps1 cannot run.
 _native_k3s_wsl_way_out() {
   if declare -F _probe_wsl_kernel >/dev/null 2>&1 && _probe_wsl_kernel; then
@@ -2472,21 +1753,21 @@ _native_k3s_wsl_way_out() {
 
 # _native_k3s_refuse_windows_drive -- in tracebloc's WSL distro, refuse by name a data
 # path on a Windows drive (drvfs, _probe_windows_drive): k3s's data and its default
-# volumes (TB_K3S_DATA_PATH), the data dir (HOST_DATA_DIR: the volumes' directory when
+# volumes (TB_K3S_DATA_PATH), the data dir (host_data_dir: the volumes' directory when
 # it is not the default, and hostpath's), and the dataset dir. On
 # Windows the volumes, the database's among them, live on the distro's own disk, and a
 # dataset is a Linux-side mount, never drvfs. A path whose filesystem this run cannot
 # read is "cannot tell", refused the same way. Read-only.
 _native_k3s_refuse_windows_drive() {
   local name path what rc
-  for name in TB_K3S_DATA_PATH HOST_DATA_DIR HOST_DATASET_DIR; do
+  for name in TB_K3S_DATA_PATH host_data_dir HOST_DATASET_DIR; do
     path="${!name:-}"
     [[ -n "$path" ]] || continue
     # Before validate_config: the data dir is read as it will read it, under $HOME.
-    [[ "$name" != HOST_DATA_DIR ]] || path="$(_tb_home_path "$path")"
+    [[ "$name" != host_data_dir ]] || path="$(_tb_home_path "$path")"
     case "$name" in
       TB_K3S_DATA_PATH) what="k3s's data directory ${path}" ;;
-      HOST_DATA_DIR)    what="The data directory ${path} (TRACEBLOC_HOST_DATA_DIR, --data-dir)" ;;
+      host_data_dir)    what="The data directory ${path} (TRACEBLOC_HOST_DATA_DIR, --data-dir)" ;;
       *)                what="The dataset directory ${path} (TRACEBLOC_HOST_DATASET_DIR)" ;;
     esac
     rc=0; _probe_windows_drive "$path" || rc=$?
@@ -2678,7 +1959,7 @@ _native_k3s_create_cluster() {
     _mac_ct_create_cluster
     return 0
   fi
-  log "Setting up native k3s for '${CLUSTER_NAME}'"
+  log "Setting up native k3s for '${cluster_name}'"
   if [[ "${TB_K3S_ADOPTED:-}" == 1 ]]; then
     _native_k3s_adopt_cluster
     return 0
@@ -2750,7 +2031,7 @@ _native_k3s_create_cluster() {
   tb_machine_lines _native_k3s_run_install_script "${tmp}/install.sh" \
     || { rm -rf "$tmp"; error "k3s's install script failed. 'sudo journalctl -u k3s' says why; it's safe to re-run this installer."; }
   rm -rf "$tmp"
-  tb_record_write k3s-install "$CLUSTER_NAME" "$TB_K3S_UNINSTALL_PATH"
+  tb_record_write k3s-install "$cluster_name" "$TB_K3S_UNINSTALL_PATH"
   # On a re-run the script never restarts k3s for us: it restarts only when its own
   # hashes changed while it ran, and it hashes the binary at its start, after the
   # swap above, so a replaced binary is no change to it ("No change detected so
@@ -2792,322 +2073,4 @@ _native_k3s_create_cluster() {
   _export_host_no_proxy
   # No line of its own: its result is step c's "✔ Secure environment created".
   tb_live_stop
-}
-
-# ── The prepared host (1.1g) ──────────────────────────────────────────────────
-#
-# The admin half. An administrator runs prepare-host once, naming the daily
-# user; it sets k3s up for them as root, grants k3s.yaml to the prepared group with
-# them in it, and writes their records. Their own install then finds the host
-# prepared and adopts it at Tier 0, with no administrator rights.
-
-# _native_k3s_prepared_for_me -- 0 when an administrator prepared this host for this
-# user, read with no privileges: all four hold -- this user's own record names them
-# in prepared_for (prepare-host writes it; tracebloc delete reads the same field), the
-# prepared group lists them (root's, so a record they edit alone does not count), k3s
-# is active, and this user can read k3s.yaml. Otherwise 1; on a host prepared for
-# this user (the record names them), stdout then names what is missing, a key of
-# _native_k3s_prepared_reason: k3s itself, gone after an administrator's offboard
-# (their delete cannot edit this user's record, so it still names them); k3s not
-# running; k3s.yaml unreadable; or a login older than the group. A record prepare-host
-# wrote before prepared_for existed names no one: the remedy, prepare-host again,
-# writes it.
-_native_k3s_prepared_for_me() {
-  local rec me members
-  rec="$(tb_record_path)"
-  [[ -f "$rec" ]] || return 1
-  me="$(id -un 2>/dev/null)" || return 1
-  [[ -n "$me" && "$(_tb_record_prior prepared_for "$(cat "$rec" 2>/dev/null)")" == "$(_tb_json "$me")" ]] || return 1
-  if [[ ! -e "$TB_K3S_BIN_PATH" ]]; then
-    printf 'gone'
-    return 1
-  fi
-  # The record is this user's to edit; the prepared group is root's, and only prepare-host
-  # adds a user to it. A record that names them while the group does not (edited by hand,
-  # or the administrator took them out) is not a host prepared for them.
-  members="$(getent group "$TB_K3S_PREPARED_GROUP" 2>/dev/null)" || members=""
-  case ",${members##*:}," in
-    *",${me},"*) ;;
-    *) return 1 ;;
-  esac
-  if ! _bounded "${TB_PROBE_TIMEOUT:-5}" systemctl is-active --quiet k3s 2>/dev/null; then
-    printf 'stopped'
-    return 1
-  fi
-  if [[ ! -r "$TB_K3S_KUBECONFIG_PATH" ]]; then
-    case " $(id -Gn 2>/dev/null) " in
-      *" ${TB_K3S_PREPARED_GROUP} "*) printf 'unreadable' ;;
-      *) printf 'relogin' ;;
-    esac
-    return 1
-  fi
-  return 0
-}
-
-# _native_k3s_prepared_reason KEY WHAT -- what is missing on a host prepared for this
-# user (KEY, from _native_k3s_prepared_for_me), said for WHAT: why (the log's clause
-# after "An administrator prepared this machine for you, but"), next (a person's end
-# block: the reason line, then what to do, as tb_fail_next takes it) or cmd (the
-# command under it; none where it is the install command). An unknown KEY says nothing.
-_native_k3s_prepared_reason() {
-  local line remedy="Ask an administrator to run this once, then run the installer again:" cmd
-  cmd="$(_native_k3s_prepare_host_cmd)"
-  case "$1:$2" in
-    gone:why)       printf 'the k3s they set up is gone from it (no %s)' "$TB_K3S_BIN_PATH"; return 0 ;;
-    stopped:why)    printf 'k3s is not running on it (systemctl is-active k3s)'; return 0 ;;
-    unreadable:why) printf 'you cannot read %s' "$TB_K3S_KUBECONFIG_PATH"; return 0 ;;
-    relogin:why)    printf 'this session started before you joined the %s group, so you cannot read %s yet: log out and back in, then re-run' "$TB_K3S_PREPARED_GROUP" "$TB_K3S_KUBECONFIG_PATH"; return 0 ;;
-    gone:*)         line="This machine was prepared for you, but k3s has been deleted since." ;;
-    stopped:*)      line="This machine was prepared for you, but k3s isn't running on it." ;;
-    unreadable:*)   line="This machine was prepared for you, but you can't read ${TB_K3S_KUBECONFIG_PATH}." ;;
-    relogin:*)      line="This machine was prepared for you, but this login started before you joined the ${TB_K3S_PREPARED_GROUP} group."
-                    remedy="Log out and back in, then run the installer again:"; cmd="" ;;
-    *)              return 0 ;;
-  esac
-  case "$2" in
-    next) printf '%s\\n%s' "$line" "$remedy" ;;
-    cmd)  printf '%s' "$cmd" ;;
-  esac
-}
-
-# _native_k3s_prepare_host_cmd -- the command an administrator runs, once, to prepare
-# this machine for this user: what a person reads (tb_fail_next).
-_native_k3s_prepare_host_cmd() {
-  local me
-  me="$(id -un 2>/dev/null)" || me=""
-  printf 'curl -fsSL https://tracebloc.io/i.sh | TRACEBLOC_PREPARE_USER=%s bash -s -- prepare-host' "${me:-<your-username>}"
-}
-
-# _native_k3s_prepare_host_remedy [KEY] -- the way forward for a user who cannot
-# sudo: an administrator prepares the host for them once. KEY, when given, is what
-# is missing on a host already prepared for them (_native_k3s_prepared_reason).
-_native_k3s_prepare_host_remedy() {
-  local me
-  me="$(id -un 2>/dev/null)" || me=""
-  [[ -z "${1:-}" ]] || printf 'An administrator prepared this machine for you, but %s. ' "$(_native_k3s_prepared_reason "$1" why)"
-  printf 'An administrator can prepare this machine for you once: export TRACEBLOC_SUBSTRATE=k3s TRACEBLOC_PREPARE_USER=%s && curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host -- then re-run this installer, with no sudo.' "${me:-<your-username>}"
-}
-
-# _native_k3s_adopt_tools -- step b at Tier 0 on a host prepared for this user. k3s,
-# its files and its firewall are the administrator's, so nothing here asks for
-# administrator rights: helm goes user-local (_set_tools_target), and create_cluster
-# takes the adopt path.
-_native_k3s_adopt_tools() {
-  # shellcheck disable=SC2034  # consumed cross-file (setup-linux.sh's tools target, common.sh's root copy, diagnose.sh)
-  INSTALL_TIER=0
-  # shellcheck disable=SC2034  # consumed cross-file by diagnose.sh
-  INSTALL_TIER_REASON="native-k3s-prepared"
-  TB_K3S_ADOPTED=1
-  log "step b: native k3s: tier 0 (an administrator prepared this machine for $(id -un 2>/dev/null); no administrator rights)"
-  info "An administrator prepared native k3s on this machine for you, so this install needs no administrator rights."
-  _set_tools_target
-  local saved_umask
-  saved_umask="$(umask)"
-  umask 022
-  tb_live_quiet "Installing system tools..."
-  _helm_expect
-  install_helm
-  tb_live_done "System tools ready"
-  umask "$saved_umask"
-  log "step b: native k3s: helm ready in ${TRACEBLOC_TOOLS_DIR:-?} (k3s is the administrator's)"
-}
-
-# _native_k3s_adopt_cluster -- step c on a prepared host. The k3s an administrator set
-# up for this user is used as it is: no firewall, file, binary or restart here, and
-# no sudo. k3s.yaml, readable through the prepared group, is merged into this user's
-# kubeconfig and recorded; then the API and the node are waited for on the one
-# budget the full path uses. The k3d check ran in main(), before step b
-# (reinstall.sh's refuse_k3d_machine), from this user's own install record and
-# kubeconfig.
-_native_k3s_adopt_cluster() {
-  local name
-  _native_k3s_refuse_host
-  log "native k3s: using the k3s an administrator prepared for $(id -un 2>/dev/null) (prepare-host)."
-  name="$(_native_k3s_node_name)" || _native_k3s_node_name_stop "$?"
-  TB_K3S_WAITED_S=0; TB_K3S_WAIT_T0="$(date +%s)"
-  _native_k3s_merge_kubeconfig
-  tb_record_write kube-context "$(_native_k3s_context)" "$(_native_k3s_kubeconfig_target)"
-  _native_k3s_wait_for_api
-  _native_k3s_wait_for_node_ready "$name"
-  _native_k3s_gpu_adopt
-  _export_host_no_proxy
-}
-
-# _native_k3s_gpu_adopt -- step c's GPU gate on a host adopted at Tier 0. This user
-# cannot ask k3s's containerd (`k3s crictl` needs root), so the answer is the one
-# prepare-host's gate (_native_k3s_gpu_wire) gave as root, read from the record it
-# wrote for this user, never re-detected here. TRACEBLOC_GPU_WIRED=1 only when that
-# runtime is TB_K3S_GPU_RUNTIME and this run's floor verdict keeps the GPU; the GPUs
-# are counted after the install (_native_k3s_gpu_verify), as on the full path, so a
-# record that outlived its GPU is caught there.
-_native_k3s_gpu_adopt() {
-  local rec rt=""
-  rec="$(tb_record_path)"
-  if [[ -f "$rec" ]]; then rt="$(_tb_record_prior "$TB_RECORD_PREPARED_GPU_KEY" "$(cat "$rec" 2>/dev/null)")"; fi
-  TRACEBLOC_GPU_WIRED=0
-  # detect_gpu said why and what to do.
-  if declare -F _gpu_floor_skips >/dev/null 2>&1 && _gpu_floor_skips; then return 0; fi
-  if [[ "$rt" == "$(_tb_json "$TB_K3S_GPU_RUNTIME")" ]]; then
-    GPU_VENDOR=nvidia
-    # shellcheck disable=SC2034  # consumed cross-file by common.sh (_gpu_wired)
-    TRACEBLOC_GPU_WIRED=1
-    # No runtime name: the gate's own line is the one success line naming it alone, which
-    # e2e reads (e2e-test-agent producer_contracts.py, native_k3s_gpu_wiring); the count
-    # after Helm names it.
-    success "prepare-host registered the NVIDIA runtime for you; the GPUs are counted after the install."
-    return 0
-  fi
-  [[ "${GPU_VENDOR:-}" == nvidia ]] || return 0
-  warn "This machine has an NVIDIA GPU, but prepare-host did not set it up for k3s, so this install runs in CPU mode."
-  hint "Ask the administrator to re-run prepare-host for you (it sets the GPU up when 'nvidia-smi' works), then re-run this installer."
-}
-
-# _native_k3s_prepared_finish NAME -- step 4 and 5 in prepared mode: the API, asked
-# as root on k3s.yaml (_native_k3s_kubectl_on); k3s.yaml's grant to the prepared
-# group, read back; the node password; node NAME Ready; the GPU gate, as root, whose
-# runtime goes into the named user's record (TB_RECORD_PREPARED_GPU_RUNTIME) for their
-# adopt to read (_native_k3s_gpu_adopt); this process's NO_PROXY. The shared wait
-# budget started with the wait for k3s.yaml, as on the full path.
-_native_k3s_prepared_finish() {
-  local name="$1"
-  _native_k3s_wait_for_api
-  _native_k3s_check_prepared_grant
-  tb_record_write file node-password "$TB_K3S_NODE_PASSWORD_PATH"
-  _native_k3s_wait_for_node_ready "$name"
-  _native_k3s_gpu_wire "$name"
-  # shellcheck disable=SC2034  # consumed cross-file by common.sh (tb_record_write)
-  TB_RECORD_PREPARED_GPU_RUNTIME=""
-  # shellcheck disable=SC2034  # consumed cross-file by common.sh (tb_record_write)
-  if _gpu_wired; then TB_RECORD_PREPARED_GPU_RUNTIME="$TB_K3S_GPU_RUNTIME"; fi
-  _export_host_no_proxy
-}
-
-# _native_k3s_prepared_group USER -- the prepared group exists (a system group, made
-# here when missing) and USER is in it, BEFORE k3s starts: k3s grants k3s.yaml to a
-# group that exists when it writes the file, and only logs one that does not. The
-# members are named to the administrator, since each of them is cluster-admin.
-_native_k3s_prepared_group() {
-  local user="$1" g="$TB_K3S_PREPARED_GROUP" line
-  TB_K3S_GROUP_MADE=0
-  if ! getent group "$g" >/dev/null 2>&1; then
-    tb_root groupadd --system "$g" \
-      || error "prepare-host: couldn't create the '${g}' group. Check 'sudo groupadd --system ${g}', then re-run."
-    TB_K3S_GROUP_MADE=1
-    log "prepare-host: created the system group '${g}'."
-  fi
-  tb_root usermod -aG "$g" "$user" \
-    || error "prepare-host: couldn't add ${user} to the '${g}' group. Check 'sudo usermod -aG ${g} ${user}', then re-run."
-  line="$(getent group "$g" 2>/dev/null)" || line=""
-  log "prepare-host: ${user} is in '${g}' (members: ${line##*:})."
-  warn "Members of the ${g} group can administer k3s on this machine: ${line##*:}."
-}
-
-# _native_k3s_check_prepared_grant -- prepared mode: k3s.yaml must be root's, group
-# TB_K3S_PREPARED_GROUP, mode 0640, or the named user cannot read it. k3s sets the
-# mode and then the group, and a group it cannot set is only a line in its log
-# (pkg/server/server.go, v1.36.3+k3s1), so the grant is read back, and anything else
-# fails the run.
-_native_k3s_check_prepared_grant() {
-  local have want="root:${TB_K3S_PREPARED_GROUP} 640"
-  # --print: nothing ran, so there is nothing to wait for or read back.
-  if tb_root_planning; then return 0; fi
-  have="$(tb_root stat -c '%U:%G %a' "$TB_K3S_KUBECONFIG_PATH" 2>/dev/null)" || have=""
-  [[ "$have" == "$want" ]] \
-    || error "native k3s: ${TB_K3S_KUBECONFIG_PATH} is '${have:-unreadable}' (owner:group mode), not '${want}', so ${TB_RECORD_FOR_USER:-the named user} cannot read it. 'sudo journalctl -u k3s | grep -i kubeconfig' says why; it's safe to re-run prepare-host."
-  log "native k3s: ${TB_K3S_KUBECONFIG_PATH} is ${have}."
-}
-
-# _native_k3s_check_user_record USER HOME -- USER's own record must be there and
-# list k3s-install: their Tier 0 install adopts the host by it. Record writes are
-# best-effort, so prepare-host reads the copy back, as USER.
-_native_k3s_check_user_record() {
-  local dst="${2}${TB_RECORD_USER_PATH#\~}" body
-  # --print: nothing ran, so there is nothing to wait for or read back.
-  if tb_root_planning; then return 0; fi
-  body="$(_tb_record_as_user "$1" cat "$dst" 2>/dev/null)" || body=""
-  case "$body" in
-    *'"kind": "k3s-install"'*) log "prepare-host: ${1}'s install record ${dst} lists k3s-install." ;;
-    *) error "prepare-host: k3s is set up, but ${1}'s install record ${dst} could not be written, and their install adopts k3s by it. Check that 'sudo -u ${1} true' works, then re-run prepare-host." ;;
-  esac
-}
-
-# _native_k3s_prepare_host USER -- prepare-host on native k3s: an
-# administrator sets k3s up once FOR the daily user USER, who then installs tracebloc
-# with no administrator rights. It refuses before anything is written unless USER is
-# a user of this machine other than root, with a home, whose own data does not say
-# they run tracebloc on k3d (refuse_k3d_for_user, D10). It runs step b's privileged
-# half and the whole of step c as the administrator, with k3s.yaml and config.yaml
-# granted to the prepared group (mode 0640) and USER added to it first, and writes
-# USER's two records: their own copy, as them, and the root copy. It never installs
-# helm or the tracebloc release, never mints a credential, and never touches the
-# administrator's kubeconfig or record.
-_native_k3s_prepare_host() {
-  local user="${1:-}" pw home made=false
-  [[ -n "$user" ]] \
-    || error "prepare-host on native k3s sets k3s up for one named user, and none was named. Name them: export TRACEBLOC_PREPARE_USER=<their-username>, then re-run prepare-host."
-  pw="$(getent passwd "$user" 2>/dev/null)" || pw=""
-  [[ -n "$pw" ]] \
-    || error "prepare-host: '${user}' is not a user on this machine (getent passwd ${user}). Name the user who will run tracebloc, then re-run."
-  [[ "$user" != root && "$(printf '%s' "$pw" | cut -d: -f3)" != 0 ]] \
-    || error "prepare-host sets k3s up for a daily user, never for root, and '${user}' is root (uid 0). Name the user who will run tracebloc."
-  home="$(printf '%s' "$pw" | cut -d: -f6)"
-  [[ "$home" == /* && -d "$home" ]] \
-    || error "prepare-host: ${user}'s home directory '${home}' does not exist, and their install record goes there. Create it, then re-run prepare-host."
-  _native_k3s_refuse_host
-  # The data dir is the named user's: the record names it, and the leftover guard
-  # scans it. An administrator's own default is never theirs; a data dir the
-  # administrator chose stays their choice of where the volumes live.
-  if [[ -z "$(_native_k3s_storage_choice)" ]]; then
-    TB_HOST_DATA_DIR_DEFAULT="${home}/.tracebloc"
-    HOST_DATA_DIR="$TB_HOST_DATA_DIR_DEFAULT"
-  fi
-  # Data found there is the named user's, and prepare-host never deletes it: the
-  # leftover guard lists it and offers no wipe (cluster.sh), and --wipe-data is
-  # refused here, before anything is written.
-  [[ "${TB_LEFTOVER_ACTION:-}" != wipe ]] \
-    || error "prepare-host never wipes data, and --wipe-data asks it to: tracebloc data in ${HOST_DATA_DIR} is ${user}'s. ${user} removes it with 'tracebloc delete', or you keep it with --reuse-data; then re-run prepare-host."
-
-  step_header a 1 "Preparing this host for ${user} on native k3s (one-time administrator step)"
-  # A corporate CA, trusted before the first download (as main() does for an install).
-  if declare -F wire_ca_trust >/dev/null 2>&1; then wire_ca_trust; fi
-  # shellcheck disable=SC2034  # consumed cross-file (common.sh's root copy, diagnose.sh)
-  INSTALL_TIER=2
-  # shellcheck disable=SC2034  # consumed cross-file by diagnose.sh
-  INSTALL_TIER_REASON="native-k3s"
-  # USER's own files are read as USER, so the password comes first; the k3d check
-  # runs before step a writes anything.
-  preflight_sudo "set up k3s for ${user}"
-  declare -F refuse_k3d_for_user >/dev/null 2>&1 \
-    || error "This installer build can't check whether ${user} runs tracebloc on k3d (stale bootstrap), and native k3s is never set up beside it. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
-  refuse_k3d_for_user "$user" "$home"
-  _native_k3s_host_prereqs "set up k3s for ${user}"
-  _native_k3s_prepared_group "$user"
-  tb_record_for_user "$user" "$home" \
-    || error "prepare-host: couldn't make a private directory to build ${user}'s install record in."
-  # shellcheck disable=SC2034  # consumed cross-file by common.sh's tb_record_write
-  TRACEBLOC_RECORD_ARMED=1
-  TB_K3S_PREPARED=1
-  # The group, recorded in both of USER's records as soon as they are armed, before
-  # k3s. created_by_prepare_host is true only when this run's
-  # groupadd made it; a group found already there is false, so delete removes only
-  # USER's membership and never a group it cannot prove tracebloc made. An earlier
-  # record's line is kept as it is (the writer keys on kind + id + path), so one
-  # that said true stays true. A schema without the kind refuses it by name.
-  if [[ "${TB_K3S_GROUP_MADE:-}" == 1 ]]; then made=true; fi
-  tb_record_write group "$TB_K3S_PREPARED_GROUP" "" "created_by_prepare_host=${made}"
-  # The NVIDIA GPU's root half, before k3s first starts, as step b runs it on the
-  # full path: the floor, the driver, the toolkit and a CDI spec. The gate runs once
-  # the node is Ready (_native_k3s_prepared_finish).
-  detect_gpu
-  if [[ "${GPU_VENDOR:-}" == nvidia ]]; then _nvidia_gpu_setup; fi
-  _native_k3s_create_cluster
-  tb_record_write
-  _native_k3s_check_user_record "$user" "$home"
-
-  echo ""
-  success "Host prepared: k3s is running, and ${user} can install tracebloc with no administrator rights."
-  if _gpu_wired; then info "The NVIDIA GPU is set up for k3s; ${user}'s install counts the GPUs."; fi
-  info "After a fresh login (so the ${TB_K3S_PREPARED_GROUP} group applies), ${user} runs:"
-  echo "    curl -fsSL https://tracebloc.io/i.sh | bash"
-  return 0
 }
