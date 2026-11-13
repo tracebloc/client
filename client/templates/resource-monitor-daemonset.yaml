@@ -232,11 +232,9 @@ spec:
             # The monitor queries workloads in the release namespace, not its
             # own node-agents namespace — use the release namespace literal
             # rather than the Downward API pod namespace.
-            {{- /* Canonical TRACEBLOC_ names only (TRACEBLOC_NAMESPACE,
-                 TRACEBLOC_CLIENT_ID, TRACEBLOC_CLIENT_PASSWORD), the names the
-                 monitor reads. The credential env names read the CANONICAL key
-                 of the node-agents mirror, the only key secrets.yaml writes
-                 there. */}}
+            {{- /* TRACEBLOC_NAMESPACE, the canonical name the monitor reads. No
+                 client login: the heartbeat goes through the egress gate, which
+                 signs in itself (tests/monitors_hold_no_login_test.yaml). */}}
             - name: TRACEBLOC_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: TRACEBLOC_MONITOR_INTERVAL
@@ -255,16 +253,6 @@ spec:
             {{- $clientEnv := include "tracebloc.clientEnv" . }}
             - name: TRACEBLOC_ENV
               value: {{ $clientEnv | quote }}
-            - name: TRACEBLOC_CLIENT_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "tracebloc.secretName" . }}
-                  key: TRACEBLOC_CLIENT_ID
-            - name: TRACEBLOC_CLIENT_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "tracebloc.secretName" . }}
-                  key: TRACEBLOC_CLIENT_PASSWORD
             {{- /* Corporate egress proxy: resource-monitor
                  was the only backend-calling workload without proxyEnv, so its
                  auth/heartbeat POSTs dialed direct and failed behind a proxy.

@@ -1145,19 +1145,9 @@ spec:
         env:
         {{- include "tracebloc.proxyEnv" . | nindent 8 }}
         {{- include "tracebloc.telemetryOptOutEnvUnlessPassthrough" . | nindent 8 }}
-        {{- /* The client identity under its canonical names, TRACEBLOC_CLIENT_ID /
-             TRACEBLOC_CLIENT_PASSWORD, the names jobs-manager reads. Both read
-             the CANONICAL Secret key, the only key secrets.yaml writes. */}}
-        - name: TRACEBLOC_CLIENT_ID
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "tracebloc.secretName" . }}
-              key: TRACEBLOC_CLIENT_ID
-        - name: TRACEBLOC_CLIENT_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "tracebloc.secretName" . }}
-              key: TRACEBLOC_CLIENT_PASSWORD
+        {{- /* No client login here: pods-monitor sends only through the egress
+             gate, which signs in itself. Its passthrough below drops both login
+             names too; tests/monitors_hold_no_login_test.yaml holds both. */}}
         - name: TRACEBLOC_CLIENT_LOGS_PVC
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
         # The egress gate, which pods-monitor's messages to tracebloc go through.
@@ -1219,7 +1209,7 @@ spec:
         - name: TRACEBLOC_SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "TRACEBLOC_RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "TRACEBLOC_RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "TRACEBLOC_RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "TRACEBLOC_GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "TRACEBLOC_GPU_LIMITS") (ne $key "INFERENCE_RESOURCE_REQUESTS") (ne $key "TRACEBLOC_INFERENCE_RESOURCE_REQUESTS") (ne $key "INFERENCE_RESOURCE_LIMITS") (ne $key "TRACEBLOC_INFERENCE_RESOURCE_LIMITS") (ne $key "INFERENCE_GPU_REQUESTS") (ne $key "TRACEBLOC_INFERENCE_GPU_REQUESTS") (ne $key "INFERENCE_GPU_LIMITS") (ne $key "TRACEBLOC_INFERENCE_GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "TRACEBLOC_RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "TRACEBLOC_SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "TRACEBLOC_CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "TRACEBLOC_IMAGE_PULL_SECRET_NAME") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "TRACEBLOC_RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_LOCAL_API_ENABLED") (ne $key "TRACEBLOC_LOCAL_API_PORT") (ne $key "TRACEBLOC_LOCAL_API_PUBLIC_PORT") (ne $key "TRACEBLOC_STORAGE_MODE") (not (has $key $proxyKeys)) $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "TRACEBLOC_RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "TRACEBLOC_RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "TRACEBLOC_RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "TRACEBLOC_GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "TRACEBLOC_GPU_LIMITS") (ne $key "INFERENCE_RESOURCE_REQUESTS") (ne $key "TRACEBLOC_INFERENCE_RESOURCE_REQUESTS") (ne $key "INFERENCE_RESOURCE_LIMITS") (ne $key "TRACEBLOC_INFERENCE_RESOURCE_LIMITS") (ne $key "INFERENCE_GPU_REQUESTS") (ne $key "TRACEBLOC_INFERENCE_GPU_REQUESTS") (ne $key "INFERENCE_GPU_LIMITS") (ne $key "TRACEBLOC_INFERENCE_GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "TRACEBLOC_RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "TRACEBLOC_SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "TRACEBLOC_CLIENT_ID") (ne $key "CLIENT_PASSWORD") (ne $key "TRACEBLOC_CLIENT_PASSWORD") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "TRACEBLOC_IMAGE_PULL_SECRET_NAME") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "TRACEBLOC_RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_LOCAL_API_ENABLED") (ne $key "TRACEBLOC_LOCAL_API_PORT") (ne $key "TRACEBLOC_LOCAL_API_PUBLIC_PORT") (ne $key "TRACEBLOC_STORAGE_MODE") (not (has $key $proxyKeys)) $value }}
         {{- include "tracebloc.envPassthroughEntry" (dict "key" $key "value" $value "env" $.Values.env) | nindent 8 }}
         {{- end }}
         {{- end }}

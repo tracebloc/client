@@ -2,6 +2,33 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## pods-monitor and resource-monitor no longer hold the client's credential
+
+**What changed.** Both monitors send only through the outbound gate, which signs
+in with the client's credential itself, so the chart no longer gives them that
+credential:
+
+- pods-monitor and resource-monitor no longer get `TRACEBLOC_CLIENT_ID` or
+  `TRACEBLOC_CLIENT_PASSWORD`.
+- The copy of `<release>-secrets` in the node-agents namespace is gone; the
+  upgrade removes it. Only resource-monitor read it.
+- An `env.CLIENT_PASSWORD` or `env.TRACEBLOC_CLIENT_PASSWORD` value no longer
+  reaches pods-monitor, as `env.CLIENT_ID` already did not.
+
+jobs-manager and the outbound gate keep reading the credential from
+`<release>-secrets`.
+
+**What you have to do: nothing.** A monitor you pinned to an older build with
+`images.podsMonitor.digest` or `images.resourceMonitor.digest` still signs in
+itself, fails without the credential, and stops reporting. Clear the pin to run
+the build this chart names:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> \
+  --reset-then-reuse-values --set images.resourceMonitor.digest= \
+  --set images.podsMonitor.digest=
+```
+
 ## The outbound gate refuses what is not on the list, by default
 
 **What changed.** `egressGate.mode` is `enforce` by default. The outbound gate
