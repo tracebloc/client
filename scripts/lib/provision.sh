@@ -344,7 +344,8 @@ _report_create_failure() {
 # client whose namespace is NS? `client list` prints "…namespace=<ns>   location=…";
 # match that field exactly. Namespace is the only stable join key between a local
 # Helm release (which stores the UUID clientId + namespace) and the list (which
-# shows the numeric dashboard id + namespace) — the two don't share an id.
+# shows the numeric dashboard id + namespace) — the two don't share an id. A record
+# with an empty namespace is proven by _account_owns_client_id instead.
 # Returns: 0 = owned, 1 = list read OK but NS absent, 2 = couldn't read the list.
 # Split out so the pre-flight can distinguish "not yours" (refuse) from
 # "couldn't tell" (fall through to `client create`'s own idempotent logic).
@@ -353,6 +354,19 @@ _account_owns_namespace() {
   [[ -n "$ns" ]] || return 1
   out="$(tracebloc client list --plain 2>/dev/null)" || return 2
   grep -Eq "namespace=${ns}([[:space:]]|$)" <<<"$out"
+}
+
+# _account_owns_client_id ID — does the signed-in account's client list include a
+# client whose `username=` is ID? `client list --plain` ends each of the account's
+# own lines with "username=<id>", and that id is the in-cluster clientId, so it
+# proves ownership when the record's namespace is empty and cannot match.
+# An empty ID, or a line with an empty or missing `username=`, never matches.
+# Returns: 0 = owned, 1 = list read OK but ID absent, 2 = couldn't read the list.
+_account_owns_client_id() {
+  local id="$1" out
+  [[ -n "$id" ]] || return 1
+  out="$(tracebloc client list --plain 2>/dev/null)" || return 2
+  TRACEBLOC_OWN_ID="$id" awk '$NF == "username=" ENVIRON["TRACEBLOC_OWN_ID"] { f = 1 } END { exit f ? 0 : 1 }' <<<"$out"
 }
 
 # _show_create_notices FILE — print the parts of a successful `client create`'s
@@ -568,8 +582,14 @@ _provision_preflight_installed() {
       error "Refusing to provision without verifying what's already on this machine."
     fi
     if [[ -n "$INSTALLED_CLIENT_NS" ]]; then
-      local _own_rc=0
+      local _own_rc=0 _id_rc
       _account_owns_namespace "$INSTALLED_CLIENT_NS" || _own_rc=$?
+      # An empty-namespace record matches by client ID, never legacy `tracebloc` (its Helm name).
+      if [[ "$_own_rc" -eq 1 && "$INSTALLED_CLIENT_NS" != "tracebloc" ]]; then
+        _id_rc=0
+        _account_owns_client_id "$INSTALLED_CLIENT_ID" || _id_rc=$?
+        [[ "$_id_rc" -eq 1 ]] || _own_rc="$_id_rc"
+      fi
       # rc 1 = list read OK but the installed client's namespace is absent from the
       # account. That's only proof of a FOREIGN client for a slug namespace. A
       # client installed under the legacy fixed `tracebloc` namespace is listed on
