@@ -6,6 +6,35 @@ entries:
       tracebloc.io/next-kube-floor: 1.32.0
       tracebloc.io/next-kube-floor-date: "2026-11-26"
     apiVersion: v2
+    appVersion: 1.18.16
+    created: "2026-11-15T10:48:35Z"
+    description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
+    digest: 3688d31639f6ca48ea901ce497485dc7bbcca56c2ab2a7bfa3df56563c261896
+    home: https://github.com/tracebloc/client
+    keywords:
+    - tracebloc
+    - kubernetes
+    - machine-learning
+    - aks
+    - eks
+    - openshift
+    - bare-metal
+    kubeVersion: '>=1.24.0-0'
+    maintainers:
+    - name: Tracebloc Team
+      url: https://tracebloc.com
+    name: client
+    sources:
+    - https://github.com/tracebloc/client
+    type: application
+    urls:
+    - https://github.com/tracebloc/client/releases/download/v1.18.16/client-1.18.16.tgz
+    version: 1.18.16
+  - annotations:
+      category: Machine Learning
+      tracebloc.io/next-kube-floor: 1.32.0
+      tracebloc.io/next-kube-floor-date: "2026-11-26"
+    apiVersion: v2
     appVersion: 1.18.15
     created: "2026-11-14T19:18:58Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
@@ -6081,4 +6110,4 @@ entries:
     urls:
     - https://github.com/tracebloc/client/releases/download/v1.9.123/ingestor-0.2.0.tgz
     version: 0.2.0
-generated: "2026-11-14T19:27:33.89837985Z"
+generated: "2026-11-15T10:56:35.169327816Z"
