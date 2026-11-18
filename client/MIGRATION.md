@@ -2,6 +2,21 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## A training starts only through the outbound gate
+
+**What changed.** jobs-manager now gets `TRACEBLOC_REQUIRE_REQUESTS_PROXY=true`.
+A training that could not get its token for the outbound gate is refused and
+reported, instead of starting with the queue credentials in its own
+environment. The chart always runs the gate, so on a working client no
+training is refused.
+
+`env.TRACEBLOC_REQUIRE_REQUESTS_PROXY`, `env.TRACEBLOC_REQUESTS_PROXY_URL` and
+`env.REQUESTS_PROXY_URL` no longer reach jobs-manager: it always sends training
+through the chart's own gate.
+
+**What you have to do: nothing.** A jobs-manager build that predates the switch
+ignores it and runs as before.
+
 ## pods-monitor and resource-monitor no longer hold the client's credential
 
 **What changed.** Both monitors send only through the outbound gate, which signs

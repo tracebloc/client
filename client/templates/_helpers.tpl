@@ -1627,7 +1627,7 @@ Usage: {{ include "tracebloc.pinFor" (dict "image" "jobsManager" "root" $) }}
 {{- if $img.digest -}}
 {{- include "tracebloc.honouredPin" . -}}
 {{- else -}}
-{{- include "tracebloc.prodDefaultPin" . -}}
+{{- include "tracebloc.prodDefaultPin" . | default (include "tracebloc.monitorStampedDigest" .) -}}
 {{- end -}}
 {{- end -}}
 
@@ -2066,6 +2066,9 @@ rejects with InvalidImageName. The auto-upgrade SA that runs the upgrade `lookup
 already reads these workloads (its release-ns and node-agents Roles grant all
 verbs), so this adds no RBAC and cannot hit the bootstrap lockout.
 
+The monitors (podsMonitor, resourceMonitor) are the exception: a stamped
+`images.prodDigests` entry reaches effectivePin through tracebloc.pinFor, so it wins over this seed.
+
 Args: (dict "image" <jobsManager|podsMonitor|requestsProxy|resourceMonitor> "root" $)
 */}}
 {{- define "tracebloc.controlPlaneSeedDigest" -}}
@@ -2089,6 +2092,31 @@ Args: (dict "image" <jobsManager|podsMonitor|requestsProxy|resourceMonitor> "roo
 {{- if hasPrefix $prefix $live -}}
 {{- last (splitList "@" $live) -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.monitorStampedDigest — the digest the chart's stamped
+`images.prodDigests` map names for a MONITOR image (podsMonitor,
+resourceMonitor), whatever CLIENT_ENV is, when the map declares the registry this
+release pulls from. Empty for every other image, an empty map or a registry
+mismatch, so those keep the live-spec seed.
+
+The monitors are stateless senders behind the egress gate, so an upgrade renders
+the chart's own digest and never the stale one the live spec carries: a stale
+monitor digest crash-loops and blocks image-refresh, which would otherwise be
+the only thing able to move it.
+
+Args: (dict "image" <image> "root" $)
+*/}}
+{{- define "tracebloc.monitorStampedDigest" -}}
+{{- if or (eq .image "podsMonitor") (eq .image "resourceMonitor") -}}
+{{- $images := default dict .root.Values.images -}}
+{{- $name := trimPrefix "tracebloc/" (include "tracebloc.controlPlaneRepository" .) -}}
+{{- $digest := get (default dict $images.prodDigests) $name | default "" -}}
+{{- if and $digest (include "tracebloc.pinRegistryHonoured" (dict "registry" ($images.prodDigestsRegistry | default "") "root" .root)) -}}
+{{- $digest -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
