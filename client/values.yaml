@@ -3430,6 +3430,10 @@ egressGate:
   # enforce refuses the pooled preprocessing statistics of a federated training,
   # so that training stops at its first cycle.
   mode: enforce
+  # Whether the gate sends a training's compute-usage records to the tracebloc
+  # API over HTTPS, under this client's login, instead of the Service Bus queue.
+  # Off by default; turn it on only when the platform accepts records there.
+  flopsHttp: false
   record:
     # The `record` container serves the record read-only, to the owner, through
     # the Kubernetes API's service proxy. Idle unless the owner reads it, so it
