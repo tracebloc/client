@@ -462,8 +462,8 @@ _macos_vm_mem_gb() {
   safe_floor=$(( PF_MIN_MEM_GB + 1 ))
   (( floor_gb > safe_floor )) && safe_floor=$floor_gb
   cap=$(( phys - PF_OS_RESERVE_GB ))
-  if [[ "${PF_WARN_MEM_GB:-}" =~ ^[0-9]+$ ]] && (( PF_WARN_MEM_GB > safe_floor )) && (( cap >= PF_WARN_MEM_GB )); then
-    safe_floor=$PF_WARN_MEM_GB
+  if [[ "${PF_WARN_MEM_GB:-}" =~ ^[0-9]+$ ]] && (( 10#$PF_WARN_MEM_GB > safe_floor )) && (( cap >= 10#$PF_WARN_MEM_GB )); then
+    safe_floor=$(( 10#$PF_WARN_MEM_GB ))
   fi
   (( budget < safe_floor )) && budget=$safe_floor
   (( budget > cap )) && budget=$cap

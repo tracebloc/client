@@ -97,7 +97,7 @@ _tb_wait_auto_upgrade_job() {
   [[ -n "$_listed" ]] || { log "auto-upgrade Jobs in '$_ns' could not be listed."; return 1; }
   read -r _name _dl <<<"$_out" || true
   [[ -n "$_name" ]] || return 0
-  [[ "$_dl" =~ ^[0-9]+$ ]] || _dl=1500   # the chart's floor at the default upgrade timeout
+  [[ "$_dl" =~ ^[0-9]+$ ]] && _dl=$(( 10#$_dl )) || _dl=1500   # 10#: "08" is not octal; 1500 = the chart's floor
   _deadline=$(( SECONDS + _dl ))
   while [[ -n "$_name" ]] && (( SECONDS < _deadline )); do
     if [[ -z "$_said" ]]; then
@@ -119,6 +119,44 @@ _tb_wait_auto_upgrade_job() {
     info "The auto-upgrade finished."
   fi
   return 0
+}
+
+# _tb_wait_namespace_terminated NS -- a namespace a previous delete left Terminating takes no
+# new objects, so helm's apply into it fails. Wait, bounded, for it to go; still there at the
+# deadline fails closed. Unreadable before any Terminating answer proceeds: helm reads the same API.
+_tb_wait_namespace_terminated() {
+  local _ns="$1" _phase="" _try _read="" _said="" _deadline
+  _TB_NS_WAITED=""   # set once a Terminating answer is seen: its objects are gone with it
+  local _wait="${TRACEBLOC_NS_TERMINATING_WAIT_S:-300}" _poll="${TRACEBLOC_NS_TERMINATING_POLL_S:-5}"
+  [[ "$_wait" =~ ^[0-9]+$ ]] && _wait=$(( 10#$_wait )) || _wait=300   # 10#: "08" is not octal
+  [[ "$_poll" =~ ^[0-9]+$ ]] && _poll=$(( 10#$_poll )) || _poll=5
+  _deadline=$(( SECONDS + _wait ))
+  while :; do
+    _read=""
+    for _try in 1 2 3; do
+      if _phase="$(_bounded 20 kubectl get namespace "$_ns" --ignore-not-found \
+        --request-timeout=15s -o 'jsonpath={.status.phase}' 2>>"${LOG_FILE:-/dev/null}")"; then _read=1; break; fi
+      (( _try < 3 )) && sleep "$_poll"
+    done
+    if [[ -z "$_read" && -z "$_said" ]]; then
+      log "namespace '$_ns' could not be read; going on to the apply, which reads the same API."
+      return 0
+    fi
+    if [[ -n "$_read" && "$_phase" != Terminating ]]; then
+      [[ -n "$_said" ]] && info "The previous removal finished."
+      return 0
+    fi
+    if [[ -z "$_said" ]]; then
+      info "The previous removal of this secure environment is still finishing; waiting for it (at most ${_wait}s)…"
+      log "namespace '$_ns' is Terminating; waiting up to ${_wait}s before the apply."
+      _said=1 _TB_NS_WAITED=1
+    fi
+    (( SECONDS < _deadline )) || break
+    sleep "$_poll"
+  done
+  hint "Namespace '$_ns' is still being deleted by an earlier removal. Wait a few minutes, then re-run."
+  hint "To see what holds it (its finalizers):  $(tb_kubectl_shown) get namespace $_ns -o yaml"
+  error "Installation stopped: the previous removal has not finished after ${_wait}s. Check the log for details: ${LOG_FILE:-}"
 }
 
 # _tb_helm_deadline_s MINUTES -- print spin's deadline, in seconds, for a helm call run
@@ -417,6 +455,11 @@ _reconcile_override_args() {
   _TB_RECONCILE_ARGS+=(${_TB_MAC_RUNNER_ARGS[@]+"${_TB_MAC_RUNNER_ARGS[@]}"})
 }
 
+# _adopted_client_release -- print "RELEASE NAMESPACE" of the first live client release, if any.
+_adopted_client_release() {
+  helm list -A --deployed --failed --pending --uninstalling 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2; exit }'
+}
+
 # _reconcile_adopted_client — adopt path. provision_client (Step 3)
 # sets TRACEBLOC_CLIENT_ADOPTED=1 when `tracebloc client create` matched this cluster
 # to an EXISTING client on the account (get-or-create keyed on the cluster). Adopt
@@ -433,10 +476,14 @@ _reconcile_adopted_client() {
   # guard does — the full deployed/failed/pending-*/uninstalling set, so a
   # release wedged by a killed helm op is discovered instead of adopt falling through
   # to a password prompt it can't satisfy. One client per machine, so take the first.
-  local _rel="" _ns="" _r _n
-  while read -r _r _n; do
-    [[ -n "$_r" ]] && { _rel="$_r"; _ns="$_n"; break; }
-  done < <(helm list -A --deployed --failed --pending --uninstalling 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
+  local _rel="" _ns=""
+  read -r _rel _ns < <(_adopted_client_release) || true
+  if [[ -n "$_rel" ]]; then
+    # Before the engine reads below: a removal still finishing leaves Secrets gone, PVCs held.
+    # Once it finishes the release is gone with its namespace, so ask again: a normal connect installs.
+    _tb_wait_namespace_terminated "$_ns"
+    [[ -z "$_TB_NS_WAITED" ]] || { _rel="" _ns=""; read -r _rel _ns < <(_adopted_client_release) || true; }
+  fi
   if [[ -z "$_rel" ]]; then
     warn "This secure environment is already registered, but no live tracebloc release was found here to reconcile — continuing with a normal connect."
     return 1

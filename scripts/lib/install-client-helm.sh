@@ -675,6 +675,9 @@ _client_helm_prepare_apply() {
   # kube-apiserver from hanging the install forever.
   _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
 
+  # The dev-mode path reaches here with no earlier wait; on the others this is one read.
+  _tb_wait_namespace_terminated "$namespace"
+
   # clear any pending-* wedge left by a previously killed helm op (Ctrl-C,
   # OOM, reboot) before we upgrade — otherwise this run just fails with "another
   # operation is in progress" (exit 1) and the machine stays wedged across every
@@ -823,6 +826,9 @@ install_client_helm() {
   # invent one. It's just the local k8s namespace / Helm release name.
   # Advanced / GitOps setups can override with namespace=<name>.
   namespace=$(_client_default_namespace)
+  # Before anything reads the namespace: a removal still finishing has emptied its Secrets
+  # but not its PVCs, so the reads and the chart's lookups below would see a half-gone install.
+  _tb_wait_namespace_terminated "$namespace"
 
   # Native k3s: an installed release keeps the storage it was made with, before the
   # reconcile and the values below read TB_STORAGE_MODE.
