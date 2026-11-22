@@ -51,6 +51,10 @@ spec:
         runAsUser: 100
         seccompProfile:
           type: RuntimeDefault
+        {{- /* training-labelled: runs at the release's MCS level when confined */}}
+        {{- with include "tracebloc.seLinuxLevel" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
       containers:
         - name: probe
           image: {{ include "tracebloc.image" (dict "repository" "curlimages/curl" "tag" "8.20.0" "digest" "sha256:b3f1fb2a51d923260350d21b8654bbc607164a987e2f7c84a0ac199a67df812a" "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
