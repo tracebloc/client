@@ -1,6 +1,6 @@
 #!/bin/sh
-# PROVENANCE source: https://raw.githubusercontent.com/k3s-io/k3s/v1.36.5+k3s1/install.sh
-# PROVENANCE tag: v1.36.5+k3s1
+# PROVENANCE source: https://raw.githubusercontent.com/k3s-io/k3s/v1.36.6+k3s1/install.sh
+# PROVENANCE tag: v1.36.6+k3s1
 # PROVENANCE sha256: 46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad
 # Shipped with the installer and run by it: native k3s's step 3
 # runs line 1 and everything below END PROVENANCE, after checking their sha256

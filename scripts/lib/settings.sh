@@ -266,7 +266,7 @@ TB_STORAGE_MODE="${TB_STORAGE_MODE:-node-local}"
 # Pinned default; an empty value falls back to this pin (`:-` treats empty and
 # unset the same — there is no opt-out to "latest" for k3s).
 if [[ -n "${TRACEBLOC_K8S_VERSION:-}" ]]; then K8S_VERSION="$TRACEBLOC_K8S_VERSION"; fi
-K8S_VERSION="${K8S_VERSION:-v1.36.5-k3s1}"
+K8S_VERSION="${K8S_VERSION:-v1.36.6-k3s1}"
 # Native k3s: the digests k3s.sh checks its downloads against, and
 # the K8S_VERSION they were resolved for (facts.env K3S_BIN_SHA256_* /
 # K3S_INSTALL_SH_SHA256 and K8S_VERSION, stamped by check-facts.sh --write). Stamped
@@ -277,18 +277,18 @@ K8S_VERSION="${K8S_VERSION:-v1.36.5-k3s1}"
 # (k3s.sh::_native_k3s_check_version). No TRACEBLOC_* override on any of the four:
 # a digest from the environment could vouch for a download it was never resolved for.
 # shellcheck disable=SC2034  # consumed cross-file by k3s.sh
-TB_K3S_PIN_K8S_VERSION="v1.36.5-k3s1"
+TB_K3S_PIN_K8S_VERSION="v1.36.6-k3s1"
 # shellcheck disable=SC2034  # consumed cross-file by k3s.sh
-TB_K3S_BIN_SHA256_AMD64="d73847bcd3c5fccef0115b372e2f9a91f3032dc84bbf71518a4617565294d313"
+TB_K3S_BIN_SHA256_AMD64="66ceb8e67edfa547195135d74783bfadc2ecc04a91059e90ae5f70a3dbc98c15"
 # shellcheck disable=SC2034  # consumed cross-file by k3s.sh
-TB_K3S_BIN_SHA256_ARM64="135e34cb9e8a1cfae3cb55577789e93501efe7edc080a8b2630458a85b07721e"
+TB_K3S_BIN_SHA256_ARM64="49dcecdb4f64f5e92bdc52d204d407fb39729e492f09074488125ee58b6f2895"
 # shellcheck disable=SC2034  # consumed cross-file by k3s.sh
 TB_K3S_INSTALL_SH_SHA256="46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad"
 # The k3s node image the macOS node pulls, by its linux/arm64 manifest digest at the pinned
 # K8S_VERSION (facts.env K3S_IMAGE_ARM64_DIGEST; the image is k3s.sh's
 # _native_k3s_image_ref). No TRACEBLOC_* override, for the same reason.
 # shellcheck disable=SC2034  # read by the macOS node from 2.1 part 3b
-TB_K3S_IMAGE_ARM64_DIGEST="sha256:4ceb591dd1e592b98b7c51ff3bdb7143914e1bee0677e7bf3c4f6addde2c93b3"
+TB_K3S_IMAGE_ARM64_DIGEST="sha256:6d654de9f73e36a5a7879c051349a6f43a7941f3552a2f2a00fa9087bd546b85"
 # Apple's `container` runtime for the macOS node: the release, the
 # package's digest and the Team ID that signs it (facts.env APPLE_CONTAINER_*, stamped
 # by check-facts.sh --write). Stamped here, not in mac-container.sh, for the reason the
