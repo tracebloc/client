@@ -352,15 +352,13 @@ _sanitize_workspace_name() {
 # Resolve the backend base URL the same way jobs-manager does
 # (client-runtime/controller.py: TRACEBLOC_ENV → backend), defaulting to prod.
 _backend_url() {
-  # Reduce aliases FIRST: a raw `staging` fell through to the
-  # prod branch, so verify_credentials() checked staging credentials against
-  # the production backend and reported them invalid.
-  # Bare call: tb_client_env reads the ambient TRACEBLOC_ENV, and the *)
-  # branch below is the prod-equivalent for any unset/unrecognised result.
-  case "$(tb_client_env)" in
-    dev) printf 'https://dev-api.tracebloc.io/' ;;
-    stg) printf 'https://stg-api.tracebloc.io/' ;;
-    *)   printf 'https://api.tracebloc.io/' ;;
+  # tb_client_env reduces aliases first and reads the ambient TRACEBLOC_ENV. Unset is
+  # prod; stg is mapped; any other stage is refused, never sent a credential on prod.
+  local stage; stage="$(tb_client_env)"
+  case "$stage" in
+    stg)     printf 'https://stg-api.tracebloc.io/' ;;
+    prod|'') printf 'https://api.tracebloc.io/' ;;
+    *)       printf '%s\n' "$(tb_stage_refusal "$stage")" >&2; return 1 ;;
   esac
 }
 
@@ -372,7 +370,8 @@ _backend_url() {
 verify_credentials() { { _tb_trace_off; } 2>/dev/null; _tb_untraced_verify_credentials "$@"; local _tb_rc=$?; _tb_trace_on; return "$_tb_rc"; }
 _tb_untraced_verify_credentials() {
   local client_id="$1" client_password="$2" backend code
-  backend="$(_backend_url)"
+  # A stage no mapping knows names no backend: nothing is sent, nothing is judged.
+  backend="$(_backend_url)" || { printf 'unverified'; return 0; }
   # SECURITY: never put the password on curl's argv — it would be world-readable
   # via `ps` / /proc/<pid>/cmdline for the request's lifetime, and tracebloc runs
   # on shared institutional/on-prem compute where a co-tenant could scrape it

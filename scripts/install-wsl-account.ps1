@@ -759,11 +759,27 @@ function Get-HostClientCredential {
   }
 }
 
+# A stage no mapping knows is refused before anything reads it, never sent on to prod:
+# the stages lib/settings.sh's tb_client_env and lib/credentials.sh's _backend_url name
+# (unset is prod), matched case for case as bash matches, and dev (any letter case)
+# by its retirement. tb_stage_refusal's words are its twins.
+$HostKnownStages = @('', 'stg', 'staging', 'prod', 'production')
+$HostRetiredStages = @('dev', 'development')
+function Assert-HostStageKnown {
+  $raw = "$env:TRACEBLOC_ENV"
+  if ($HostKnownStages -ccontains $raw) { return }
+  if ($HostRetiredStages -contains $raw.ToLowerInvariant()) {
+    Stop-Setup -What 'The dev environment was retired' -Next 'Use staging, then run the installer again:' -Command '$env:TRACEBLOC_ENV = "staging"' -Reason "TRACEBLOC_ENV=${raw}: the dev environment was retired; use staging (TRACEBLOC_ENV=staging)."
+  }
+  Stop-Setup -What 'TRACEBLOC_ENV names no tracebloc environment' -Next 'Use stg or prod, or leave it unset for prod, then run the installer again:' -Command '$env:TRACEBLOC_ENV = "staging"' -Reason "unrecognised TRACEBLOC_ENV '${raw}': use stg or prod (unset means prod)."
+}
+
 # The backend a Client ID belongs to, read from the verified installer tree, so it is
 # the one the distro's install asks: TRACEBLOC_ENV, reduced by
 # lib/settings.sh's tb_client_env and named by lib/credentials.sh's _backend_url,
-# each matched case for case as bash matches. $null when either table can't be read or
-# the address is not HTTPS: the pair is then left to the distro's check.
+# each matched case for case as bash matches. $null when either table can't be read,
+# the stage names no backend, or the address is not HTTPS: the pair is then left to the
+# distro's check, which refuses such a stage.
 function Get-HostBackendUrl {
   param([string]$CoreDir)
   try {
@@ -773,15 +789,22 @@ function Get-HostBackendUrl {
   $envFn = [regex]::Match($settings, '(?ms)^tb_client_env\(\) \{\r?\n.*?^\}').Value
   $urlFn = [regex]::Match($helm, '(?ms)^_backend_url\(\) \{\r?\n.*?^\}').Value
   $aliases = [regex]::Matches($envFn, "(?m)^    ([a-z]+)\) +printf '([a-z]+)' +;;")
-  $stages = [regex]::Matches($urlFn, "(?m)^    ([a-z]+)\) +printf '([^']*)' +;;")
-  $otherwise = [regex]::Matches($urlFn, "(?m)^    \*\) +printf '([^']*)' +;;")
-  if ($aliases.Count -eq 0 -or $stages.Count -eq 0 -or $otherwise.Count -ne 1) { return $null }
+  $stages = [regex]::Matches($urlFn, "(?m)^    ([a-z|']+)\) +printf '([^']*)' +;;")
+  # The table is read only when its default refuses: one that names a backend for a
+  # stage it does not know is not followed.
+  $refuses = [regex]::Matches($urlFn, "(?m)^    \*\) .*return 1 ;;")
+  if ($aliases.Count -eq 0 -or $stages.Count -eq 0 -or $refuses.Count -ne 1) { return $null }
   $raw = "$env:TRACEBLOC_ENV"
   $stage = $raw
   foreach ($m in $aliases) { if ($m.Groups[1].Value -ceq $raw) { $stage = $m.Groups[2].Value } }
-  $url = $otherwise[0].Groups[1].Value
-  foreach ($m in $stages) { if ($m.Groups[1].Value -ceq $stage) { $url = $m.Groups[2].Value } }
-  if (-not $url.StartsWith('https://', [StringComparison]::Ordinal)) { return $null }
+  $url = $null
+  foreach ($m in $stages) {
+    foreach ($alt in ($m.Groups[1].Value -split '\|')) {
+      $name = $(if ($alt -eq "''") { '' } else { $alt })
+      if ($name -ceq $stage) { $url = $m.Groups[2].Value }
+    }
+  }
+  if (-not $url -or -not $url.StartsWith('https://', [StringComparison]::Ordinal)) { return $null }
   return $url
 }
 

@@ -58,7 +58,7 @@
 #  must never print as "nothing to mirror" -- that is the bug this replaces.
 #
 #  USAGE
-#    scripts/list-images.sh [--env prod|stg|dev] [--chart <path-or-ref>] [-- <helm args>]
+#    scripts/list-images.sh [--env prod|stg] [--chart <path-or-ref>] [-- <helm args>]
 #
 #    # a real mirrored install, enumerated with the operator's own values:
 #    scripts/list-images.sh --env prod -- -f my-values.yaml --set global.imageRegistry=mirror.corp.example
@@ -99,8 +99,9 @@ done
 
 if [ "$ENV_TAG_EXPLICIT" -eq 1 ]; then
   case "$ENV_TAG" in
-    prod|stg|dev) ;;
-    *) echo "list-images: --env must be prod, stg or dev (got '$ENV_TAG')" >&2; exit 2 ;;
+    prod|stg) ;;
+    dev) echo "list-images: --env dev: the dev environment was retired; use staging (--env stg)" >&2; exit 2 ;;
+    *) echo "list-images: --env must be prod or stg (got '$ENV_TAG')" >&2; exit 2 ;;
   esac
 fi
 
@@ -273,7 +274,7 @@ if [ -z "$ENV_TAG" ]; then
   if [ -z "$rendered_env" ]; then
     echo "list-images: TRACEBLOC_ENV/CLIENT_ENV is absent from the render, so the training-image tag is UNKNOWN." >&2
     echo "  Refusing to guess: a wrong tag mirrors the wrong training set, which is the" >&2
-    echo "  failure this tool exists to prevent. Pass --env prod|stg|dev to state it." >&2
+    echo "  failure this tool exists to prevent. Pass --env prod|stg to state it." >&2
     exit 1
   fi
   ENV_TAG="$rendered_env"
@@ -285,8 +286,8 @@ elif [ -n "$rendered_env" ] && [ "$rendered_env" != "$ENV_TAG" ]; then
 fi
 
 case "$ENV_TAG" in
-  prod|stg|dev) ;;
-  *) echo "list-images: resolved environment '$ENV_TAG' is not one of prod|stg|dev." >&2; exit 1 ;;
+  prod|stg) ;;
+  *) echo "list-images: resolved environment '$ENV_TAG' is not one of prod|stg." >&2; exit 1 ;;
 esac
 
 # ---------------------------------------------------------------------------

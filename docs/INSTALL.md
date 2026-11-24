@@ -37,7 +37,7 @@ The standalone installer runs a **preflight** check that verifies this connectiv
 | `registry-1.docker.io` (Docker Hub) | k3s and busybox. Not the tracebloc-published images: the chart refuses Docker Hub for those from 1.9.218 (see below) |
 | `ghcr.io` (+ `pkg-containers.githubusercontent.com`, where GHCR redirects layer downloads) | the tracebloc control-plane images (jobs-manager, pods-monitor, resource-monitor, the outbound gate), the training images jobs-manager spawns and `mysql-client` — all the default since the GHCR migration — + the ingestor image. On a Mac that trains on its GPU, also the GPU engine: about 460 MB to download, about 1.7 GB on disk |
 | `gdmf.apple.com` | on a Mac that trains on its GPU: Apple's public list of macOS releases, which the runner reads to check that the Mac runs the current update of its macOS. **Not probed by preflight:** the runner reads it once it runs |
-| `api.tracebloc.io` (`dev-api`/`stg-api` for non-prod) | client credential check + the running client's platform connection |
+| `api.tracebloc.io` (`stg-api` for staging) | client credential check + the running client's platform connection |
 | `*.servicebus.windows.net` | Azure Service Bus, the experiment and results queues the running client's jobs-manager, pods-monitor and outbound gate connect to (AMQP over WebSockets on 443, so it honors the same HTTP proxy). **Not probed by preflight:** the namespace host is issued by the platform after the credential check, so a block here shows up only once the client is running, as experiments that never leave Pending (`tracebloc cluster doctor` checks the requests-proxy) |
 | `tracebloc.github.io` | the tracebloc Helm chart repository |
 | `tuf-repo-cdn.sigstore.dev` (+ `github.com` and `release-assets.githubusercontent.com`, where each release's chart and its signature are) | Sigstore's trust root, which the installer checks tracebloc's signatures against: its own files, and the chart it installs. **Not probed by preflight:** the chart check at the end of step 1 fetches them before anything changes, and stops naming a host it cannot reach |
@@ -93,7 +93,7 @@ set grows, and a count in prose would be wrong the first time it does.
 Pass anything after `--` straight through to Helm, so the list reflects the
 values you are actually installing with. **The training-image tag is taken from
 your values' `CLIENT_ENV`**, not from a default — pass your values file and the
-tags follow it. `--env dev|stg|prod` exists to enumerate a *different*
+tags follow it. `--env stg|prod` exists to enumerate a *different*
 environment than the values describe; if it disagrees with the rendered
 `CLIENT_ENV`, the script stops and says so rather than picking one, because a
 mismatch mirrors the wrong training set.

@@ -69,10 +69,10 @@ tb_resolve_tuning_aliases() {
 }
 tb_resolve_tuning_aliases
 
-# tb_client_env — TRACEBLOC_ENV reduced to the canonical dev|stg|prod.
+# tb_client_env — TRACEBLOC_ENV reduced to the canonical stg|prod.
 #
-# The chart, client-runtime and this installer all key on dev|stg|prod, while
-# values.schema.json documents development|staging|production as accepted
+# The chart, client-runtime and this installer all key on stg|prod, while
+# values.schema.json documents staging|production as accepted
 # aliases. Every consumer must reduce through here rather than matching the raw
 # value, because a `case`
 # that knows only dev|stg with a `*)` catch-all sends a documented alias to the
@@ -97,11 +97,43 @@ tb_client_env() {
     raw="${TRACEBLOC_ENV:-}"
   fi
   case "$raw" in
-    development) printf 'dev'  ;;
     staging)     printf 'stg'  ;;
     production)  printf 'prod' ;;
     *)           printf '%s' "$raw" ;;
   esac
+}
+
+# The dev environment is retired. Every stage mapping (_backend_url,
+# _pf_backend_host, _dashboard_url) knows stg and prod only, unset meaning prod,
+# and refuses anything else rather than fall through to prod.
+TB_RETIRED_ENV_MESSAGE="the dev environment was retired; use staging"
+# tb_env_retired [RAW] -- 0 when RAW (default: TRACEBLOC_ENV) names the dev
+# environment in any letter case: dev or development.
+tb_env_retired() {
+  local raw
+  if [ "$#" -ge 1 ]; then raw="$1"; else raw="${TRACEBLOC_ENV:-}"; fi
+  case "$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')" in
+    dev|development) return 0 ;;
+  esac
+  return 1
+}
+# tb_stage_refusal RAW -- the words a stage no mapping knows is refused with: the
+# retirement for dev, else the stages there are.
+tb_stage_refusal() {
+  if tb_env_retired "$1"; then
+    printf 'TRACEBLOC_ENV=%s: %s (TRACEBLOC_ENV=staging).' "$1" "$TB_RETIRED_ENV_MESSAGE"
+  else
+    printf "unrecognised TRACEBLOC_ENV '%s': use stg or prod (unset means prod)." "$1"
+  fi
+}
+# refuse_unknown_env -- end the run when TRACEBLOC_ENV names a stage no mapping knows,
+# the retired dev environment included, before any of them reads it.
+refuse_unknown_env() {
+  case "$(tb_client_env)" in
+    stg|prod|'') return 0 ;;
+  esac
+  TB_EXIT_REFUSED=1
+  error "$(tb_stage_refusal "${TRACEBLOC_ENV:-}")"
 }
 
 # _refuse_invalid_cluster_name NAME -- validate_config's refusal of a cluster name

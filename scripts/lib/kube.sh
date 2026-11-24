@@ -6,46 +6,20 @@
 #  kubectl and helm are shown with. Sourced by install-k8s.sh.
 # =============================================================================
 
-# The DASHBOARD for this environment — where a human goes to create a client,
-# read their credentials, or see whether it came online.
-#
-# Bugbot caught that this still hardcoded production at ten sites while
-# `_backend_url` was correctly env-aware — so a `TRACEBLOC_ENV=dev` install on Linux
-# or macOS still sent the operator to ai.tracebloc.io for credentials `dev-api`
-# then rejects. (The retired PowerShell core had been fixed first.)
-#
-# IT LIVES HERE, NOT IN install-client-helm.sh, and that placement is the whole
-# point. It was defined in install-client-helm.sh and
-# CALLED from summary.sh — sibling libraries where neither sources the other — so
-# summary.sh silently depended on a load order nothing enforced. Standalone (which
-# is exactly what summary.bats does) the four call sites rendered an EMPTY link:
-# `See it on your dashboard:` followed by nothing. That is WORSE than the bug
-# being fixed, because a wrong link a reader can recover from and a missing one
-# they cannot. settings.sh is sourced first by install-k8s.sh AND by the bats
-# load_lib, and it already holds `tb_client_env` — which this calls — so both
-# get it by construction rather than by accident.
-#
-# The hosts are the backend's OWN per-environment settings, not a guess:
-# DEVICE_VERIFICATION_URI / RESET_PASSWORD_URL in
-# xraybackend/settings/{dev,stg,prod}.py resolve to dev.tracebloc.io,
-# stg.tracebloc.io and ai.tracebloc.io. Same `tb_client_env` alias reduction and
-# the same unknown->prod fallback as `_backend_url`, so the two can never
-# disagree about which environment an install belongs to.
-#
-#   $1 = path under the dashboard (default "secure-environment"; pass "" for the bare host)
-#
-# The default is My Secure Environment, the page that shows this client and
-# whether it is connected. It was "clients" until the Clients page retired;
-# /clients now only redirects there.
+# The DASHBOARD for this environment: where a human creates a client, reads its
+# credentials and sees it come online. Lives here, not in install-client-helm.sh,
+# so summary.sh gets it from settings.sh's load order. Hosts mirror the backend's
+# stg/prod settings; stg and prod are mapped, any other stage is refused, as in `_backend_url`.
+#   $1 = path under the dashboard (default "secure-environment"; "" for the bare host)
 _dashboard_url() {
   local path="${1-secure-environment}" base
-  # Bare call: tb_client_env reads the ambient TRACEBLOC_ENV, and an
-  # unset/unrecognised result lands in the *) branch below the same way an
-  # explicit "prod" would.
-  case "$(tb_client_env)" in
-    dev) base='https://dev.tracebloc.io' ;;
-    stg) base='https://stg.tracebloc.io' ;;
-    *)   base='https://ai.tracebloc.io' ;;
+  # Bare call: tb_client_env reads the ambient TRACEBLOC_ENV. Unset is prod; any
+  # other stage is refused, never sent to the production dashboard.
+  local stage; stage="$(tb_client_env)"
+  case "$stage" in
+    stg)     base='https://stg.tracebloc.io' ;;
+    prod|'') base='https://ai.tracebloc.io' ;;
+    *)       printf '%s\n' "$(tb_stage_refusal "$stage")" >&2; return 1 ;;
   esac
   if [[ -n "$path" ]]; then printf '%s/%s' "$base" "$path"; else printf '%s' "$base"; fi
 }

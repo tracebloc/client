@@ -834,8 +834,6 @@ egressProxy:
   # client's pods reach the prod API and no other environment's host.
   # squid dstdomain syntax: a leading dot matches subdomains; a bare host is exact.
   allowlistByEnv:
-    dev:
-      - dev-api.tracebloc.io
     stg:
       - stg-api.tracebloc.io
     prod:
@@ -1307,7 +1305,7 @@ images:
   #                 reports a stale pin, and now also one the registry cannot
   #                 serve: `tracebloc.io/stale-pin-<image>=unpullable:<digest>`).
   #   ignored   otherwise -> the workload renders the channel tag, image-refresh
-  #                 (where it runs: dev and stg by default) re-pins it from the
+  #                 (where it runs: stg by default) re-pins it from the
   #                 LIVE registry on its first tick (an ignored pin is not a
   #                 fresh install), and `helm install/upgrade`
   #                 prints a NOTES warning naming the image, the pin's registry
@@ -1325,7 +1323,7 @@ images:
   # auto-upgrades timed out and rolled back against it. Now it floats instead.
   #
   # RECOMMENDED STATE: unpinned. Leave `digest` empty: on prod the chart's own
-  # map pins the image (images.prodDigests), and on dev and stg image-refresh
+  # map pins the image (images.prodDigests), and on stg image-refresh
   # pins the live digest from the registry the pods actually pull from (it
   # writes the record to the workload, never to values). Pin here only for a
   # deliberate reproducibility hold, and then ALWAYS resolve on and declare the
@@ -1368,13 +1366,13 @@ images:
   # exists but lacks a (task, arch) is a PROMOTION BUG, not a choice: the runtime
   # warns and spawns the floating tag for that one.
   #
-  # `pinned` -- "" (default) = AUTO: pin iff CLIENT_ENV resolves to prod, so dev
-  # and staging edges keep floating with zero per-edge action (they carry
+  # `pinned` -- "" (default) = AUTO: pin iff CLIENT_ENV resolves to prod, so
+  # staging edges keep floating with zero per-edge action (they carry
   # env.CLIENT_ENV in user-supplied values). true / false = explicit override for
   # canary edges and transition windows. Rendered as TRAINING_IMAGE_PINNED only
   # when set; absent means auto on the runtime side too. The map and
   # `capabilities` below are rendered only where this resolves to "pin", so a
-  # floating edge (dev/stg in auto, or pinned=false) renders neither.
+  # floating edge (stg in auto, or pinned=false) renders neither.
   #
   # `digestRegistry` -- the registry the map was RESOLVED on, a bare host
   # spelled exactly as images.traceblocRegistry / global.imageRegistry would
@@ -1464,7 +1462,7 @@ images:
   # staging engine for a pre-release, the prod engine for a release) replaces
   # it, so every published chart pins the engine of its own release. This one
   # is what a chart built from source carries.
-  # dev and staging edges (auto) render none of it and keep floating; so do
+  # staging edges (auto) render none of it and keep floating; so do
   # pinned=false, a mirror and another registry of the operator's (see
   # digestRegistry above).
   training:
@@ -1545,7 +1543,7 @@ images:
   #   * effective digest set   → `repository@digest`, imagePullPolicy=IfNotPresent
   #   * effective digest empty → `repository:tag`,    imagePullPolicy=Always
   #
-  # Non-prod (dev / staging) — floating, always-current:
+  # Non-prod (staging) — floating, always-current:
   #   * No effective digest → each ingestion Job is spawned by the floating
   #     `tag` with imagePullPolicy=Always. The kubelet resolves the tag's
   #     current digest on every spawn (a cheap manifest check; already-present
@@ -1611,9 +1609,8 @@ images:
 
     # -- PER-ENVIRONMENT CHANNELS
     #
-    # dev and staging edges track the internal channels published from the
-    # matching data-ingestors branch (`publish-images.yml`: develop -> :dev,
-    # staging -> :stg), so an ingestor change can be validated on a real edge
+    # staging edges track the internal channel published from the
+    # matching data-ingestors branch (`publish-images.yml`: staging -> :stg), so an ingestor change can be validated on a real edge
     # WITHOUT a production release. Before this, the ingestor image existed
     # only as a byproduct of a prod release, so testing one change cost a prod
     # PyPI publish plus an FR-gate override (2026-07-30).
@@ -1625,13 +1622,12 @@ images:
     #
     # These are unsigned internal images. Do not point a prod edge at them.
     #
-    # THESE THREE VALUES ARE MIRRORED as last-resort literals in the
+    # THESE VALUES ARE MIRRORED as last-resort literals in the
     # `tracebloc.ingestorTag` helper, for the `--reuse-values` replay where
     # this key is absent and no chart default is adopted. Bump `prod` here and
     # you must bump it there; ingestor_channel_tag_test.yaml pins both so a
     # half-done bump fails CI. Read that helper's comment before touching prod.
     channelTags:
-      dev: "dev"
       stg: "stg"
       # 0.12 line: the first line that runs every task the CLI submits --
       # FASTA folders (first in v0.11.1), multichannel images (v0.10.5),
@@ -1722,7 +1718,7 @@ images:
     # -- Whether `prodDigestServiceDb` applies on this edge. Default true, which means
     # "pin on prod only": it takes effect when the resolved CLIENT_ENV is "prod"
     # (that is, `env.CLIENT_ENV` unset or empty — the template defaults it to
-    # prod). Dev and staging installs carry `env.CLIENT_ENV: dev|stg` in their
+    # prod). Staging installs carry `env.CLIENT_ENV: stg` in their
     # user-supplied values, so they keep floating on `tag` with
     # imagePullPolicy=Always and are never frozen on a stale build.
     #
@@ -1787,7 +1783,7 @@ images:
   #                  AND prodDigestsRegistry == the registry this release pulls
   #                      from (tracebloc.tbRegistry, the same rule as every pin)
   #                  AND the map's value for the image is not empty
-  #   otherwise the map is not read: dev and staging edges float on :dev / :stg
+  #   otherwise the map is not read: staging edges float on :stg
   #   with the image-refresh CronJob, a mirror or docker.io edge floats as it
   #   does today, and no NOTES warning is printed (nobody set these values).
   #
@@ -2601,10 +2597,10 @@ autoUpgrade:
 #     | grep tracebloc.io/last-refreshed
 imageRefresh:
   # "" (default) = AUTO: OFF where the stage (tracebloc.clientEnv) resolves to
-  # prod, ON for dev and stg. A prod edge runs the control plane its chart
+  # prod, ON for stg. A prod edge runs the control plane its chart
   # version names (images.prodDigests) and never re-images it from a floating
   # tag between chart releases; a new build reaches it as the next chart release.
-  # dev and stg edges float on :dev / :stg and this CronJob keeps them current.
+  # stg edges float on :stg and this CronJob keeps them current.
   # true / false = explicit override on any stage. With it off, an image no pin
   # covers runs its tag with imagePullPolicy=Always (tracebloc.controlPlanePullPolicy).
   enabled: ""
@@ -2787,15 +2783,14 @@ perIngestionTables:
 
 # -- PER-ENVIRONMENT ROLLOUT for the gate above.
 #
-# On for dev. A run on a dev secure environment showed the whole D16 path: the backend
-# row carries physical_table, training reads the ds_<hex> table, and `tb data
+# A run on a secure environment with the gate on showed the whole D16 path: the
+# backend row carries physical_table, training reads the ds_<hex> table, and `tb data
 # delete` drops the table, the salt and the journal.
 #
 # Off for stg and prod: `tb data list` still names a dataset by its table, so
 # under the flag a user's dataset shows only as its ds_<hex> handle. stg is off
 # too because its journey checks what users see (data-list-parity was red on
 # every staging hop while stg was on), and that journey gates every promotion.
-# Prove the CLI fix on dev first.
 # TODO: turn stg, then prod, on once `tb data list` names ds_ tables.
 #
 # An ingestor older than data-ingestors v0.8.16 reports the dataset's --name
@@ -2806,7 +2801,6 @@ perIngestionTables:
 # has neither: the gate resolves off there and the render does not fail. The
 # auto-upgrade CronJob uses --reset-then-reuse-values, which picks the map up.
 perIngestionTablesByEnv:
-  dev: true
   stg: false
   prod: false
 
@@ -2872,7 +2866,7 @@ trainingResume:
   storage: 10Gi
 
 # What an install of each environment gets when trainingResume.enabled is unset:
-# on for dev, stg and prod. The evidence for prod is staging e2e
+# on for stg and prod. The evidence for prod is staging e2e
 # run 39488505748: a PyTorch cycle paused at epoch 3 resumed at epoch 4, so a
 # resume keeps the finished epochs. The engine checkpoints only PyTorch models;
 # sklearn, lifelines and scikit-survival models still restart the cycle on
@@ -2880,7 +2874,6 @@ trainingResume:
 # this records what a NEW install or upgrade of that environment renders, not
 # where every edge already is.
 trainingResumeEnabledByEnv:
-  dev: true
   stg: true
   prod: true
 
@@ -2913,7 +2906,7 @@ stopKindSignal:
 # DB's Service Bus strings). jobs-manager provisions the dedicated tb_credmgr
 # minting identity on startup and revokes each user when its Job ends.
 #
-# Flipped per environment, dev first; now ON for dev, stg and prod (see
+# Flipped per environment; now ON for stg and prod (see
 # perExperimentDbCredsByEnv below) since staging and prod have DROPped edgeuser —
 # a fresh install comes up on per-experiment credentials rather than the shared
 # path. Where an operator overrides it off, behaviour is the old shared-credential
@@ -2923,7 +2916,7 @@ stopKindSignal:
 # "unset" from "explicitly false" with `kindIs "invalid"`, so a literal
 # `false` here is an OPERATOR OVERRIDE that wins over every fleet default and
 # makes the map below dead. Measured: with `perExperimentDbCreds: false` left in
-# place, `dev` still rendered the gate off.
+# place, an environment whose map entry is true still rendered the gate off.
 perExperimentDbCreds:
 
 # -- PER-ENVIRONMENT ROLLOUT for the gate above.
@@ -2939,9 +2932,7 @@ perExperimentDbCreds:
 # upgrade or a fresh-datadir reinstall drops it, which puts the account mint back
 # on edgeuser: the account the ticket exists to retire, silently restored.
 #
-# `dev: true` records a posture already achieved: dev was fully retired on
-# 2026-08-26 (edgeuser DROPped and verified under a driven experiment). Safe to
-# default on, because `credmgrPassword` generates-and-persists when unset —
+# Safe to default on, because `credmgrPassword` generates-and-persists when unset —
 # measured, not assumed: `helm template --set perExperimentDbCreds=true` with no
 # companion secret renders clean.
 #
@@ -2962,7 +2953,6 @@ perExperimentDbCreds:
 # migration state lives in each edge's stored release values and its migration
 # ticket; do not read this as a claim that every existing edge is already there.
 perExperimentDbCredsByEnv:
-  dev: true
   stg: true
   prod: true
 
@@ -2993,7 +2983,6 @@ perExperimentDbCredsByEnv:
 narrowEdgeuser:
 
 narrowEdgeuserByEnv:
-  dev: true
   stg: true
   prod: true
 
@@ -3011,9 +3000,9 @@ narrowEdgeuserByEnv:
 # (tracebloc.assertDropEdgeuserIsSafe) and jobs-manager refuses it again at startup.
 #
 # Flipped per environment (dev first) only after narrowing has soaked on that
-# fleet. TRUE for every environment — dev, stg, prod:
+# fleet. TRUE for every environment — stg, prod:
 # narrowEdgeuser has been baked-on across all three for weeks, so edgeuser is
-# already USAGE-only and unused there — DROP is the clean finish. dev and stg were
+# already USAGE-only and unused there — DROP is the clean finish. stg was
 # verified retired live (telemetry edgeuser_present false, Part C) before prod, the
 # final flip. On prod DROP is a no-op on the 8.4 template edge (no edgeuser) and the
 # retirement step on any remaining 5.7 prod edge. UNSET override => the effective
@@ -3022,7 +3011,6 @@ narrowEdgeuserByEnv:
 dropEdgeuser:
 
 dropEdgeuserByEnv:
-  dev: true
   stg: true
   prod: true
 
@@ -3082,10 +3070,6 @@ ingestRunToken:
 # of its backend calls fails. So each fleet turns on when ITS ingestor carries it
 # and ITS backend serves the endpoint -- not before.
 #
-# dev: TRUE. dev floats on the :dev ingestor channel, which publishes from
-# data-ingestors `develop` and carries it, and the dev API serves
-# /ingest-token/.
-#
 # stg: TRUE. stg floats on the :stg channel, which publishes from
 # data-ingestors `staging` and carries it, and backend staging serves
 # /ingest-token/.
@@ -3098,7 +3082,6 @@ ingestRunToken:
 # had, and the render does not fail. Use --reset-then-reuse-values (Helm >= 3.14)
 # to pick up this map.
 ingestRunTokenByEnv:
-  dev: true
   stg: true
   prod: true
 
@@ -3114,7 +3097,7 @@ ingestRunTokenByEnv:
 # runs the mint, never which the scoped accounts hold.
 #
 # This is the LAST, prod-irreversible-adjacent step of the rollout. Baked ON for
-# dev, stg and prod (all three fleets retired) — but the baked default re-parents
+# stg and prod (both fleets retired) — but the baked default re-parents
 # ONLY a fresh or already-rotated edge (tracebloc.bakedRootRotationOn),
 # in lockstep with rotateMysqlRoot, so an existing un-rotated / blind edge falls
 # back to its current mint identity rather than wedging its render. An accessible
@@ -3140,7 +3123,6 @@ ingestRunTokenByEnv:
 bootstrapDbReparent:
 
 bootstrapDbReparentByEnv:
-  dev: true
   stg: true
   prod: true
 
@@ -3215,15 +3197,14 @@ bootstrapDbPassword: ""
 rotateMysqlRoot:
 
 rotateMysqlRootByEnv:
-  dev: true
   stg: true
   prod: true
 #
-# CLUSTER-LESS DEV NOTE. Because `dev` defaults rotation ON, a dev
+# CLUSTER-LESS NOTE. Because every environment defaults rotation ON, a
 # fleet rendered WITHOUT a live cluster — ArgoCD's default render, Flux
 # post-render, or a bare `helm template` for validation — hits the fail-closed
 # mint guard above (arm 3) and REFUSES. That is correct: such a render cannot
-# preserve the minted value, so it would re-randomise every sync. To render a dev
+# preserve the minted value, so it would re-randomise every sync. To render a
 # fleet cluster-less, either PIN mysqlRootPassword below (tier 1 — stable, and it
 # bypasses the mint guard) or render SERVER-SIDE (argocd-repo-server against the
 # live cluster). A live install/upgrade — the in-cluster auto-upgrade CronJob
@@ -3341,10 +3322,9 @@ mysqlDatadirExists:
 # keyed on the resolved CLIENT_ENV. Set this to force one answer on an edge.
 selfRotateMysqlRoot:
 
-# True for dev, stg and prod. The rollout flipped one environment at a time
-# (dev, then stg, then prod); set selfRotateMysqlRoot=false to hold one edge back.
+# True for stg and prod. The rollout flipped one environment at a time
+# (stg, then prod); set selfRotateMysqlRoot=false to hold one edge back.
 selfRotateMysqlRootByEnv:
-  dev: true
   stg: true
   prod: true
 

@@ -80,9 +80,9 @@ spec:
             - -c
             - |
               case "$TRACEBLOC_ENV" in
-                dev) HOST="dev-api.tracebloc.io" ;;
-                stg) HOST="stg-api.tracebloc.io" ;;
-                *)   HOST="api.tracebloc.io" ;;
+                stg)  HOST="stg-api.tracebloc.io" ;;
+                prod) HOST="api.tracebloc.io" ;;
+                *)    echo "FAIL  TRACEBLOC_ENV=$TRACEBLOC_ENV names no tracebloc backend; only stg and prod do."; exit 1 ;;
               esac
               echo "[egress-reachability-check] TRACEBLOC_ENV=$TRACEBLOC_ENV -> probing backend reachability to https://${HOST}/ (through the proxy if one is configured)..."
               # Key the verdict on curl's EXIT CODE, not the HTTP status. With no

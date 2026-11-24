@@ -675,12 +675,13 @@ _pf_runtime_mem_status() {
 _pf_backend_host() {
   # Same alias reduction as _backend_url — an egress preflight
   # that probes the wrong backend passes while the real path is unreachable.
-  # Bare call: tb_client_env reads the ambient TRACEBLOC_ENV, and the *)
-  # branch below is the prod-equivalent for any unset/unrecognised result.
-  case "$(tb_client_env)" in
-    dev) echo "dev-api.tracebloc.io" ;;
-    stg) echo "stg-api.tracebloc.io" ;;
-    *)   echo "api.tracebloc.io" ;;
+  # Bare call: tb_client_env reads the ambient TRACEBLOC_ENV. Unset is prod; any
+  # other stage is refused, never probed as prod.
+  local stage; stage="$(tb_client_env)"
+  case "$stage" in
+    stg)     echo "stg-api.tracebloc.io" ;;
+    prod|'') echo "api.tracebloc.io" ;;
+    *)       printf '%s\n' "$(tb_stage_refusal "$stage")" >&2; return 1 ;;
   esac
 }
 
@@ -1158,7 +1159,13 @@ _pf_connectivity() {
     return 0
   fi
   local backend_host cfail=0 tls_seen=0 c label rest url mode status
-  backend_host="$(_pf_backend_host)"
+  # A stage no mapping knows names no backend to probe: a hard fail, never prod's.
+  if ! backend_host="$(_pf_backend_host 2>/dev/null)"; then
+    _pf_detail _pf_fail_line "$(tb_stage_refusal "$(tb_client_env)")"
+    PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
+    _pf_detail hint "Set TRACEBLOC_ENV to stg or prod, or leave it unset for prod, then re-run."
+    return 0
+  fi
 
   # Critical: the install cannot succeed without these (image pulls, creds, chart).
   # Entries are "label|url" with an optional third "|strict" field.

@@ -218,6 +218,9 @@ _main_dispatch() {
   # tracebloc's WSL distro runs only as the Windows installer runs it: native k3s, and one
   # of its two runs (host.sh). Any other WSL distro is refused, whatever the substrate.
   refuse_wsl_run
+  # A stage no mapping knows (the retired dev environment among them) is refused
+  # here, before any path reads it.
+  refuse_unknown_env
   # A Mac below the floor is stopped here, first on every path and as its own
   # refusal: every Mac resolves k3s since 4.1, so
   # the D10 check below, which asks the macOS node's refusals, would reach it next.

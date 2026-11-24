@@ -415,7 +415,7 @@ telemetry_environment() {
     env="${TRACEBLOC_ENV:-prod}"
   fi
   case "$env" in
-    dev|stg|prod) printf '%s' "$env" ;;
+    stg|prod) printf '%s' "$env" ;;
     *)            return 1 ;;
   esac
 }

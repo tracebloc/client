@@ -297,7 +297,7 @@ substrate verification record.
 **Image durability note:** the jobs-manager on a fleet must
 run a client-runtime build carrying the HF-offline injection *before* the
 seal, or NLP templates fail by network block instead of the clean closed door.
-On a dev or staging edge the chart renders control-plane images as
+On a staging edge the chart renders control-plane images as
 `repository:tag` + `IfNotPresent`, and the `image-refresh` CronJob pins the live
 digest — resolved on the registry the pods actually pull from and written to the
 workload, never to values. **That unpinned state is the recommended one** there:
@@ -329,7 +329,7 @@ since chart 1.9.119 it **must carry the registry it was resolved on**
 resolved on; another registry may never have held them, and a pod told to pull
 a digest its registry does not have never starts. So a pin is honoured **only
 when `digestRegistry` equals the registry the release pulls from**; otherwise
-it is ignored — the workload renders the channel tag (on dev and staging
+it is ignored — the workload renders the channel tag (on staging
 `image-refresh` re-pins it from the live registry; on prod, where
 `image-refresh` is off, it moves when its pod restarts), and
 `helm install/upgrade` prints a NOTES warning
@@ -437,31 +437,12 @@ never treated as a pass.
   and placeholder credentials, so zero secrets and no backend; it runs only
   this hook via `helm test --filter` and fails when the hook fails. There is no
   skip path.
-- **The FULL suite vs the dev backend** — helm-ci's `full-seal-e2e` job
-  (`scripts/tests/e2e-full-seal.sh`, a deferred fast-follow):
-  installs the working-tree chart on native k3s **as the dedicated dev
-  `e2e-test-agent` client with real credentials** (`CLIENT_ENV=dev`), waits
-  for every release PVC to Bind and for jobs-manager to hold a real backend
-  session, then runs `helm test` **unfiltered** — `egress-enforcement` +
-  `backend-reachability` + `storage-assertions` in one release, with a
-  guard that all three hooks are present so a regated check can never
-  vanish silently. Push/`workflow_dispatch` only (never PRs), one run at a
-  time (the platform sees one agent session).
-
-  **Activation:** the job skips green with a `::notice` until the dev
-  platform has a dedicated `e2e-test-agent` client and the repo carries its
-  two Actions secrets — `TB_E2E_CLIENT_ID` / `TB_E2E_CLIENT_PASSWORD`. The
-  job hands each to the script as `TRACEBLOC_E2E_CLIENT_ID` /
-  `TRACEBLOC_E2E_CLIENT_PASSWORD`, the names it reads first (it still accepts
-  the older `TB_E2E_` spelling from a caller that sets it). The script never reads
-  `TRACEBLOC_CLIENT_ID`, so a real client credential in the caller's shell
-  cannot end up in the throwaway cluster.
-  Never use a real customer's or a person's shared dev identity (login
-  churn invalidates tokens — a known failure class). Record the
-  first green run here, with date + run link.
 
 ## What the suite does not cover (by design or elsewhere)
 
+- **All three hooks in one release against a live backend** — no CI job
+  installs the chart with real credentials and runs `helm test` unfiltered;
+  each hook runs on its own, as listed above.
 - **A single aggregated sealed/unsealed verdict with per-guarantee detail**
   — shipped in the tracebloc CLI on this label contract
   (tracebloc CLI v0.10.0); `helm test` remains the raw substrate.

@@ -51,7 +51,7 @@ _dashboard_link_mint() { { _tb_trace_off; } 2>/dev/null; _tb_untraced__dashboard
 _tb_untraced__dashboard_link_mint() {
   local client_id="${1:-}" client_password="${2:-}" backend body token scheme url
   [[ -n "$client_id" && -n "$client_password" ]] || return 0
-  backend="$(_backend_url)"
+  backend="$(_backend_url)" || return 0
   body="$(printf '%s' "$client_password" | curl_secure -sS -f -m 30 \
     --data-urlencode "username=${client_id}" \
     --data-urlencode "password@-" \

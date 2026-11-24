@@ -1021,6 +1021,8 @@ function Invoke-WslInstall {
   if ((Get-BootstrapUserSid) -eq $LocalSystemSid) {
     Stop-Setup -What "WSL doesn't run as the Windows SYSTEM account" -Next 'Run the installer as the person who signs in to this machine:' -Reason "This installer is running as the Windows SYSTEM account, which WSL does not support. tracebloc runs in the signed-in user's own WSL distro, so run the install command as that user. A deployment tool (Intune, Configuration Manager) has to run it in the user's context, not as SYSTEM."
   }
+  # A stage no mapping knows (section 5) is refused before anything reads it.
+  Assert-HostStageKnown
   Confirm-CoreDir -CoreDir $CoreDir
   # A client ID with no password: its password is asked for at this console, and the
   # pair checked, before anything is written (section 5).

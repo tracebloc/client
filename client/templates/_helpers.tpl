@@ -2827,13 +2827,16 @@ true
 {{- $source = "CLIENT_ENV" -}}
 {{- end -}}
 {{- $raw := $envVals.TRACEBLOC_ENV | default $envVals.CLIENT_ENV | default "prod" -}}
-{{- $aliases := dict "development" "dev" "staging" "stg" "production" "prod" -}}
+{{- if has (lower $raw) (list "dev" "development") -}}
+{{- fail (printf "env.%s: %q: the dev environment was retired; use staging (env.TRACEBLOC_ENV=stg)." $source $raw) -}}
+{{- end -}}
+{{- $aliases := dict "staging" "stg" "production" "prod" -}}
 {{- $resolved := $raw -}}
 {{- if hasKey $aliases $raw -}}
 {{- $resolved = get $aliases $raw -}}
 {{- end -}}
-{{- if not (has $resolved (list "dev" "stg" "prod")) -}}
-{{- fail (printf "env.%s: %q is not a recognized environment. Accepted: dev, stg, prod (canonical) or development, staging, production (aliases); empty/unset means prod. This value is the tag for the jobs-manager, pods-monitor and resource-monitor images, and it keys images.ingestor.channelTags, the per-environment gate defaults and the prod digest pin -- an unrecognized value would pull unpublished tags, miss every one of those lookups and silently drop the pin. Note dev/stg are abbreviated: `develop` and `production` differ, and only the six listed spellings resolve." $source $raw) -}}
+{{- if not (has $resolved (list "stg" "prod")) -}}
+{{- fail (printf "env.%s: %q is not a recognized environment. Accepted: stg, prod (canonical) or staging, production (aliases); empty/unset means prod. This value is the tag for the jobs-manager, pods-monitor and resource-monitor images, and it keys images.ingestor.channelTags, the per-environment gate defaults and the prod digest pin -- an unrecognized value would pull unpublished tags, miss every one of those lookups and silently drop the pin. Note stg is abbreviated: only the four listed spellings resolve." $source $raw) -}}
 {{- end -}}
 {{- $resolved -}}
 {{- end }}
@@ -2883,7 +2886,7 @@ true
 {{- if $channel -}}
 {{- $channel -}}
 {{- else -}}
-{{- $fallbacks := dict "dev" "dev" "stg" "stg" "prod" "0.12" -}}
+{{- $fallbacks := dict "stg" "stg" "prod" "0.12" -}}
 {{- get $fallbacks $clientEnv | default "0.12" -}}
 {{- end -}}
 {{- end -}}
@@ -3210,12 +3213,12 @@ enabled
 */}}
 {{- define "tracebloc.backendUrl" -}}
 {{- $env := include "tracebloc.clientEnv" . -}}
-{{- if eq $env "dev" -}}
-https://dev-api.tracebloc.io/
-{{- else if eq $env "stg" -}}
+{{- if eq $env "stg" -}}
 https://stg-api.tracebloc.io/
-{{- else -}}
+{{- else if eq $env "prod" -}}
 https://api.tracebloc.io/
+{{- else -}}
+{{- fail (printf "tracebloc.backendUrl: %q names no tracebloc backend; only stg and prod do." $env) -}}
 {{- end -}}
 {{- end -}}
 

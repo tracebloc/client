@@ -186,7 +186,7 @@ _assess_release_pending() {
   [[ -n "$_out" ]]
 }
 
-# _assess_release_client_env REL NS — echo the stage (dev|stg|prod) the release
+# _assess_release_client_env REL NS — echo the stage (stg|prod) the release
 # was installed for: its stored env.TRACEBLOC_ENV, else env.CLIENT_ENV, else prod,
 # reduced through tb_client_env as the chart's tracebloc.clientEnv does. Returns 1
 # when the values can't be read. Read-only and bounded.
@@ -218,7 +218,7 @@ _assess_release_client_env() {
 # verify_credentials asks the backend of THIS run's stage (the shell's
 # TRACEBLOC_ENV, default prod), and a `--reissue` would mint against
 # that same stage. So the probe only judges a release installed for that stage: a
-# dev or staging client re-checked from a shell without its env would read
+# staging client re-checked from a shell without its env would read
 # `invalid` on prod and have a working credential rotated.
 # _assess_credential_rejected runs with bash -x held off, the secret it holds out of the trace (output.sh);
 # _tb_untraced__assess_credential_rejected below is the function itself.
