@@ -183,6 +183,16 @@
           "type": "string",
           "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
           "description": "The canonical spelling of EMIT_OOM_RESCUE: the same closed vocabulary, and either spelling renders both env names, EMIT_OOM_RESCUE and TRACEBLOC_EMIT_OOM_RESCUE, on jobs-manager. See EMIT_OOM_RESCUE for what it does; the documented key stays EMIT_OOM_RESCUE."
+        },
+        "REPORT_USAGE": {
+          "type": "string",
+          "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
+          "description": "Usage metering switch, default off: pods-monitor's pod watcher cuts a usage record per container attempt (running time, CPU core-seconds used, hardware) and sends it through the egress gate. Truthy 1|true|yes (case-insensitive, whitespace-stripped). On a clusterScope install it also grants jobs-manager's ServiceAccount `get` on nodes/proxy, to read container CPU time from the kubelet stats summary. Rendered on pods-monitor only, as TRACEBLOC_REPORT_USAGE. Closed vocabulary, same reason as TRACEBLOC_DDP."
+        },
+        "TRACEBLOC_REPORT_USAGE": {
+          "type": "string",
+          "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
+          "description": "The canonical spelling of REPORT_USAGE: the same closed vocabulary; a non-empty value wins over REPORT_USAGE. See REPORT_USAGE for what it does; the documented key stays REPORT_USAGE."
         }
       },
       "additionalProperties": {

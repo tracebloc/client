@@ -218,6 +218,20 @@ env: {
   # same way.
   # EMIT_TOPOLOGY: "0"
   # EMIT_OOM_RESCUE: "0"
+  # -- Usage metering, OFF by default. Set, pods-monitor's pod watcher cuts a
+  #    usage record per container attempt (running time, CPU core-seconds used,
+  #    hardware) and sends it through the egress gate; nothing reads it to
+  #    charge, pause or refuse a run. Truthy 1, true, yes (case-insensitive,
+  #    whitespace-stripped). Rendered on pods-monitor only, as
+  #    TRACEBLOC_REPORT_USAGE; `env.TRACEBLOC_REPORT_USAGE` works too.
+  #    The egress gate carries the records while it is on (TRACEBLOC_EGRESS_GATE_USAGE_RECORDS).
+  #    On clusterScope: true it also grants the release ServiceAccount `get` on
+  #    nodes/proxy, to read each container's CPU time from the kubelet stats
+  #    summary. That verb reaches every kubelet API path on every node (pod
+  #    specs, container and node logs, metrics, config; on some clusters exec
+  #    over a WebSocket GET). On clusterScope: false it cannot be granted and
+  #    the record's CPU figure is null.
+  # REPORT_USAGE: "0"
   # -- Per-run LEASE for multi-GPU runs.
   #    jobs-manager applies it as the pod-level activeDeadlineSeconds ONLY
   #    when the resolved nvidia.com/gpu limit is above 1, min()'d with the fleet
@@ -792,7 +806,7 @@ sealCheck:
       # `registry` / global.imageRegistry never affect the match -- a registry-only
       # re-home keeps the pin.
       registry: "docker.io"
-      digest: "sha256:d9cb78be55e6e47c54e8a77bbf35ef87e98e5a03fbe5db7654d28bb78cc7d57e"
+      digest: "sha256:e2d95501b5718673ba67693154fabe6c618dbe1211a32947d6d5cf16285e019b"
       # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
       # default identity for the chart's own pin, your image for your own digest.
       digestFor: ""
@@ -2732,7 +2746,7 @@ imageRefresh:
     # `registry` / global.imageRegistry never affect the match -- a registry-only
     # re-home keeps the pin.
     registry: "docker.io"
-    digest: "sha256:d9cb78be55e6e47c54e8a77bbf35ef87e98e5a03fbe5db7654d28bb78cc7d57e"
+    digest: "sha256:e2d95501b5718673ba67693154fabe6c618dbe1211a32947d6d5cf16285e019b"
     # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
     # default identity for the chart's own pin, your image for your own digest.
     digestFor: ""

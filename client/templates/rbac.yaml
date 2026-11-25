@@ -114,6 +114,14 @@ rules:
     resources: ["secrets"]
     verbs: ["list", "delete", "patch"]
 {{- end }}
+{{- if (include "tracebloc.reportUsage" .) }}
+  # Usage records (env.REPORT_USAGE): pods-monitor reads each container's CPU
+  # time from the kubelet stats summary via the API server's node proxy. Broad:
+  # see REPORT_USAGE in values.yaml. Cluster-scoped, so the Role branch cannot.
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
+{{- end }}
 {{- if .Values.perDatasetPvcs }}
   # Per-dataset PVCs only:
   # jobs-manager provisions one static hostPath PV + pre-bound PVC per

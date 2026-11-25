@@ -1199,7 +1199,7 @@ sealCheck.storageAssertions.image:
   registry: docker.io
   repository: alpine/k8s
   tag: "1.36.6"
-  digest: "sha256:d9cb78be55e6e47c54e8a77bbf35ef87e98e5a03fbe5db7654d28bb78cc7d57e"
+  digest: "sha256:e2d95501b5718673ba67693154fabe6c618dbe1211a32947d6d5cf16285e019b"
   digestFor: "alpine/k8s:1.36.6"
 autoUpgrade.image:
   registry: docker.io
@@ -1217,7 +1217,7 @@ imageRefresh.image:
   registry: docker.io
   repository: alpine/k8s
   tag: "1.36.6"
-  digest: "sha256:d9cb78be55e6e47c54e8a77bbf35ef87e98e5a03fbe5db7654d28bb78cc7d57e"
+  digest: "sha256:e2d95501b5718673ba67693154fabe6c618dbe1211a32947d6d5cf16285e019b"
   digestFor: "alpine/k8s:1.36.6"
 gpu.devicePlugin.amd:
   registry: docker.io
@@ -3418,6 +3418,19 @@ only: the variables are new, so they have no legacy spelling.
 {{- end }}
 
 {{/*
+tracebloc.reportUsage -- "true" when the pod watcher is switched on to cut usage
+records: env.TRACEBLOC_REPORT_USAGE, else env.REPORT_USAGE, read as the passthrough
+renders it (a non-empty canonical wins) and as the runtime reads it (1|true|yes,
+case-insensitive, whitespace-stripped). Unset, empty or anything else is off.
+*/}}
+{{- define "tracebloc.reportUsage" -}}
+{{- $env := default dict .Values.env -}}
+{{- $v := get $env "TRACEBLOC_REPORT_USAGE" | toString -}}
+{{- if not $v -}}{{- $v = get $env "REPORT_USAGE" | toString -}}{{- end -}}
+{{- if has (lower (trim $v)) (list "1" "true" "yes") -}}true{{- end -}}
+{{- end -}}
+
+{{/*
 tracebloc.envPassthroughEntry -- ONE `.Values.env` passthrough entry for the
 jobs-manager containers, rendered under its TRACEBLOC_ canonical where the name
 has one.
@@ -3484,6 +3497,7 @@ derives the pairs from the render and fails on one missing here.
       "INGESTION_HTTP_PORT" "INGESTION_SUBMIT_MAX_BODY_BYTES" "SB_MAX_DELIVERY_COUNT" "POD_TOKEN_REQUIRE_BOUND_CLAIMS"
       "HOST_UID" "HOST_GID" "DATASET_SCOPED_MOUNTS" "LOGS_SCOPED_MOUNTS" "TELEMETRY_COLLECTOR_NAMESPACE"
       "GPU_UNSUPPORTED_REASON" "GPU_UNSUPPORTED_NAME" "GPU_UNSUPPORTED_CODE"
+      "REPORT_USAGE"
 -}}
 {{- $key := .key -}}
 {{- $legacy := "" -}}

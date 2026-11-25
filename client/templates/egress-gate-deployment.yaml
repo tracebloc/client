@@ -193,6 +193,10 @@ spec:
               value: {{ (default dict .Values.egressGate).mode | default "enforce" | quote }}
             - name: TRACEBLOC_EGRESS_GATE_FLOPS_HTTP
               value: {{ ternary "1" "0" ((default dict .Values.egressGate).flopsHttp | default false) | quote }}
+            {{- /* The pod watcher's usage records ride the gate only when the same switch that turns
+                 the watcher on (tracebloc.reportUsage) is on; the gate refuses the route otherwise. */}}
+            - name: TRACEBLOC_EGRESS_GATE_USAGE_RECORDS
+              value: {{ ternary "1" "0" (not (empty (include "tracebloc.reportUsage" .))) | quote }}
             - name: TRACEBLOC_EGRESS_RECORD_DIR
               value: "/var/lib/tracebloc/egress-record"
             - name: MYSQL_HOST
