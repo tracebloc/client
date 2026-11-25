@@ -1875,6 +1875,11 @@
       "type": "object",
       "description": "Self-upgrade CronJob. Polls the helm repo at autoUpgrade.repoUrl daily and runs `helm upgrade --reuse-values` when a newer chart version is published. Disable to keep the release pinned to its install-time chart version.",
       "properties": {
+        "pinClusterDeletes": {
+          "type": "boolean",
+          "default": false,
+          "description": "Pin auto-upgrade's delete on namespaces, PersistentVolumes, SCCs and ClusterRoles/bindings to the names this chart renders. Off by default: an upgrade from a chart version that named one of those objects differently would be refused the delete and roll back."
+        },
         "enabled": {
           "type": "boolean",
           "default": true,

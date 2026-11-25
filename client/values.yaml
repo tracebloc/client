@@ -2305,6 +2305,10 @@ autoUpgrade:
   # Default ON: the entire point is that customers freeze on the
   # version they installed. Defaulting off would recreate that exact bug.
   enabled: true
+  # Pin auto-upgrade's `delete` on namespaces, PVs, SCCs and ClusterRoles/bindings
+  # to the names this chart renders. Off by default: an upgrade from a chart that
+  # named one of those objects differently 403s deleting it, and helm then rolls back.
+  pinClusterDeletes: false
   # Hourly at :23. The off-hour minute spreads load across the
   # tracebloc.github.io/client GitHub Pages origin.
   schedule: "23 * * * *"

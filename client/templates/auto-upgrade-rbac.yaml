@@ -1,4 +1,5 @@
 {{- if .Values.autoUpgrade.enabled }}
+{{- $pinDeletes := .Values.autoUpgrade.pinClusterDeletes }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -37,11 +38,11 @@ metadata:
       refuse to let this SA re-apply the chart's OTHER ClusterRoles/bindings
       (rbac.yaml, resource-monitor-rbac.yaml, ...) during an upgrade.
 
-  Residual, documented: `escalate` on clusterroles is powerful, but it is an
-  ACTIVE, auditable step rather than a standing broad grant, and the worst
-  cluster-admin primitives (cluster-wide secret read, pod exec, node access)
-  are simply absent. Adding a NEW cluster-scoped kind in a future chart version
-  requires extending the ClusterRole below in the SAME release (helm applies
+  Residual, documented: `escalate` and `bind` are pinned to the chart's own
+  RBAC names (tracebloc.chartClusterRbacNames), so binding cluster-admin or
+  widening a foreign ClusterRole is refused; rewriting one of the chart's own
+  ClusterRoles is not. `create` cannot be pinned on any kind. Adding a NEW
+  cluster-scoped kind in a future chart version requires extending the ClusterRole below in the SAME release (helm applies
   ClusterRole before most cluster kinds, so an in-release add is picked up on
   the next tick); a genuinely new cluster kind that sorts BEFORE ClusterRole in
   helm's install order (e.g. StorageClass) needs a one-time cluster-admin-
@@ -110,9 +111,20 @@ rules:
   # resource-monitor-rbac.yaml / storage-assertions-check.yaml). CRUD + watch so
   # `helm upgrade --atomic` can create, reconcile, and (on failure) roll them
   # back.
+  # Writes to namespaces, PVs, SCCs and the RBAC kinds are pinned to the names
+  # the chart renders; `create` cannot be pinned (no object to match yet), and
+  # `delete` is pinned only with autoUpgrade.pinClusterDeletes (see values.yaml).
   - apiGroups: [""]
     resources: ["namespaces", "persistentvolumes"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "create"{{ if not $pinDeletes }}, "delete"{{ end }}]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: [{{ include "tracebloc.chartNamespaceNames" . }}]
+    verbs: ["update", "patch"{{ if $pinDeletes }}, "delete"{{ end }}]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    resourceNames: [{{ include "tracebloc.chartPvNames" . }}]
+    verbs: ["update", "patch"{{ if $pinDeletes }}, "delete"{{ end }}]
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -123,16 +135,21 @@ rules:
   # vanilla Kubernetes; an RBAC rule naming a non-existent group is harmless.
   - apiGroups: ["security.openshift.io"]
     resources: ["securitycontextconstraints"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # The chart's own ClusterRoles/ClusterRoleBindings. `escalate` and `bind` are
-  # mandatory: Kubernetes forbids an actor that is not itself cluster-admin from
-  # creating/updating a ClusterRole with permissions it lacks (escalate) or
-  # binding one (bind), so without these an upgrade that re-applies rbac.yaml
-  # would 403.
+    verbs: ["get", "list", "watch", "create"{{ if not $pinDeletes }}, "delete"{{ end }}]
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    resourceNames: [{{ include "tracebloc.chartSccNames" . }}]
+    verbs: ["update", "patch"{{ if $pinDeletes }}, "delete"{{ end }}]
+  # The chart's own ClusterRoles/bindings need `escalate` and `bind` to be
+  # re-applied. Pinned, so this SA cannot bind itself to cluster-admin or widen
+  # a ClusterRole the chart does not own.
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles", "clusterrolebindings"]
-    verbs:
-      ["get", "list", "watch", "create", "update", "patch", "delete", "escalate", "bind"]
+    verbs: ["get", "list", "watch", "create"{{ if not $pinDeletes }}, "delete"{{ end }}]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    resourceNames: [{{ include "tracebloc.chartClusterRbacNames" . }}]
+    verbs: ["update", "patch", "escalate", "bind"{{ if $pinDeletes }}, "delete"{{ end }}]
   # The runner grant's admission policy and binding (rbac.yaml). Unconditional,
   # so the upgrade that turns the grant off can still delete them; every verb
   # but `create`, which RBAC cannot pin, is pinned to their one name.

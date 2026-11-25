@@ -11,15 +11,17 @@ declare -F _tb_trace_off >/dev/null 2>&1 || _tb_trace_off() { :; }
 declare -F _tb_trace_on >/dev/null 2>&1 || _tb_trace_on() { :; }
 
 # Ensure host_data_dir and its logs and mysql dirs exist, the chart's hostPath root on native k3s.
-# Only chmod the container data subdirs; do not make host_data_dir or files like values.yaml world-readable.
+# Only the dirs themselves get a mode, never -R: files below (a dataset, MySQL's datadir)
+# keep theirs. host_data_dir and files like values.yaml stay private.
 _ensure_tracebloc_dirs() {
   mkdir -p "$host_data_dir" "$host_data_dir/logs" "$host_data_dir/mysql"
-  chmod -R 777 "$host_data_dir/logs" "$host_data_dir/mysql" 2>/dev/null || true
+  chmod "$TB_LOGS_DIR_MODE" "$host_data_dir/logs" 2>/dev/null || true
+  chmod "$TB_MYSQL_DIR_MODE" "$host_data_dir/mysql" 2>/dev/null || true
   # the dataset dir goes under HOST_DATASET_DIR (a network mount,
   # bind-mounted at /tracebloc-data) when set, else stays local under host_data_dir.
   local data_base="${HOST_DATASET_DIR:-$host_data_dir}"
   mkdir -p "$data_base/data"
-  chmod -R 777 "$data_base/data" 2>/dev/null || true
+  chmod "$TB_SHARED_DIR_MODE" "$data_base/data" 2>/dev/null || true
 }
 
 # Modes the two SHARED hostPath dirs must end up with. Named constants because the same
@@ -37,6 +39,9 @@ _ensure_tracebloc_dirs() {
 #                 /tmp-style protection costs nothing there.
 TB_SHARED_DIR_MODE="2777"
 TB_LOGS_DIR_MODE="3777"
+# mysql has one writer, uid 999: the chart's init-mysql-data chowns the dir to it, so
+# nobody else needs write. Not 0700: mysql-engine.sh lists it to read the datadir format.
+TB_MYSQL_DIR_MODE="0755"
 
 # Echo the path:mode pairs this release needs, one per line — the same shape the chart's
 # init-writable-data uses, so hostpath-prep.bats can diff the two without re-deriving the
@@ -68,12 +73,10 @@ _ensure_release_dirs() {
   local release="$1"
   [[ -z "$release" ]] && return 0
   local base root; root="$(_hostpath_root)"; base="${root:-$host_data_dir}/$release"
-  # mysql is deliberately left on the flat recursive 777 this function has always used:
-  # it has ONE writer (uid 999) and its own init container in the chart, and its datadir
-  # permissions are the database's business — the same reason it is out of scope for
-  # init-writable-data.
+  # mysql is not in the shared spec: ONE writer (uid 999), chowned by the chart's own
+  # init container. No -R: the datadir's files are the database's business.
   mkdir -p "$base/mysql"
-  chmod -R 777 "$base/mysql" 2>/dev/null || true
+  chmod "$TB_MYSQL_DIR_MODE" "$base/mysql" 2>/dev/null || true
   local entry dir mode
   while IFS= read -r entry; do
     # Split on the LAST colon at both ends (%:* / ##*:), never the first: host_data_dir is

@@ -3,7 +3,7 @@
 apiVersion: security.openshift.io/v1
 kind: SecurityContextConstraints
 metadata:
-  name: tracebloc-resource-monitor-{{ include "tracebloc.fullname" . }}
+  name: {{ include "tracebloc.resourceMonitorClusterName" . }}
   annotations:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
@@ -52,7 +52,7 @@ groups: []
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: tracebloc-resource-monitor-scc-{{ include "tracebloc.fullname" . }}
+  name: {{ include "tracebloc.resourceMonitorSccRbacName" . }}
   annotations:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
@@ -62,13 +62,13 @@ metadata:
 rules:
   - apiGroups: ["security.openshift.io"]
     resources: ["securitycontextconstraints"]
-    resourceNames: ["tracebloc-resource-monitor-{{ include "tracebloc.fullname" . }}"]
+    resourceNames: [{{ include "tracebloc.resourceMonitorClusterName" . | quote }}]
     verbs: ["use"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: tracebloc-resource-monitor-scc-{{ include "tracebloc.fullname" . }}
+  name: {{ include "tracebloc.resourceMonitorSccRbacName" . }}
   annotations:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
@@ -78,7 +78,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: tracebloc-resource-monitor-scc-{{ include "tracebloc.fullname" . }}
+  name: {{ include "tracebloc.resourceMonitorSccRbacName" . }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "tracebloc.resourceMonitorName" . }}

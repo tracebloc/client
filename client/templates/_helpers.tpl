@@ -715,6 +715,58 @@ read it here, so the monitor can only ever get the plugin's class. Nil-safe for
 {{ include "tracebloc.fullname" . }}-auto-upgrade
 {{- end }}
 
+{{/* The resource-monitor's cluster-scoped objects: its ClusterRole, binding and SCC. */}}
+{{- define "tracebloc.resourceMonitorClusterName" -}}
+tracebloc-resource-monitor-{{ include "tracebloc.fullname" . }}
+{{- end }}
+
+{{/* The ClusterRole and binding that let the resource-monitor use its SCC. */}}
+{{- define "tracebloc.resourceMonitorSccRbacName" -}}
+tracebloc-resource-monitor-scc-{{ include "tracebloc.fullname" . }}
+{{- end }}
+
+{{/* The ClusterRole and binding that let the edge Collector use its SCC. */}}
+{{- define "tracebloc.telemetryCollectorSccRbacName" -}}
+{{ include "tracebloc.telemetryCollectorName" . }}-scc
+{{- end }}
+
+{{/*
+  Every cluster-scoped RBAC name a `helm upgrade` of this chart writes, rendered
+  or not, one quoted YAML flow item per entry. auto-upgrade's ClusterRole pins its
+  write verbs to these; a new chart ClusterRole or binding must be added here.
+*/}}
+{{- define "tracebloc.chartClusterRbacNames" -}}
+{{- $names := list
+      (include "tracebloc.autoUpgradeName" .)
+      (printf "%s-scoped" (include "tracebloc.autoUpgradeName" .))
+      (include "tracebloc.rbacName" .)
+      (include "tracebloc.egressGateName" .)
+      (include "tracebloc.appleGpuRunnerRbacName" .)
+      (include "tracebloc.resourceMonitorClusterName" .)
+      (include "tracebloc.resourceMonitorSccRbacName" .)
+      (include "tracebloc.telemetryCollectorSccRbacName" .) -}}
+{{- range $i, $n := $names }}{{ if $i }}, {{ end }}{{ $n | quote }}{{ end -}}
+{{- end }}
+
+{{/* The cluster-scoped storage, namespace and SCC names the chart writes, in the same form. */}}
+{{- define "tracebloc.chartPvNames" -}}
+{{- $names := list
+      (include "tracebloc.clientDataPvName" .)
+      (include "tracebloc.clientLogsPvName" .)
+      (include "tracebloc.mysqlPvName" .)
+      (include "tracebloc.egressRecordPvName" .)
+      (include "tracebloc.trainingResumePvName" .) -}}
+{{- range $i, $n := $names }}{{ if $i }}, {{ end }}{{ $n | quote }}{{ end -}}
+{{- end }}
+
+{{- define "tracebloc.chartNamespaceNames" -}}
+{{- .Release.Namespace | quote }}, {{ .Values.nodeAgents.namespace.name | quote -}}
+{{- end }}
+
+{{- define "tracebloc.chartSccNames" -}}
+{{- include "tracebloc.resourceMonitorClusterName" . | quote }}, {{ include "tracebloc.telemetryCollectorName" . | quote -}}
+{{- end }}
+
 {{/*
   Release-scoped name shared by the image-refresh CronJob, ServiceAccount,
   Role, RoleBinding, and ConfigMap. Same lockstep reasoning as

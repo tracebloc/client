@@ -51,16 +51,10 @@
   the API server cannot name-match an object that does not exist yet, `get`/`patch`
   pinned to this one Secret — so leaving it rendered widens nothing.
 
-  THE MISSING VERB IS IN BOTH OF jobs-manager's SECRETS RULES, not just the
-  cluster-wide one. In rbac.yaml, both the ClusterRole (`clusterScope: true`) and
-  the namespaced Role (the `clusterScope: false` branch) carry a
-  `resources: ["configmaps", "secrets"]` rule whose verbs are `["create", "get"]`
-  with no `patch`. So the create succeeds and every REFRESH 403s on either install
-  shape — an earlier version of this comment said "cluster-wide rule" in the
-  singular and would have sent someone reading the `clusterScope: false` path
-  looking for a difference that is not there. A Role in the node-agents namespace
-  grants `patch` there regardless of which branch renders, which is why the fix is
-  the same for both.
+  THE MISSING VERB IS IN jobs-manager's OWN SECRETS RULE TOO. rbac.yaml's
+  tracebloc.jobsManagerNamespacedRules (a release-namespace Role on either
+  clusterScope) grants `create`/`get` with no `patch`, and only in the release
+  namespace, so this Role is what grants `patch` here on either install shape.
 
   Identified by branch and rule rather than by line number on purpose: cross-file
   line numbers in a comment drift the first time rbac.yaml gains a rule, and the
