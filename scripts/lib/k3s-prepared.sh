@@ -74,7 +74,7 @@ _native_k3s_prepared_reason() {
     gone:*)         line="This machine was prepared for you, but k3s has been deleted since." ;;
     stopped:*)      line="This machine was prepared for you, but k3s isn't running on it." ;;
     unreadable:*)   line="This machine was prepared for you, but you can't read ${TB_K3S_KUBECONFIG_PATH}." ;;
-    relogin:*)      line="This machine was prepared for you, but this login started before you joined the ${TB_K3S_PREPARED_GROUP} group."
+    relogin:*)      line="This machine was prepared for you, but this session started before you joined the ${TB_K3S_PREPARED_GROUP} group."
                     remedy="Log out and back in, then run the installer again:"; cmd="" ;;
     *)              return 0 ;;
   esac

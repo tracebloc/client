@@ -357,15 +357,25 @@ _nvidia_toolkit_repo_files_readable() {
 # An empty pin, a key gpg cannot read and a second key all refuse: fail closed.
 # --print downloads nothing, so it checks nothing: the writes it feeds are listed.
 _nvidia_toolkit_key_fetch() {
-  local dest="$1" fprs
+  local dest="$1" fprs="" gpg_home gpg_out gpg_rc=0 gpg_said
   if tb_root_planning; then return 0; fi
   curl_secure -fsSL --max-time 30 "https://nvidia.github.io/libnvidia-container/gpgkey" -o "$dest" \
     || error "Couldn't download the NVIDIA container toolkit's repository key. Check this machine's access to nvidia.github.io, then re-run."
-  # The fingerprint of each primary key: the fpr line right after a pub line.
-  fprs="$(gpg --batch --with-colons --import-options show-only --import "$dest" 2>/dev/null \
-    | awk -F: '/^pub:/{p=1; next} /^fpr:/{ if (p) print $10; p=0 }')" || fprs=""
+  # gpg reads the key in a homedir of its own: it stops where it cannot create ~/.gnupg
+  # (HOME at a missing directory, or a user whose home is missing).
+  gpg_home="$(mktemp -d)" || error "Couldn't make a temporary directory to read the NVIDIA container toolkit's repository key in."
+  gpg_out="$(gpg --homedir "$gpg_home" --batch --with-colons --import-options show-only --import "$dest" 2>"${gpg_home}/stderr")" || gpg_rc=$?
+  # The fingerprint of each primary key: the fpr line right after a pub line. The listing
+  # decides, not gpg's exit status: gpg exits 2 on a warning after a valid listing.
+  fprs="$(awk -F: '/^pub:/{p=1; next} /^fpr:/{ if (p) print $10; p=0 }' <<<"$gpg_out")" || fprs=""
+  # gpg's own words, its note that it made the new homedir's keybox left out.
+  gpg_said="$(awk '!/keybox .* created$/ { printf "%s%s", s, $0; s = " " }' "${gpg_home}/stderr" 2>/dev/null)" || gpg_said=""
+  rm -rf "$gpg_home"
   if [[ -z "$TB_NVIDIA_TOOLKIT_SIGNER_FPR" || "$fprs" != "$TB_NVIDIA_TOOLKIT_SIGNER_FPR" ]]; then
     rm -f "$dest"
+    if [[ -z "$fprs" && "$gpg_rc" -ne 0 ]]; then
+      error "gpg couldn't read the NVIDIA container toolkit's repository key (exit ${gpg_rc}), so it was not installed. gpg said: ${gpg_said:-nothing}"
+    fi
     error "The NVIDIA container toolkit's repository key is not the pinned key (want ${TB_NVIDIA_TOOLKIT_SIGNER_FPR:-none}, got ${fprs:-no readable key}), so it was not installed. Something between this machine and nvidia.github.io changed it; re-run on a network that does not rewrite downloads."
   fi
 }
