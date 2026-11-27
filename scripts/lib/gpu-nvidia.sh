@@ -320,9 +320,17 @@ _gpu_stack_signature() {
 TB_NVIDIA_TOOLKIT_KEYRING="/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"
 TB_NVIDIA_TOOLKIT_APT_LIST="/etc/apt/sources.list.d/nvidia-container-toolkit.list"
 TB_NVIDIA_TOOLKIT_YUM_REPO="/etc/yum.repos.d/nvidia-container-toolkit.repo"
+TB_NVIDIA_TOOLKIT_YUM_KEY="/etc/pki/rpm-gpg/RPM-GPG-KEY-nvidia-container-toolkit"
+
+# The key NVIDIA signs the toolkit's repository with ("NVIDIA CORPORATION (Open Source
+# Projects) <cudatools@nvidia.com>"), by fingerprint, and where the repository is. The
+# served key is trusted only when it is this one key; the repository files are written
+# here, never taken from the server, so they name only this key and this URL.
+TB_NVIDIA_TOOLKIT_SIGNER_FPR="C95B321B61E88C1809C4F759DDCAE044F796ECB0"
+TB_NVIDIA_TOOLKIT_REPO="https://nvidia.github.io/libnvidia-container/stable"
 
 # _nvidia_toolkit_repo_files_readable [FILE...] -- every FILE that exists and is not
-# readable by all is set to 0644; with no FILE, the toolkit's three repository files.
+# readable by all is set to 0644; with no FILE, the toolkit's four repository files.
 # The core runs under `umask 077` (settings.sh), which `sudo gpg -o` and
 # `sudo tee` inherit, so these files came out 0600. apt reads a source list and checks
 # its keyring as the unprivileged _apt user: with a 0600 keyring it refused the
@@ -334,7 +342,7 @@ TB_NVIDIA_TOOLKIT_YUM_REPO="/etc/yum.repos.d/nvidia-container-toolkit.repo"
 _nvidia_toolkit_repo_files_readable() {
   local f
   if [[ $# -eq 0 ]]; then
-    set -- "$TB_NVIDIA_TOOLKIT_KEYRING" "$TB_NVIDIA_TOOLKIT_APT_LIST" "$TB_NVIDIA_TOOLKIT_YUM_REPO"
+    set -- "$TB_NVIDIA_TOOLKIT_KEYRING" "$TB_NVIDIA_TOOLKIT_APT_LIST" "$TB_NVIDIA_TOOLKIT_YUM_REPO" "$TB_NVIDIA_TOOLKIT_YUM_KEY"
   fi
   for f in "$@"; do
     [[ -e "$f" ]] || continue
@@ -344,11 +352,22 @@ _nvidia_toolkit_repo_files_readable() {
   return 0
 }
 
-# _nvidia_toolkit_repo_fetch URL -- the toolkit's repository file from URL, on stdout.
-# --print downloads nothing, so it prints nothing there: the write it feeds is listed.
-_nvidia_toolkit_repo_fetch() {
+# _nvidia_toolkit_key_fetch DEST -- NVIDIA's repository key into DEST, refused (error)
+# unless it holds exactly one primary key and that key is TB_NVIDIA_TOOLKIT_SIGNER_FPR.
+# An empty pin, a key gpg cannot read and a second key all refuse: fail closed.
+# --print downloads nothing, so it checks nothing: the writes it feeds are listed.
+_nvidia_toolkit_key_fetch() {
+  local dest="$1" fprs
   if tb_root_planning; then return 0; fi
-  curl_secure -fsSL --max-time 30 "$1"
+  curl_secure -fsSL --max-time 30 "https://nvidia.github.io/libnvidia-container/gpgkey" -o "$dest" \
+    || error "Couldn't download the NVIDIA container toolkit's repository key. Check this machine's access to nvidia.github.io, then re-run."
+  # The fingerprint of each primary key: the fpr line right after a pub line.
+  fprs="$(gpg --batch --with-colons --import-options show-only --import "$dest" 2>/dev/null \
+    | awk -F: '/^pub:/{p=1; next} /^fpr:/{ if (p) print $10; p=0 }')" || fprs=""
+  if [[ -z "$TB_NVIDIA_TOOLKIT_SIGNER_FPR" || "$fprs" != "$TB_NVIDIA_TOOLKIT_SIGNER_FPR" ]]; then
+    rm -f "$dest"
+    error "The NVIDIA container toolkit's repository key is not the pinned key (want ${TB_NVIDIA_TOOLKIT_SIGNER_FPR:-none}, got ${fprs:-no readable key}), so it was not installed. Something between this machine and nvidia.github.io changed it; re-run on a network that does not rewrite downloads."
+  fi
 }
 
 # _nvidia_container_toolkit_package -- nvidia-container-toolkit from NVIDIA's
@@ -366,28 +385,11 @@ _nvidia_container_toolkit_package() {
     if has apt-get; then
       local nvidia_gpg_tmp
       nvidia_gpg_tmp="$(mktemp)"
-      # --print downloads nothing (prepare-host's plan): it lists the writes the
-      # downloads feed.
-      if ! tb_root_planning; then
-        curl_secure -fsSL --max-time 30 https://nvidia.github.io/libnvidia-container/gpgkey \
-          -o "$nvidia_gpg_tmp"
-        local nvidia_fp
-        nvidia_fp=$(gpg --with-colons --import-options show-only --import "$nvidia_gpg_tmp" 2>/dev/null \
-          | awk -F: '/^fpr:/{print $10; exit}')
-        if [[ -n "$nvidia_fp" ]]; then
-          log "NVIDIA GPG key fingerprint: $nvidia_fp"
-        else
-          log "Could not extract GPG key fingerprint — verify manually after install."
-        fi
-      fi
+      _nvidia_toolkit_key_fetch "$nvidia_gpg_tmp"
       tb_root gpg --batch --yes --dearmor -o "$TB_NVIDIA_TOOLKIT_KEYRING" "$nvidia_gpg_tmp"
       rm -f "$nvidia_gpg_tmp"
-      # --max-time 30 on all three fetches above/below: each is a few KB of key or
-      # repo metadata, so a longer wait only means a hung mirror. They pipe into
-      # sed/tee, so they can't be retry-wrapped — retry() reports attempts on
-      # stdout, which here IS the file content being written.
-      _nvidia_toolkit_repo_fetch https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-        | sed "s#deb https://#deb [signed-by=${TB_NVIDIA_TOOLKIT_KEYRING}] https://#g" \
+      # Written here, not fetched: `$(ARCH)` is apt's own variable.
+      printf 'deb [signed-by=%s] %s/deb/$(ARCH) /\n' "$TB_NVIDIA_TOOLKIT_KEYRING" "$TB_NVIDIA_TOOLKIT_REPO" \
         | tb_root tee "$TB_NVIDIA_TOOLKIT_APT_LIST" >/dev/null
       # 0644 before apt reads them: _apt must read both.
       _nvidia_toolkit_repo_files_readable "$TB_NVIDIA_TOOLKIT_KEYRING" "$TB_NVIDIA_TOOLKIT_APT_LIST"
@@ -395,9 +397,18 @@ _nvidia_container_toolkit_package() {
       $PM_INSTALL nvidia-container-toolkit
 
     elif has dnf || has yum; then
-      _nvidia_toolkit_repo_fetch https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo \
+      # The verified key is the repository's only gpgkey, from a file; repo_gpgcheck checks
+      # the signed metadata, which carries every package's checksum (NVIDIA's own settings).
+      local nvidia_key_tmp
+      nvidia_key_tmp="$(mktemp)"
+      _nvidia_toolkit_key_fetch "$nvidia_key_tmp"
+      tb_root mkdir -p "${TB_NVIDIA_TOOLKIT_YUM_KEY%/*}"
+      tb_root cp "$nvidia_key_tmp" "$TB_NVIDIA_TOOLKIT_YUM_KEY"
+      rm -f "$nvidia_key_tmp"
+      printf '[nvidia-container-toolkit]\nname=nvidia-container-toolkit\nbaseurl=%s/rpm/$basearch\nrepo_gpgcheck=1\ngpgcheck=0\nenabled=1\ngpgkey=file://%s\n' \
+        "$TB_NVIDIA_TOOLKIT_REPO" "$TB_NVIDIA_TOOLKIT_YUM_KEY" \
         | tb_root tee "$TB_NVIDIA_TOOLKIT_YUM_REPO" >/dev/null
-      _nvidia_toolkit_repo_files_readable "$TB_NVIDIA_TOOLKIT_YUM_REPO"
+      _nvidia_toolkit_repo_files_readable "$TB_NVIDIA_TOOLKIT_YUM_KEY" "$TB_NVIDIA_TOOLKIT_YUM_REPO"
       has dnf && tb_root dnf install -y nvidia-container-toolkit || tb_root yum install -y nvidia-container-toolkit
 
     elif has pacman; then

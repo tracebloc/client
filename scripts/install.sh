@@ -269,7 +269,7 @@ export TRACEBLOC_LAUNCH_PATH="${TRACEBLOC_LAUNCH_PATH:-${PATH:-}}"
 # writable, and a fresh curl|bash shell doesn't have that on PATH — so mirror
 # provision_client's prepend before probing, or a healthy ~/.local/bin install
 # is missed and forces a needless full re-download.
-export PATH="${HOME}/.local/bin:${PATH}"
+export PATH="${HOME:+${HOME}/.local/bin:}${PATH}"
 
 if [[ "$_tb_bail_ok" == "1" ]] && command -v tracebloc >/dev/null 2>&1; then
   printf '\n'

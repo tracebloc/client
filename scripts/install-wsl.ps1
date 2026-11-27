@@ -617,8 +617,12 @@ function Assert-HostProxy {
   }
 }
 
-# The tracebloc CLI's own Windows installer.
-$TRACEBLOC_CLI_INSTALL_URL = "https://github.com/tracebloc/cli/releases/latest/download/install.ps1"
+# The tracebloc CLI's own Windows installer, at a pinned release, and its sha256: a
+# download with other bytes is not run (Install-HostCli). Stamped from
+# scripts/spec/facts.env (CLI_VERSION, CLI_INSTALL_PS1_SHA256) by tooling/check-facts.sh --write.
+$TRACEBLOC_CLI_VERSION = "v0.14.31"
+$TRACEBLOC_CLI_INSTALL_SHA256 = "506cb79619880e12b30f66deebd3b5be89f0ef827c98e8c4e5bc6f542e71ae35"
+$TRACEBLOC_CLI_INSTALL_URL = "https://github.com/tracebloc/cli/releases/download/$TRACEBLOC_CLI_VERSION/install.ps1"
 
 # The cluster run's handover (2c): the variable that names the file, the file's
 # name in its folder, the five lines the core writes (lib/host.sh's

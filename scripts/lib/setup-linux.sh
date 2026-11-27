@@ -178,9 +178,15 @@ _set_tools_target() {
 # macOS path sets OS_DL=darwin so the SAME pinned/verified fetch honors the pins there too.
 _kubectl_url() { printf 'https://dl.k8s.io/release/%s/bin/%s/%s/kubectl' "$1" "${OS_DL:-linux}" "$2"; }
 
+# On a Mac, kubectl is held to settings.sh's pin (darwin/arm64 at the k3s pin's release),
+# never to a checksum from the same host; a Mac kubectl with no pin is refused unfetched.
 _fetch_kubectl() {
-  local ver="$1" arch="$2" url
+  local ver="$1" arch="$2" url want=""
   url="$(_kubectl_url "$ver" "$arch")"
+  if [[ "${OS_DL:-linux}" == darwin ]]; then
+    [[ "$arch" == arm64 && "$ver" == "${TB_K3S_PIN_K8S_VERSION%%-k3s*}" ]] && want="${TB_KUBECTL_SHA256_DARWIN_ARM64:-}"
+    [[ -n "$want" ]] || error "This installer has no pinned checksum for kubectl ${ver} (macOS, ${arch}), so it cannot verify the download. Use the installer's own Kubernetes version and re-run."
+  fi
   local tmpdir
   tmpdir="$(mktemp -d)"
   # A stall floor, not a hard --max-time: kubectl is a ~50 MB binary, and a hard
@@ -188,12 +194,15 @@ _fetch_kubectl() {
   # knows not to add its default deadline here (Bugbot).
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "$url" -o "${tmpdir}/kubectl"
-  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    "${url}.sha256" -o "${tmpdir}/kubectl.sha256"
+  if [[ -z "$want" ]]; then
+    retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+      "${url}.sha256" -o "${tmpdir}/kubectl.sha256"
+    want="$(cat "${tmpdir}/kubectl.sha256")"
+  fi
   # Catch a truncated/blocked transfer as a TRANSFER failure before the checksum
   # misreports it as tampering. kubectl is ~50 MB; 20 MB is a safe floor.
   _assert_download_size "${tmpdir}/kubectl" 20000000 "kubectl" "$tmpdir"
-  _verify_sha256 "$(cat "${tmpdir}/kubectl.sha256")" "${tmpdir}/kubectl" \
+  _verify_sha256 "$want" "${tmpdir}/kubectl" \
     || { rm -rf "$tmpdir"; error "System tool checksum verification failed"; }
   chmod +x "${tmpdir}/kubectl"
   # Tier 0 → no sudo (TRACEBLOC_TOOLS_SUDO empty, TRACEBLOC_TOOLS_DIR under $HOME).

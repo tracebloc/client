@@ -289,6 +289,10 @@ TB_K3S_INSTALL_SH_SHA256="46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a716
 # _native_k3s_image_ref). No TRACEBLOC_* override, for the same reason.
 # shellcheck disable=SC2034  # read by the macOS node from 2.1 part 3b
 TB_K3S_IMAGE_ARM64_DIGEST="sha256:6d654de9f73e36a5a7879c051349a6f43a7941f3552a2f2a00fa9087bd546b85"
+# The macOS node's kubectl at that release (facts.env KUBECTL_SHA256_DARWIN_ARM64), which
+# setup-linux.sh::_fetch_kubectl holds the download to. No TRACEBLOC_* override, likewise.
+# shellcheck disable=SC2034  # consumed cross-file by setup-linux.sh
+TB_KUBECTL_SHA256_DARWIN_ARM64="1cf735c3d35ccfec28d0618784cb06a4614d2c42aade28b6be0eab76a2ffb623"
 # Apple's `container` runtime for the macOS node: the release, the
 # package's digest and the Team ID that signs it (facts.env APPLE_CONTAINER_*, stamped
 # by check-facts.sh --write). Stamped here, not in mac-container.sh, for the reason the

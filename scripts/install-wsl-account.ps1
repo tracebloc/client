@@ -197,6 +197,19 @@ function Clear-RetiredToolPath {
   }
 }
 
+# The child's command: download the installer to a file, run it only when its sha256 is the
+# pinned $TRACEBLOC_CLI_INSTALL_SHA256 (install-wsl.ps1); an empty pin or other bytes exit 97 unrun (the installer's own exit cannot be told from it, so 97 is the pin's alone).
+function Get-CliInstallCommand {
+  $want = "$TRACEBLOC_CLI_INSTALL_SHA256".ToLower()
+  return "try { `$f = Join-Path ([IO.Path]::GetTempPath()) ('tracebloc-cli-install-' + [guid]::NewGuid().ToString('N') + '.ps1'); " +
+    "Invoke-WebRequest -UseBasicParsing -Uri '$TRACEBLOC_CLI_INSTALL_URL' -OutFile `$f -ErrorAction Stop; " +
+    "`$got = (Get-FileHash -Algorithm SHA256 -LiteralPath `$f -ErrorAction Stop).Hash.ToLower(); " +
+    "`$s = [IO.File]::ReadAllText(`$f); Remove-Item -LiteralPath `$f -Force -ErrorAction SilentlyContinue } " +
+    "catch { [Console]::Error.WriteLine('The tracebloc CLI installer could not be downloaded from $TRACEBLOC_CLI_INSTALL_URL (' + `$_.Exception.Message + ')'); exit 2 }; " +
+    "if (-not '$want' -or `$got -ne '$want') { [Console]::Error.WriteLine('The tracebloc CLI installer from $TRACEBLOC_CLI_INSTALL_URL does not match its pinned sha256 ($want), so it was not run. Something between this machine and GitHub changed the file.'); exit 97 }; " +
+    "Invoke-Expression `$s"
+}
+
 # Installs the tracebloc CLI for the user running this bootstrap: the CLI's own
 # installer in a child Windows PowerShell (its `exit` closes nothing here), started
 # by Start-TraceblocCliInstaller and given 10 minutes. For this user only: the
@@ -211,15 +224,17 @@ function Install-HostCli {
   Show-Live 'Installing the tracebloc CLI...'
   $out = Join-Path ([System.IO.Path]::GetTempPath()) ("tracebloc-cli-install-" + [guid]::NewGuid().ToString('N') + ".log")
   $err = "$out.err"
-  $why = $null
+  $why = $null; $pinFailed = $false
   try {
-    $p = Start-TraceblocCliInstaller -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm '$TRACEBLOC_CLI_INSTALL_URL' | iex") -OutFile $out -ErrFile $err
+    $p = Start-TraceblocCliInstaller -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", (Get-CliInstallCommand)) -OutFile $out -ErrFile $err
     $null = $p.Handle
     if ($p.WaitForExit($TimeoutSec * 1000)) {
       # Only the overload with no deadline waits for the redirected streams, and
       # until they drain ExitCode can read $null.
       try { $p.WaitForExit() } catch { }
-      if ($p.ExitCode -ne 0) { $why = "its installer exited $(Format-ExitCode $p.ExitCode)" }
+      if ($p.ExitCode -eq 97) {
+        $pinFailed = $true; $why = "the installer it downloaded does not match its pinned sha256, so it was not run"
+      } elseif ($p.ExitCode -ne 0) { $why = "its installer exited $(Format-ExitCode $p.ExitCode)" }
     } else {
       try { $p.Kill() } catch { }
       try { $null = $p.WaitForExit(30000) } catch { }
@@ -251,6 +266,14 @@ function Install-HostCli {
   if ($cli) {
     Warn "The tracebloc CLI could not be updated: $why. Using the one already here: $cli"
     return $cli
+  }
+  # A file that failed its pin is never offered to `irm | iex`, which runs it unchecked.
+  if ($pinFailed) {
+    if ($Optional) {
+      Warn "The tracebloc CLI could not be installed: $why. The credentials you supplied don't need it. Something between this machine and GitHub changed the file: try again later, on a network that does not rewrite downloads."
+      return $null
+    }
+    Stop-Setup -What "Couldn't install the tracebloc CLI" -Next 'Something between this machine and GitHub changed the installer file. Run the installer again on a network that does not rewrite downloads:' -Reason "The tracebloc CLI could not be installed: $why. It is what registers this machine. Something between this machine and GitHub changed the file: run this installer again on a network that does not rewrite downloads."
   }
   if ($Optional) {
     Warn "The tracebloc CLI could not be installed: $why. The credentials you supplied don't need it. To use tracebloc from this machine, install it later in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"

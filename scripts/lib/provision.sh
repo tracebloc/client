@@ -494,7 +494,7 @@ provision_client() {
   # Browser-auth path. The CLI (installed in step b) is REQUIRED here — it mints
   # the credential — so a missing CLI is FATAL. It may live in ~/.local/bin (not
   # yet on this process's PATH); make it resolvable before the login/create calls.
-  export PATH="${HOME}/.local/bin:${PATH}"
+  export PATH="${HOME:+${HOME}/.local/bin:}${PATH}"
   has tracebloc || error "The tracebloc CLI is required to provision this machine but isn't available. Install it (curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh), open a new shell, and re-run."
 
   # The browser-auth mint path needs a CLI new enough to ship `login` + `client create`.

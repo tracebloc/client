@@ -25,11 +25,16 @@
 #  the platform's floor stops the install.
 # =============================================================================
 
-TRACEBLOC_CLI_INSTALL_URL="https://github.com/tracebloc/cli/releases/latest/download/install.sh"
+# The CLI release whose installer this runs, and that installer's sha256: a download
+# with other bytes is not run. Stamped from scripts/spec/facts.env (CLI_VERSION,
+# CLI_INSTALL_SH_SHA256) by tooling/check-facts.sh --write; this file is in the signed manifest.
+TB_CLI_PIN_VERSION="v0.14.31"
+TB_CLI_INSTALL_SH_SHA256="dd12f0d54869df297414c08465dd3560aaa744a5780fd75755ddba5f3fedc4f6"
+TRACEBLOC_CLI_INSTALL_URL="https://github.com/tracebloc/cli/releases/download/${TB_CLI_PIN_VERSION}/install.sh"
 
 # Where the CLI's own installer drops the binary when /usr/local/bin isn't
 # writable (see cli's install.sh) — the dir we tell the user to put on PATH.
-TRACEBLOC_CLI_FALLBACK_BIN="${HOME}/.local/bin"
+TRACEBLOC_CLI_FALLBACK_BIN="${HOME:-\$HOME}/.local/bin"
 
 # The absolute path of the CLI this run installed, as its installer reported it; empty
 # until install_tracebloc_cli records one. Set here, not inherited: a path from the
@@ -47,10 +52,9 @@ TB_CLI_SIGNED_IN=""
 # be on THIS installer's PATH only via the ~/.local/bin prepend or a just-edited
 # rc, which the shell the user returns to hasn't read.
 _cli_at_system_dir() {
-  case "${1:-}" in
-    "" | "${HOME%/}"/*) return 1 ;;
-    *) return 0 ;;
-  esac
+  [ -n "${1:-}" ] || return 1
+  [ -z "${HOME:-}" ] || case "$1" in "${HOME%/}"/*) return 1 ;; esac
+  return 0
 }
 
 # _cli_on_launch_path BIN -> 0 when BIN's directory was on the PATH of the shell
@@ -113,16 +117,16 @@ _cli_reported_path() {
 _cli_rc_for_shell() {
   local sh_name; sh_name="$(basename "${SHELL:-/bin/sh}")"
   case "$sh_name" in
-    zsh)  echo "${HOME}/.zshrc" ;;
+    zsh)  echo "${HOME:-\$HOME}/.zshrc" ;;
     bash)
       if [[ "${OS:-$(uname -s)}" == "Darwin" ]]; then
-        echo "${HOME}/.bash_profile"
+        echo "${HOME:-\$HOME}/.bash_profile"
       else
-        echo "${HOME}/.bashrc"
+        echo "${HOME:-\$HOME}/.bashrc"
       fi
       ;;
-    fish) echo "${HOME}/.config/fish/config.fish" ;;
-    *)    echo "${HOME}/.profile" ;;
+    fish) echo "${HOME:-\$HOME}/.config/fish/config.fish" ;;
+    *)    echo "${HOME:-\$HOME}/.profile" ;;
   esac
 }
 
@@ -310,6 +314,13 @@ install_tracebloc_cli() {
   if ! _cli_download_installer "$installer"; then
     warn "Couldn't download the tracebloc CLI installer — your secure environment is set up fine."
     hint "Install it later:  curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh"
+    rm -f "$installer"
+    return 0
+  fi
+  # Fail closed: an empty pin or other bytes than the pinned installer's are not run.
+  if ! _verify_sha256 "$TB_CLI_INSTALL_SH_SHA256" "$installer"; then
+    warn "The tracebloc CLI installer downloaded from ${TRACEBLOC_CLI_INSTALL_URL} does not match its pinned sha256 (${TB_CLI_INSTALL_SH_SHA256:-none}), so it was not run — your secure environment is set up fine."
+    hint "Something between this machine and GitHub changed the file. Re-run on a network that does not rewrite downloads."
     rm -f "$installer"
     return 0
   fi
