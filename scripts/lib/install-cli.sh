@@ -343,11 +343,22 @@ install_tracebloc_cli() {
   # It inherits TRACEBLOC_COSIGN, the pinned cosign the shim or install.sh already
   # checked, and reuses it on the same checksum check instead of downloading it
   # again (cli install.sh ensure_cosign): keep it in the environment.
-  ( umask 022; sh "$installer" ) >> "${_cli_out:-${LOG_FILE:-/dev/null}}" 2>&1 &
-  # Set and unset, not a prefix assignment: a prefix on a function can outlive the call.
-  _TB_SPIN_QUIET=1
-  spin "$!" "Installing the tracebloc CLI..." || _cli_rc=$?
-  unset _TB_SPIN_QUIET
+  # The installer resolves its release over the network, so one GitHub 5xx fails the whole
+  # run: it is retried like the download, TRACEBLOC_CLI_DL_ATTEMPTS tries, doubling pause.
+  local _run_try=1 _run_max="${TRACEBLOC_CLI_DL_ATTEMPTS:-3}" _run_delay="${TRACEBLOC_CLI_DL_DELAY_S:-2}"
+  while true; do
+    _cli_rc=0
+    ( umask 022; sh "$installer" ) >> "${_cli_out:-${LOG_FILE:-/dev/null}}" 2>&1 &
+    # Set and unset, not a prefix assignment: a prefix on a function can outlive the call.
+    _TB_SPIN_QUIET=1
+    spin "$!" "Installing the tracebloc CLI..." || _cli_rc=$?
+    unset _TB_SPIN_QUIET
+    (( _cli_rc == 0 || _run_try >= _run_max )) && break
+    warn "The tracebloc CLI installer failed (attempt ${_run_try}/${_run_max}); retrying in ${_run_delay}s."
+    sleep "$_run_delay"
+    _run_delay=$((_run_delay * 2))
+    _run_try=$((_run_try + 1))
+  done
   if [[ -n "$_cli_out" ]]; then cat "$_cli_out" >> "${LOG_FILE:-/dev/null}" 2>/dev/null || true; fi
   if [[ "$_cli_rc" -eq 0 ]]; then
     # Recorded where the CLI installer says it put the binary: /usr/local/bin,
